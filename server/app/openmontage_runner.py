@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -354,7 +355,7 @@ def compose_final_video(project_dir: str | Path, storyboard: dict[str, Any]) -> 
         encoding="utf-8",
     )
     cmd = [
-        "ffmpeg",
+        _resolve_ffmpeg_executable(),
         "-y",
         "-f",
         "concat",
@@ -537,6 +538,28 @@ def _narrative_role(index: int, total: int) -> str:
 
 def _ffmpeg_concat_path(path: Path) -> str:
     return str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
+
+
+def _resolve_ffmpeg_executable() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+
+    bundled = _remotion_compositor_dir() / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    if bundled.exists():
+        return str(bundled)
+
+    return "ffmpeg"
+
+
+def _remotion_compositor_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[2]
+        / "remotion-composer"
+        / "node_modules"
+        / "@remotion"
+        / "compositor-win32-x64-msvc"
+    )
 
 
 @contextmanager

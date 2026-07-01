@@ -275,6 +275,17 @@ class SyapiVideo(BaseTool):
         while time.time() < deadline:
             poll_url = f"{self._base_url()}/v1/videos/{task_id}"
             response = requests.get(poll_url, headers=headers, timeout=30)
+            if getattr(response, "ok", None) is False and int(getattr(response, "status_code", 0) or 0) >= 500:
+                last_data = {
+                    "transient_http_error": self._http_error(
+                        method="GET",
+                        url=poll_url,
+                        response=response,
+                        model=str(inputs.get("model_variant", "omni_flash-10s")),
+                    )
+                }
+                time.sleep(interval)
+                continue
             self._raise_for_status_with_context(
                 response,
                 method="GET",

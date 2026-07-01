@@ -140,6 +140,48 @@ def test_syapi_video_polls_and_downloads_video(monkeypatch, tmp_path):
     assert result.data["task_id"] == "task_vid"
 
 
+def test_syapi_video_retries_transient_poll_http_errors(monkeypatch, tmp_path):
+    monkeypatch.setenv("SYAPI_API_KEY", "test-key")
+    output_path = tmp_path / "clip-after-500.mp4"
+    calls = {"get": 0}
+
+    def fake_post(url, **kwargs):
+        return FakeResponse(json_data={"id": "task_retry", "status": "queued"})
+
+    def fake_get(url, **kwargs):
+        if url == "https://u.syapi.cn/v1/videos/task_retry":
+            calls["get"] += 1
+            if calls["get"] == 1:
+                return FakeResponse(ok=False, status_code=500, text="temporary gateway error")
+            return FakeResponse(
+                json_data={
+                    "id": "task_retry",
+                    "status": "completed",
+                    "video_url": "https://cdn.example/retry.mp4",
+                }
+            )
+        if url == "https://cdn.example/retry.mp4":
+            return FakeResponse(content=b"retry-mp4-bytes")
+        raise AssertionError(url)
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr("requests.get", fake_get)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    result = SyapiVideo().execute(
+        {
+            "prompt": "short comedic family drama clip",
+            "model_variant": "omni_flash-10s",
+            "size": "720x1280",
+            "output_path": str(output_path),
+        }
+    )
+
+    assert result.success
+    assert calls["get"] == 2
+    assert output_path.read_bytes() == b"retry-mp4-bytes"
+
+
 def test_syapi_video_reports_failed_task(monkeypatch, tmp_path):
     monkeypatch.setenv("SYAPI_API_KEY", "test-key")
 

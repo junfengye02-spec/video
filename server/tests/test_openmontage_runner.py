@@ -1,4 +1,5 @@
 import json
+import os
 
 from server.app.openmontage_runner import (
     build_pipeline_inputs,
@@ -54,6 +55,41 @@ def test_compose_final_video_uses_generated_shot_outputs(tmp_path, monkeypatch):
 
     assert final_path.name == "final.mp4"
     assert final_path.exists()
+
+
+def test_compose_final_video_uses_remotion_bundled_ffmpeg_when_path_missing(tmp_path, monkeypatch):
+    from server.app import openmontage_runner as runner
+
+    bundled_dir = tmp_path / "remotion-ffmpeg"
+    bundled_dir.mkdir()
+    bundled_ffmpeg = bundled_dir / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    bundled_ffmpeg.write_bytes(b"fake ffmpeg")
+
+    shot_video = tmp_path / "assets" / "video" / "s1.mp4"
+    shot_video.parent.mkdir(parents=True)
+    shot_video.write_bytes(b"fake shot")
+    storyboard = {"shots": [{"id": "s1", "output_path": str(shot_video)}]}
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, encoding, errors, timeout, check):
+        captured["cmd"] = cmd
+        output = tmp_path / "renders" / "final.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"fake final")
+
+        class Proc:
+            stdout = ""
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr(runner, "_remotion_compositor_dir", lambda: bundled_dir, raising=False)
+    monkeypatch.setattr("server.app.openmontage_runner.subprocess.run", fake_run)
+
+    compose_final_video(tmp_path, storyboard)
+
+    assert captured["cmd"][0] == str(bundled_ffmpeg)
 
 
 def test_run_single_shot_generation_passes_video_model_and_key(tmp_path, monkeypatch):
