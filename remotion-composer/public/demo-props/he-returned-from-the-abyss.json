@@ -1,0 +1,132 @@
+{
+  "theme": "anime-ghibli",
+  "themeConfig": {
+    "primaryColor": "#C9A227",
+    "accentColor": "#D04E35",
+    "backgroundColor": "#090B12",
+    "surfaceColor": "#151823",
+    "textColor": "#F4E8D0",
+    "mutedTextColor": "#B7A98A",
+    "headingFont": "Space Grotesk",
+    "bodyFont": "Noto Sans SC",
+    "monoFont": "Fira Code",
+    "chartColors": [
+      "#C9A227",
+      "#D04E35",
+      "#345995",
+      "#E6D3A7",
+      "#7C2D2D",
+      "#1E6F5C"
+    ],
+    "springConfig": {
+      "damping": 18,
+      "stiffness": 80,
+      "mass": 1
+    },
+    "transitionDuration": 0.5,
+    "captionHighlightColor": "#FFD166",
+    "captionBackgroundColor": "rgba(9, 11, 18, 0.78)"
+  },
+  "cuts": [
+    {
+      "id": "opening",
+      "source": "",
+      "in_seconds": 0,
+      "out_seconds": 4.2,
+      "type": "hero_title",
+      "text": "他从地狱归来",
+      "heroSubtitle": "爽文鼻祖 · 基督山伯爵",
+      "backgroundColor": "#090B12"
+    },
+    {
+      "id": "betrayal",
+      "source": "",
+      "in_seconds": 4.2,
+      "out_seconds": 9.2,
+      "type": "text_card",
+      "text": "婚礼那天\n命运突然翻脸",
+      "fontSize": 78,
+      "color": "#F4E8D0",
+      "backgroundColor": "#11131C"
+    },
+    {
+      "id": "prison",
+      "source": "",
+      "in_seconds": 9.2,
+      "out_seconds": 14.2,
+      "type": "stat_card",
+      "stat": "14年",
+      "subtitle": "黑暗里，他学会等待",
+      "accentColor": "#C9A227",
+      "backgroundColor": "#0B1020"
+    },
+    {
+      "id": "treasure",
+      "source": "",
+      "in_seconds": 14.2,
+      "out_seconds": 19.2,
+      "type": "callout",
+      "title": "一张地图",
+      "text": "知识、财富、身份\n全部重写",
+      "callout_type": "quote",
+      "accentColor": "#D04E35",
+      "backgroundColor": "#16120E",
+      "color": "#F4E8D0"
+    },
+    {
+      "id": "return",
+      "source": "",
+      "in_seconds": 19.2,
+      "out_seconds": 24.2,
+      "type": "comparison",
+      "title": "他们以为",
+      "leftLabel": "旧水手",
+      "leftValue": "已被遗忘",
+      "rightLabel": "新伯爵",
+      "rightValue": "走进巴黎",
+      "backgroundColor": "#101318",
+      "color": "#F4E8D0"
+    },
+    {
+      "id": "landing",
+      "source": "",
+      "in_seconds": 24.2,
+      "out_seconds": 30,
+      "type": "hero_title",
+      "text": "他们埋葬了一个水手",
+      "heroSubtitle": "却放出了审判",
+      "backgroundColor": "#090B12"
+    }
+  ],
+  "overlays": [
+    {
+      "type": "section_title",
+      "in_seconds": 4.5,
+      "out_seconds": 9.0,
+      "text": "被夺走的人生",
+      "subtitle": "BETRAYAL",
+      "accentColor": "#D04E35",
+      "position": "top-left"
+    },
+    {
+      "type": "section_title",
+      "in_seconds": 9.4,
+      "out_seconds": 14.0,
+      "text": "黑暗里的升级",
+      "subtitle": "LEVEL UP",
+      "accentColor": "#C9A227",
+      "position": "top-left"
+    },
+    {
+      "type": "stat_reveal",
+      "in_seconds": 19.5,
+      "out_seconds": 24.0,
+      "text": "归来",
+      "subtitle": "身份反转",
+      "accentColor": "#FFD166",
+      "position": "bottom-right"
+    }
+  ],
+  "captions": [],
+  "audio": {}
+}

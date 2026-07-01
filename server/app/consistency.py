@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+from typing import Any
+
+
+def evaluate_storyboard_consistency(
+    series_bible: dict[str, Any],
+    storyboard: dict[str, Any],
+) -> dict[str, Any]:
+    characters = {
+        character.get("id"): character
+        for character in series_bible.get("characters", [])
+        if character.get("id")
+    }
+    shots = storyboard.get("shots", [])
+    issues: list[dict[str, str | None]] = []
+
+    previous_aspect_ratio = None
+    previous_visual_style = None
+    for shot in shots:
+        shot_id = shot.get("id")
+        prompt = str(shot.get("prompt", ""))
+
+        for character_id in shot.get("characters", []):
+            character = characters.get(character_id)
+            if character is None:
+                issues.append(
+                    _issue(
+                        shot_id,
+                        "error",
+                        "unknown_character",
+                        f"Shot references unknown character '{character_id}'.",
+                    )
+                )
+                continue
+
+            visual_lock = str(character.get("visual_lock", "")).strip()
+            if character.get("locked") and visual_lock and visual_lock.lower() not in prompt.lower():
+                issues.append(
+                    _issue(
+                        shot_id,
+                        "warning",
+                        "missing_visual_lock",
+                        f"Locked character {character.get('name', character_id)} is missing visual lock.",
+                    )
+                )
+
+        if not shot.get("location"):
+            issues.append(
+                _issue(
+                    shot_id,
+                    "warning",
+                    "missing_location",
+                    "Shot has no location.",
+                )
+            )
+
+        aspect_ratio = shot.get("aspect_ratio")
+        if previous_aspect_ratio and aspect_ratio and aspect_ratio != previous_aspect_ratio:
+            issues.append(
+                _issue(
+                    shot_id,
+                    "warning",
+                    "aspect_ratio_shift",
+                    "Adjacent shots change aspect ratio.",
+                )
+            )
+        if aspect_ratio:
+            previous_aspect_ratio = aspect_ratio
+
+        visual_style = shot.get("visual_style")
+        if previous_visual_style and visual_style and visual_style != previous_visual_style:
+            issues.append(
+                _issue(
+                    shot_id,
+                    "warning",
+                    "visual_style_shift",
+                    "Adjacent shots change visual style.",
+                )
+            )
+        if visual_style:
+            previous_visual_style = visual_style
+
+    score = max(0, 100 - sum(_penalty(issue["severity"]) for issue in issues))
+    return {"score": score, "issues": issues}
+
+
+def _issue(shot_id: str | None, severity: str, code: str, message: str) -> dict[str, str | None]:
+    return {
+        "shot_id": shot_id,
+        "severity": severity,
+        "code": code,
+        "message": message,
+    }
+
+
+def _penalty(severity: str | None) -> int:
+    if severity == "error":
+        return 25
+    if severity == "warning":
+        return 10
+    return 3
+

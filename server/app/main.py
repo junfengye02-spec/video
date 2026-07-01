@@ -1,0 +1,213 @@
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+from typing import Any
+
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from server.app.consistency import evaluate_storyboard_consistency
+from server.app.events import EventBus
+from server.app.keyring import key_environment, mask_key
+from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot
+from server.app.openmontage_runner import render_short_drama_project
+from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
+from server.app.storage import WorkbenchStore
+
+DEFAULT_TEXT_MODEL = "gpt-5.5"
+DEFAULT_IMAGE_MODEL = "gpt-image-2"
+DEFAULT_VIDEO_MODEL = "omni_flash-10s"
+
+
+class KeySessionRequest(BaseModel):
+    text_key: str = Field(min_length=1)
+    image_key: str = Field(min_length=1)
+    video_key: str = Field(min_length=1)
+    base_url: str = DEFAULT_SYAPI_BASE_URL
+    text_model: str = DEFAULT_TEXT_MODEL
+    image_model: str = DEFAULT_IMAGE_MODEL
+    video_model: str = DEFAULT_VIDEO_MODEL
+
+
+class ShortDramaRequest(BaseModel):
+    title: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    text_key: str = Field(min_length=1)
+    image_key: str = Field(min_length=1)
+    video_key: str = Field(min_length=1)
+    base_url: str = DEFAULT_SYAPI_BASE_URL
+    text_model: str = DEFAULT_TEXT_MODEL
+    image_model: str = DEFAULT_IMAGE_MODEL
+    video_model: str = DEFAULT_VIDEO_MODEL
+
+
+class RegenerateShotRequest(BaseModel):
+    video_key: str | None = None
+    base_url: str = DEFAULT_SYAPI_BASE_URL
+    video_model: str = DEFAULT_VIDEO_MODEL
+
+
+class RenderProjectRequest(BaseModel):
+    text_key: str = Field(min_length=1)
+    image_key: str = Field(min_length=1)
+    video_key: str = Field(min_length=1)
+    base_url: str = DEFAULT_SYAPI_BASE_URL
+    text_model: str = DEFAULT_TEXT_MODEL
+    image_model: str = DEFAULT_IMAGE_MODEL
+    video_model: str = DEFAULT_VIDEO_MODEL
+    render_runtime: str = "ffmpeg"
+
+
+def create_app(
+    db_path: str | Path = DEFAULT_DB_PATH,
+    projects_root: str | Path = DEFAULT_PROJECTS_ROOT,
+) -> FastAPI:
+    app = FastAPI(title="OpenMontage Short Drama Workbench")
+    store = WorkbenchStore(db_path=Path(db_path), projects_root=Path(projects_root))
+    events = EventBus()
+    app.state.store = store
+    app.state.events = events
+
+    def get_store() -> WorkbenchStore:
+        return app.state.store
+
+    def get_events() -> EventBus:
+        return app.state.events
+
+    @app.post("/api/session/key")
+    def save_gateway_key(payload: KeySessionRequest) -> dict[str, Any]:
+        env = key_environment(payload.video_key, payload.base_url)
+        return {
+            "masked_keys": {
+                "text": mask_key(payload.text_key),
+                "image": mask_key(payload.image_key),
+                "video": mask_key(payload.video_key),
+            },
+            "provider": "syapi",
+            "base_url": env["SYAPI_BASE_URL"],
+            "models": {
+                "text": payload.text_model,
+                "image": payload.image_model,
+                "video": payload.video_model,
+            },
+            "valid": True,
+        }
+
+    @app.post("/api/projects/short-drama")
+    def create_short_drama_project(
+        payload: ShortDramaRequest,
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        key_environment(payload.video_key, payload.base_url)
+        project = workbench.create_project(title=payload.title, mode="short_drama")
+        result = build_mock_short_drama(payload.prompt)
+
+        workbench.write_artifact(project.id, "series_bible.json", result["series_bible"])
+        workbench.write_artifact(project.id, "episode_storyboard.json", result["storyboard"])
+        workbench.write_artifact(project.id, "consistency_report.json", result["consistency_report"])
+
+        return {"project": project.model_dump(), **result}
+
+    @app.get("/api/projects/{project_id}")
+    def get_project(
+        project_id: str,
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        project = workbench.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return {
+            "project": project.model_dump(),
+            "series_bible": workbench.read_artifact(project_id, "series_bible.json"),
+            "storyboard": workbench.read_artifact(project_id, "episode_storyboard.json"),
+            "consistency_report": workbench.read_artifact(project_id, "consistency_report.json"),
+        }
+
+    @app.post("/api/projects/{project_id}/shots/{shot_id}/regenerate")
+    def regenerate_shot(
+        project_id: str,
+        shot_id: str,
+        payload: RegenerateShotRequest,
+        workbench: WorkbenchStore = Depends(get_store),
+        bus: EventBus = Depends(get_events),
+    ) -> dict[str, Any]:
+        if payload.video_key:
+            key_environment(payload.video_key, payload.base_url)
+
+        project = workbench.get_project(project_id)
+        storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
+        series_bible = workbench.read_artifact(project_id, "series_bible.json")
+        if project is None or storyboard is None or series_bible is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        job_id = uuid.uuid4().hex
+        bus.emit(project_id, job_id=job_id, stage="regenerate", status="running", message="Regenerating shot")
+        try:
+            shot = regenerate_mock_shot(storyboard, shot_id)
+        except KeyError as exc:
+            bus.emit(project_id, job_id=job_id, stage="regenerate", status="failed", message=str(exc))
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        report = evaluate_storyboard_consistency(series_bible, storyboard)
+        workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
+        workbench.write_artifact(project_id, "consistency_report.json", report)
+        event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
+        return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
+
+    @app.post("/api/projects/{project_id}/render")
+    def render_project(
+        project_id: str,
+        payload: RenderProjectRequest,
+        workbench: WorkbenchStore = Depends(get_store),
+        bus: EventBus = Depends(get_events),
+    ) -> dict[str, Any]:
+        project = workbench.get_project(project_id)
+        storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
+        series_bible = workbench.read_artifact(project_id, "series_bible.json")
+        if project is None or storyboard is None or series_bible is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        job_id = uuid.uuid4().hex
+
+        def emit(stage: str, status: str, message: str) -> None:
+            bus.emit(project_id, job_id=job_id, stage=stage, status=status, message=message)
+
+        emit("render", "running", "Starting final render")
+        try:
+            result = render_short_drama_project(
+                project_dir=workbench.project_dir(project_id),
+                series_bible=series_bible,
+                storyboard=storyboard,
+                video_key=payload.video_key,
+                base_url=payload.base_url,
+                video_model=payload.video_model,
+                render_runtime="ffmpeg",
+                emit_event=emit,
+            )
+        except Exception as exc:
+            emit("render", "failed", str(exc))
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        report = evaluate_storyboard_consistency(series_bible, result["storyboard"])
+        workbench.write_artifact(project_id, "episode_storyboard.json", result["storyboard"])
+        workbench.write_artifact(project_id, "consistency_report.json", report)
+        workbench.write_artifact(project_id, "render_report.json", result["render_report"])
+        event = bus.emit(project_id, job_id=job_id, stage="render", status="complete", message="Final video rendered")
+        return {
+            "job_id": job_id,
+            "event": event,
+            "project": project.model_dump(),
+            "storyboard": result["storyboard"],
+            "consistency_report": report,
+            "render_report": result["render_report"],
+            "final_path": result["final_path"],
+            "outputs": result["outputs"],
+        }
+
+    @app.get("/api/projects/{project_id}/events")
+    async def project_events(project_id: str, bus: EventBus = Depends(get_events)) -> StreamingResponse:
+        return StreamingResponse(bus.stream(project_id), media_type="text/event-stream")
+
+    return app
