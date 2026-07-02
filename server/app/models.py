@@ -20,6 +20,87 @@ class GatewayKey(BaseModel):
     valid: bool = True
 
 
+ShotSize = Literal[
+    "extreme_wide",
+    "wide",
+    "medium_wide",
+    "medium",
+    "medium_close",
+    "close_up",
+    "extreme_close_up",
+    "over_shoulder",
+    "insert",
+    "establishing",
+]
+
+CameraMovement = Literal[
+    "static",
+    "pan_left",
+    "pan_right",
+    "tilt_up",
+    "tilt_down",
+    "dolly_in",
+    "dolly_out",
+    "tracking_left",
+    "tracking_right",
+    "crane_up",
+    "crane_down",
+    "handheld",
+    "steadicam",
+    "whip_pan",
+    "orbital",
+    "zoom_in",
+    "zoom_out",
+    "rack_focus",
+]
+
+
+class ShotLanguage(BaseModel):
+    shot_size: ShotSize | None = None
+    camera_movement: CameraMovement | None = None
+    lens_mm: Literal[14, 24, 35, 50, 85, 135, 200] | None = None
+    lighting_key: Literal[
+        "high_key",
+        "low_key",
+        "natural",
+        "golden_hour",
+        "blue_hour",
+        "tungsten_warm",
+        "neon",
+        "silhouette",
+        "rim_lit",
+        "volumetric",
+        "overcast_soft",
+    ] | None = None
+    depth_of_field: Literal["shallow", "medium", "deep"] | None = None
+    color_temperature: Literal["cool", "neutral", "warm", "mixed"] | None = None
+
+
+class ShotRevision(BaseModel):
+    version: int
+    source: Literal["create", "prompt_edit", "regenerate"]
+    prompt: str
+    characters: list[str] = Field(default_factory=list)
+    location: str | None = None
+    props: list[str] = Field(default_factory=list)
+    asset_ids: list[str] = Field(default_factory=list)
+    shot_intent: str | None = None
+    shot_language: ShotLanguage | None = None
+    updated_at: str
+
+
+class ShotUpdateRequest(BaseModel):
+    prompt: str | None = None
+    characters: list[str] | None = None
+    location: str | None = None
+    props: list[str] | None = None
+    asset_ids: list[str] | None = None
+    shot_intent: str | None = None
+    shot_language: ShotLanguage | None = None
+    video_key: str | None = None
+    base_url: str = "https://api.0000238.xyz"
+    video_model: str = "omni_flash-10s"
+
 class Character(BaseModel):
     id: str
     name: str
@@ -39,6 +120,8 @@ class Shot(BaseModel):
     characters: list[str] = Field(default_factory=list)
     location: str | None = None
     props: list[str] = Field(default_factory=list)
+    shot_intent: str | None = None
+    shot_language: ShotLanguage | None = None
     status: Literal["draft", "ready", "generating", "complete", "failed"] = "draft"
     consistency_score: int = 100
     output_url: str | None = None

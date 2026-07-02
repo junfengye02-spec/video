@@ -55,6 +55,58 @@ export interface SeriesBible {
 
 export type ShotStatus = "draft" | "ready" | "generating" | "complete" | "failed";
 
+export type ShotSize =
+  | "extreme_wide"
+  | "wide"
+  | "medium_wide"
+  | "medium"
+  | "medium_close"
+  | "close_up"
+  | "extreme_close_up"
+  | "over_shoulder"
+  | "insert"
+  | "establishing";
+
+export type CameraMovement =
+  | "static"
+  | "pan_left"
+  | "pan_right"
+  | "tilt_up"
+  | "tilt_down"
+  | "dolly_in"
+  | "dolly_out"
+  | "tracking_left"
+  | "tracking_right"
+  | "crane_up"
+  | "crane_down"
+  | "handheld"
+  | "steadicam"
+  | "whip_pan"
+  | "orbital"
+  | "zoom_in"
+  | "zoom_out"
+  | "rack_focus";
+
+export interface ShotLanguage {
+  shot_size?: ShotSize | null;
+  camera_movement?: CameraMovement | null;
+  lens_mm?: 14 | 24 | 35 | 50 | 85 | 135 | 200 | null;
+  lighting_key?:
+    | "high_key"
+    | "low_key"
+    | "natural"
+    | "golden_hour"
+    | "blue_hour"
+    | "tungsten_warm"
+    | "neon"
+    | "silhouette"
+    | "rim_lit"
+    | "volumetric"
+    | "overcast_soft"
+    | null;
+  depth_of_field?: "shallow" | "medium" | "deep" | null;
+  color_temperature?: "cool" | "neutral" | "warm" | "mixed" | null;
+}
 export interface Shot {
   id: string;
   scene_id: string;
@@ -64,6 +116,8 @@ export interface Shot {
   characters: string[];
   location: string | null;
   props: string[];
+  shot_intent?: string | null;
+  shot_language?: ShotLanguage | null;
   status: ShotStatus;
   consistency_score: number;
   output_url: string | null;
@@ -73,6 +127,18 @@ export interface Shot {
   version?: number;
 }
 
+export interface ShotRevision {
+  version: number;
+  source: "create" | "prompt_edit" | "regenerate";
+  prompt: string;
+  characters: string[];
+  location: string | null;
+  props: string[];
+  asset_ids: string[];
+  shot_intent?: string | null;
+  shot_language?: ShotLanguage | null;
+  updated_at: string;
+}
 export interface Storyboard {
   shots: Shot[];
 }
@@ -148,4 +214,17 @@ export interface RenderProjectResponse {
   consistency_report: ConsistencyReport;
   render_report: RenderReport;
   final_path: string;
+}
+
+export interface ShotUpdateRequest {
+  prompt?: string | null;
+  characters?: string[] | null;
+  location?: string | null;
+  props?: string[] | null;
+  asset_ids?: string[] | null;
+  shot_intent?: string | null;
+  shot_language?: ShotLanguage | null;
+  video_key?: string | null;
+  base_url: string;
+  video_model: string;
 }
