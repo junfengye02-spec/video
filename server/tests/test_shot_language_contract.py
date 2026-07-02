@@ -1,6 +1,6 @@
 from pydantic import ValidationError
 
-from server.app.models import Shot, ShotLanguage, ShotUpdateRequest
+from server.app.models import Shot, ShotLanguage, ShotRegenerateRequest, ShotSaveRequest
 
 
 def test_shot_accepts_structured_shot_language():
@@ -37,11 +37,23 @@ def test_shot_language_rejects_unknown_values():
         raise AssertionError("invalid shot_size was accepted")
 
 
-def test_shot_update_accepts_partial_shot_language():
-    payload = ShotUpdateRequest(
+def test_shot_save_accepts_partial_shot_language():
+    payload = ShotSaveRequest(
         shot_language={"shot_size": "wide", "camera_movement": "static"},
         shot_intent="Establish the alley before the confrontation.",
     )
 
     assert payload.shot_language.shot_size == "wide"
     assert payload.shot_intent.startswith("Establish")
+
+
+def test_shot_regenerate_request_rejects_metadata_fields():
+    try:
+        ShotRegenerateRequest(
+            video_key="vid-test-key-1234567890abcdef",
+            shot_intent="Should not be allowed here",
+        )
+    except ValidationError as exc:
+        assert "shot_intent" in str(exc)
+    else:
+        raise AssertionError("metadata field was accepted by regenerate request")

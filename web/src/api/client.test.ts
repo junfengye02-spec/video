@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ShotUpdateRequest } from "../domain/types";
-import { createShortDramaProject, renderProject } from "./client";
+import type { ShotRegenerateRequest, ShotSaveRequest } from "../domain/types";
+import { createShortDramaProject, regenerateShot, renderProject, saveShot } from "./client";
 
 describe("createShortDramaProject", () => {
   it("posts prompt, provider keys, and model choices to backend", async () => {
@@ -64,6 +64,9 @@ describe("createShortDramaProject", () => {
               consistency_score: 92,
               output_url: "https://example.com/shot-1.mp4",
               output_path: "projects/p1/shots/shot-1.mp4",
+              asset_ids: [],
+              version: 1,
+              history: [],
               shot_intent: "Start with a tense clue reveal.",
               shot_language: {
                 shot_size: "medium_close",
@@ -103,9 +106,9 @@ describe("createShortDramaProject", () => {
   });
 });
 
-describe("ShotUpdateRequest", () => {
-  it("exposes shot intent and structured shot language for frontend callers", () => {
-    const payload: ShotUpdateRequest = {
+describe("ShotSaveRequest", () => {
+  it("exposes metadata fields without provider fields for frontend callers", () => {
+    const payload: ShotSaveRequest = {
       shot_intent: "Push in as Lin realizes the clue matters.",
       shot_language: {
         shot_size: "medium_close",
@@ -115,8 +118,6 @@ describe("ShotUpdateRequest", () => {
         lighting_key: "neon",
         color_temperature: "cool",
       },
-      base_url: "https://api.0000238.xyz",
-      video_model: "veo_3_1-lite",
     };
 
     expect(payload.shot_intent).toBe(
@@ -130,6 +131,66 @@ describe("ShotUpdateRequest", () => {
       lighting_key: "neon",
       color_temperature: "cool",
     });
+  });
+});
+
+describe("saveShot", () => {
+  it("patches edited shot fields to the save endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        job_id: "j1",
+        event: { id: "e1", stage: "save" },
+        shot: { id: "s1", version: 2 },
+        storyboard: { shots: [] },
+        consistency_report: { score: 100, issues: [] },
+      }),
+    });
+    const payload: ShotSaveRequest = {
+      prompt: "edited prompt",
+      characters: ["c1"],
+      location: "rainy alley",
+      props: ["envelope"],
+      asset_ids: ["asset-c1-ref"],
+      shot_intent: "Hold tension before the clue reveal.",
+      shot_language: { shot_size: "medium", camera_movement: "static" },
+    };
+
+    const result = await saveShot("p1", "s1", payload, fetchMock as unknown as typeof fetch);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/p1/shots/s1",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify(payload) }),
+    );
+    expect(result.event.stage).toBe("save");
+  });
+});
+
+describe("regenerateShot", () => {
+  it("posts provider fields only to the regenerate endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        job_id: "j1",
+        event: { id: "e1", stage: "regenerate" },
+        shot: { id: "s1", status: "complete" },
+        storyboard: { shots: [] },
+        consistency_report: { score: 100, issues: [] },
+      }),
+    });
+    const payload: ShotRegenerateRequest = {
+      video_key: "video-key",
+      base_url: "https://api.0000238.xyz",
+      video_model: "omni_flash-10s",
+    };
+
+    const result = await regenerateShot("p1", "s1", payload, fetchMock as unknown as typeof fetch);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/p1/shots/s1/regenerate",
+      expect.objectContaining({ method: "POST", body: JSON.stringify(payload) }),
+    );
+    expect(result.event.stage).toBe("regenerate");
   });
 });
 

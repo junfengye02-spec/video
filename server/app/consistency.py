@@ -85,6 +85,17 @@ def evaluate_storyboard_consistency(
     return {"score": score, "issues": issues}
 
 
+def apply_consistency_scores(storyboard: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    penalties_by_shot: dict[str, int] = {}
+    for issue in report.get("issues", []):
+        shot_id = issue.get("shot_id")
+        if shot_id:
+            penalties_by_shot[shot_id] = penalties_by_shot.get(shot_id, 0) + _penalty(issue.get("severity"))
+    for shot in storyboard.get("shots", []):
+        shot["consistency_score"] = max(0, 100 - penalties_by_shot.get(shot.get("id"), 0))
+    return storyboard
+
+
 def _issue(shot_id: str | None, severity: str, code: str, message: str) -> dict[str, str | None]:
     return {
         "shot_id": shot_id,
@@ -100,4 +111,3 @@ def _penalty(severity: str | None) -> int:
     if severity == "warning":
         return 10
     return 3
-

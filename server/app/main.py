@@ -8,11 +8,12 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from server.app.consistency import evaluate_storyboard_consistency
+from server.app.consistency import apply_consistency_scores, evaluate_storyboard_consistency
 from server.app.events import EventBus
 from server.app.keyring import key_environment, mask_key
-from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot
-from server.app.openmontage_runner import render_short_drama_project
+from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot, update_mock_shot
+from server.app.models import ShotRegenerateRequest, ShotSaveRequest
+from server.app.openmontage_runner import render_short_drama_project, run_single_shot_generation
 from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
 from server.app.storyboard_generator import generate_short_drama_storyboard
 from server.app.storage import WorkbenchStore
@@ -41,12 +42,6 @@ class ShortDramaRequest(BaseModel):
     base_url: str = DEFAULT_SYAPI_BASE_URL
     text_model: str = DEFAULT_TEXT_MODEL
     image_model: str = DEFAULT_IMAGE_MODEL
-    video_model: str = DEFAULT_VIDEO_MODEL
-
-
-class RegenerateShotRequest(BaseModel):
-    video_key: str | None = None
-    base_url: str = DEFAULT_SYAPI_BASE_URL
     video_model: str = DEFAULT_VIDEO_MODEL
 
 
@@ -117,6 +112,7 @@ def create_app(
             result["series_bible"],
             result["storyboard"],
         )
+        apply_consistency_scores(result["storyboard"], result["consistency_report"])
 
         project = workbench.create_project(title=payload.title, mode="short_drama")
         workbench.write_artifact(project.id, "series_bible.json", result["series_bible"])
@@ -140,32 +136,79 @@ def create_app(
             "consistency_report": workbench.read_artifact(project_id, "consistency_report.json"),
         }
 
-    @app.post("/api/projects/{project_id}/shots/{shot_id}/regenerate")
-    def regenerate_shot(
+    @app.patch("/api/projects/{project_id}/shots/{shot_id}")
+    def save_shot(
         project_id: str,
         shot_id: str,
-        payload: RegenerateShotRequest,
+        payload: ShotSaveRequest,
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
     ) -> dict[str, Any]:
-        if payload.video_key:
-            key_environment(payload.video_key, payload.base_url)
-
         project = workbench.get_project(project_id)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         if project is None or storyboard is None or series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
+        job_id = uuid.uuid4().hex
+        try:
+            shot = update_mock_shot(storyboard, shot_id, edits=payload.model_dump(exclude_unset=True))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        report = evaluate_storyboard_consistency(series_bible, storyboard)
+        apply_consistency_scores(storyboard, report)
+        workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
+        workbench.write_artifact(project_id, "consistency_report.json", report)
+        event = bus.emit(project_id, job_id=job_id, stage="save", status="complete", message="Shot saved")
+        return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
 
+    @app.post("/api/projects/{project_id}/shots/{shot_id}/regenerate")
+    def regenerate_shot(
+        project_id: str,
+        shot_id: str,
+        payload: ShotRegenerateRequest,
+        workbench: WorkbenchStore = Depends(get_store),
+        bus: EventBus = Depends(get_events),
+    ) -> dict[str, Any]:
+        if not payload.video_key:
+            raise HTTPException(status_code=422, detail="video_key is required for shot regeneration")
+        key_environment(payload.video_key, payload.base_url)
+        project = workbench.get_project(project_id)
+        storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
+        series_bible = workbench.read_artifact(project_id, "series_bible.json")
+        if project is None or storyboard is None or series_bible is None:
+            raise HTTPException(status_code=404, detail="Project not found")
         job_id = uuid.uuid4().hex
         bus.emit(project_id, job_id=job_id, stage="regenerate", status="running", message="Regenerating shot")
+        shot = next((item for item in storyboard.get("shots", []) if item.get("id") == shot_id), None)
+        if shot is None:
+            message = f"Shot '{shot_id}' not found"
+            bus.emit(project_id, job_id=job_id, stage="regenerate", status="failed", message=message)
+            raise HTTPException(status_code=404, detail=message)
+        shot["status"] = "generating"
+        shot["output_path"] = None
+        shot["output_url"] = None
         try:
-            shot = regenerate_mock_shot(storyboard, shot_id)
-        except KeyError as exc:
+            output = run_single_shot_generation(
+                project_dir=workbench.project_dir(project_id),
+                shot=shot,
+                series_bible=series_bible,
+                video_key=payload.video_key,
+                base_url=payload.base_url,
+                video_model=payload.video_model,
+            )
+        except Exception as exc:
+            shot["status"] = "failed"
+            report = evaluate_storyboard_consistency(series_bible, storyboard)
+            apply_consistency_scores(storyboard, report)
+            workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
+            workbench.write_artifact(project_id, "consistency_report.json", report)
             bus.emit(project_id, job_id=job_id, stage="regenerate", status="failed", message=str(exc))
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        shot["status"] = "complete"
+        shot["output_path"] = output["output_path"]
+        shot["output_url"] = output["tool_result"].get("url")
         report = evaluate_storyboard_consistency(series_bible, storyboard)
+        apply_consistency_scores(storyboard, report)
         workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
         workbench.write_artifact(project_id, "consistency_report.json", report)
         event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
@@ -206,6 +249,7 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         report = evaluate_storyboard_consistency(series_bible, result["storyboard"])
+        apply_consistency_scores(result["storyboard"], report)
         workbench.write_artifact(project_id, "episode_storyboard.json", result["storyboard"])
         workbench.write_artifact(project_id, "consistency_report.json", report)
         workbench.write_artifact(project_id, "render_report.json", result["render_report"])

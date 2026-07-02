@@ -8,6 +8,22 @@ TEXT_TEST_KEY = "txt-test-key-1234567890abcdef"
 IMAGE_TEST_KEY = "img-test-key-1234567890abcdef"
 VIDEO_TEST_KEY = "vid-test-key-1234567890abcdef"
 
+def _create_project_with_fake_generator(client):
+    return client.post(
+        "/api/projects/short-drama",
+        json={
+            "title": "Rain Alley",
+            "prompt": "rain-night urban reversal short drama",
+            "text_key": TEXT_TEST_KEY,
+            "image_key": IMAGE_TEST_KEY,
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "text_model": "gpt-5.5",
+            "image_model": "gpt-image-2",
+            "video_model": "omni_flash-10s",
+        },
+    ).json()
+
 
 def _fake_storyboard_result() -> dict:
     return {
@@ -53,6 +69,7 @@ def _fake_storyboard_result() -> dict:
                     "consistency_score": 100,
                     "output_url": None,
                     "output_path": None,
+                    "asset_ids": [],
                     "version": 1,
                     "history": [],
                 },
@@ -71,6 +88,7 @@ def _fake_storyboard_result() -> dict:
                     "consistency_score": 100,
                     "output_url": None,
                     "output_path": None,
+                    "asset_ids": [],
                     "version": 1,
                     "history": [],
                 },
@@ -89,6 +107,7 @@ def _fake_storyboard_result() -> dict:
                     "consistency_score": 100,
                     "output_url": None,
                     "output_path": None,
+                    "asset_ids": [],
                     "version": 1,
                     "history": [],
                 },
@@ -107,6 +126,7 @@ def _fake_storyboard_result() -> dict:
                     "consistency_score": 100,
                     "output_url": None,
                     "output_path": None,
+                    "asset_ids": [],
                     "version": 1,
                     "history": [],
                 },
@@ -267,61 +287,379 @@ def test_load_project_returns_written_artifacts(tmp_path):
     assert len(body["storyboard"]["shots"]) >= 4
 
 
-def test_regenerate_shot_updates_storyboard_and_emits_event(tmp_path):
+def test_regenerate_shot_updates_storyboard_and_emits_event(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
 
-    created = client.post(
-        "/api/projects/short-drama",
-        json={
-            "title": "Rain Alley",
-            "prompt": "rain-night urban reversal short drama",
-            "text_key": TEXT_TEST_KEY,
-            "image_key": IMAGE_TEST_KEY,
-            "video_key": VIDEO_TEST_KEY,
-            "base_url": "https://api.0000238.xyz",
-            "text_model": "gpt-5.5",
-            "image_model": "gpt-image-2",
-            "video_model": "omni_flash-10s",
-        },
-    ).json()
+    created = _create_project_with_fake_generator(client)
     project_id = created["project"]["id"]
     shot_id = created["storyboard"]["shots"][0]["id"]
 
-    response = client.post(f"/api/projects/{project_id}/shots/{shot_id}/regenerate", json={})
+    def fake_run_single_shot_generation(**kwargs):
+        return {
+            "shot_id": shot_id,
+            "output_path": str(kwargs["project_dir"] / "assets" / "video" / f"{shot_id}.mp4"),
+            "tool_result": {"url": "https://video.example/s1.mp4"},
+            "cost_usd": 0.2,
+        }
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["event"]["status"] == "complete"
+    assert body["event"]["stage"] == "regenerate"
+    assert body["shot"]["status"] == "complete"
+    assert body["shot"]["output_path"].endswith("s1.mp4")
+
+
+def test_regenerate_shot_persists_updated_storyboard(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+
+    def fake_run_single_shot_generation(**kwargs):
+        return {
+            "shot_id": shot_id,
+            "output_path": str(kwargs["project_dir"] / "assets" / "video" / f"{shot_id}.mp4"),
+            "tool_result": {"url": "https://video.example/s1.mp4"},
+            "cost_usd": 0.2,
+        }
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
+
+    client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
+    )
+    loaded = client.get(f"/api/projects/{project_id}").json()
+
+    assert loaded["storyboard"]["shots"][0]["status"] == "complete"
+    assert loaded["storyboard"]["shots"][0]["output_url"] == "https://video.example/s1.mp4"
+
+
+def test_save_shot_does_not_generate_video_or_emit_regenerate_event(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    calls = []
+
+    def fake_run_single_shot_generation(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("save route should not trigger shot generation")
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
+
+    response = client.patch(
+        f"/api/projects/{project_id}/shots/{shot_id}",
+        json={
+            "prompt": "Lin pauses under the neon sign.",
+            "characters": ["c1"],
+            "location": "rainy alley",
+            "props": ["envelope"],
+            "asset_ids": [],
+            "shot_intent": "Hold tension before the clue reveal.",
+            "shot_language": {"shot_size": "medium", "camera_movement": "static"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["event"]["stage"] == "save"
+    assert body["event"]["status"] == "complete"
+    assert body["shot"]["status"] == "ready"
+    assert body["shot"]["output_path"] is None
+    assert body["shot"]["history"][-1]["source"] == "prompt_edit"
+    assert calls == []
+
+    loaded = client.get(f"/api/projects/{project_id}")
+    assert loaded.status_code == 200
+    reloaded_shot = loaded.json()["storyboard"]["shots"][0]
+    assert reloaded_shot["status"] == "ready"
+    assert reloaded_shot["output_path"] is None
+    assert reloaded_shot["output_url"] is None
+
+
+def test_save_shot_clears_previous_render_state_after_metadata_change(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+
+    def fake_run_single_shot_generation(**kwargs):
+        return {
+            "shot_id": shot_id,
+            "output_path": str(kwargs["project_dir"] / "assets" / "video" / f"{shot_id}.mp4"),
+            "tool_result": {"url": "https://video.example/s1.mp4"},
+            "cost_usd": 0.2,
+        }
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
+
+    regenerated = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
+    )
+    assert regenerated.status_code == 200
+    assert regenerated.json()["shot"]["output_url"] == "https://video.example/s1.mp4"
+
+    response = client.patch(
+        f"/api/projects/{project_id}/shots/{shot_id}",
+        json={"prompt": "Lin pauses under the neon sign with a new reveal.", "location": "rainy alley"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["shot"]["output_path"] is None
+    assert body["shot"]["output_url"] is None
+    assert body["shot"]["status"] == "ready"
+    assert body["shot"]["version"] == 2
+
+
+def test_save_shot_succeeds_without_provider_fields(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+
+    response = client.patch(
+        f"/api/projects/{project_id}/shots/{shot_id}",
+        json={
+            "prompt": "Lin pauses under the neon sign.",
+            "characters": ["c1"],
+            "location": "rainy alley",
+            "props": ["envelope"],
+            "asset_ids": [],
+            "shot_intent": "Hold tension before the clue reveal.",
+            "shot_language": {"shot_size": "medium", "camera_movement": "static"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["event"]["stage"] == "save"
+
+
+def test_save_shot_can_clear_location_to_null(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+
+    response = client.patch(f"/api/projects/{project_id}/shots/{shot_id}", json={"location": None})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["shot"]["location"] is None
+    assert body["shot"]["version"] == 2
+    assert body["shot"]["history"][-1]["location"] == "rainy alley"
+
+
+def test_save_shot_refreshes_consistency_scores_after_recalculation(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+
+    response = client.patch(f"/api/projects/{project_id}/shots/{shot_id}", json={"location": None})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert any(issue["code"] == "missing_location" for issue in body["consistency_report"]["issues"])
+    assert body["shot"]["location"] is None
+    assert body["shot"]["consistency_score"] < 100
+    saved_shot = next(shot for shot in body["storyboard"]["shots"] if shot["id"] == shot_id)
+    assert saved_shot["consistency_score"] < 100
+
+    loaded = client.get(f"/api/projects/{project_id}")
+    assert loaded.status_code == 200
+    persisted_shot = next(shot for shot in loaded.json()["storyboard"]["shots"] if shot["id"] == shot_id)
+    assert persisted_shot["consistency_score"] < 100
+
+
+def test_save_shot_noop_does_not_increment_version_or_history(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot = created["storyboard"]["shots"][0]
+
+    response = client.patch(
+        f"/api/projects/{project_id}/shots/{shot['id']}",
+        json={
+            "prompt": shot["prompt"],
+            "characters": shot["characters"],
+            "location": shot["location"],
+            "props": shot["props"],
+            "asset_ids": shot["asset_ids"],
+            "shot_intent": shot["shot_intent"],
+            "shot_language": shot["shot_language"],
+        },
+    )
+
+    assert response.status_code == 200
+    saved = response.json()["shot"]
+    assert saved["version"] == shot["version"]
+    assert saved["history"] == shot["history"]
+    assert saved["status"] == shot["status"]
+
+
+def test_regenerate_shot_generates_single_video(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    calls = []
+
+    def fake_run_single_shot_generation(**kwargs):
+        calls.append(kwargs)
+        return {
+            "shot_id": shot_id,
+            "output_path": str(kwargs["project_dir"] / "assets" / "video" / f"{shot_id}.mp4"),
+            "tool_result": {"url": "https://video.example/s1.mp4"},
+            "cost_usd": 0.2,
+        }
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert calls[0]["video_model"] == "omni_flash-10s"
+    assert body["event"]["stage"] == "regenerate"
+    assert body["shot"]["output_url"] == "https://video.example/s1.mp4"
+    assert body["shot"]["status"] == "complete"
+
+
+def test_regenerate_shot_requires_video_key(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_regenerate_shot_rejects_whitespace_only_video_key(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    calls = []
+
+    def fake_run_single_shot_generation(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("validation should reject whitespace-only video keys before generation")
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": "   ", "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
+    )
+
+    assert response.status_code == 422
+    assert calls == []
+
+
+def test_save_shot_accepts_prompt_edits_and_tracks_history(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+
+    response = client.patch(
+        f"/api/projects/{project_id}/shots/{shot_id}",
+        json={
+            "prompt": "Lin stops under neon rain and opens the soaked envelope.",
+            "characters": ["c1"],
+            "location": "rainy neon alley",
+            "props": ["envelope"],
+            "asset_ids": ["asset-c1-ref"],
+            "shot_intent": "Reveal the clue with a more deliberate pause.",
+            "shot_language": {"shot_size": "medium", "camera_movement": "static"},
+        },
+    )
 
     assert response.status_code == 200
     body = response.json()
     assert body["shot"]["version"] == 2
-    assert body["event"]["status"] == "complete"
-    assert body["event"]["stage"] == "regenerate"
+    assert body["shot"]["prompt"].startswith("Lin stops under neon rain")
+    assert body["shot"]["asset_ids"] == ["asset-c1-ref"]
+    assert body["shot"]["history"][-1]["source"] == "prompt_edit"
+    assert body["shot"]["history"][-1]["version"] == 1
+    assert body["shot"]["history"][-1]["shot_intent"] == "Reveal the clue."
+    assert body["shot"]["history"][-1]["shot_language"]["shot_size"] == "medium_close"
+    assert body["shot"]["shot_intent"] == "Reveal the clue with a more deliberate pause."
+    assert body["shot"]["shot_language"]["shot_size"] == "medium"
 
 
-def test_regenerate_shot_persists_updated_storyboard(tmp_path):
+def test_regenerate_shot_failure_persists_failed_status_and_clears_outputs(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
-
-    created = client.post(
-        "/api/projects/short-drama",
-        json={
-            "title": "Rain Alley",
-            "prompt": "rain-night urban reversal short drama",
-            "text_key": TEXT_TEST_KEY,
-            "image_key": IMAGE_TEST_KEY,
-            "video_key": VIDEO_TEST_KEY,
-            "base_url": "https://api.0000238.xyz",
-            "text_model": "gpt-5.5",
-            "image_model": "gpt-image-2",
-            "video_model": "omni_flash-10s",
-        },
-    ).json()
+    created = _create_project_with_fake_generator(client)
     project_id = created["project"]["id"]
     shot_id = created["storyboard"]["shots"][0]["id"]
 
-    client.post(f"/api/projects/{project_id}/shots/{shot_id}/regenerate", json={})
-    loaded = client.get(f"/api/projects/{project_id}").json()
+    def fake_successful_generation(**kwargs):
+        return {
+            "shot_id": shot_id,
+            "output_path": str(kwargs["project_dir"] / "assets" / "video" / f"{shot_id}.mp4"),
+            "tool_result": {"url": "https://video.example/s1.mp4"},
+            "cost_usd": 0.2,
+        }
 
-    assert loaded["storyboard"]["shots"][0]["version"] == 2
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_successful_generation)
+    first_response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
+    )
+    assert first_response.status_code == 200
+    assert first_response.json()["shot"]["output_url"] == "https://video.example/s1.mp4"
+
+    def fake_failing_generation(**kwargs):
+        raise RuntimeError("video provider timeout")
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_failing_generation)
+    failed_response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
+    )
+    assert failed_response.status_code == 500
+    assert failed_response.json()["detail"] == "video provider timeout"
+
+    loaded = client.get(f"/api/projects/{project_id}")
+    assert loaded.status_code == 200
+    reloaded_shot = loaded.json()["storyboard"]["shots"][0]
+    assert reloaded_shot["status"] == "failed"
+    assert reloaded_shot["output_path"] is None
+    assert reloaded_shot["output_url"] is None
 
 
 def test_render_project_generates_final_video_and_updates_storyboard(tmp_path, monkeypatch):

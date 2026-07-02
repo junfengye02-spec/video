@@ -1,8 +1,11 @@
 import { Clapperboard, Send } from "lucide-react";
+import type { UIStrings } from "../i18n";
 
 interface ChatPanelProps {
   creating: boolean;
+  projectTitlePlaceholder: string;
   prompt: string;
+  strings: UIStrings["chatPanel"];
   title: string;
   onCreateStoryboard: () => void;
   onPromptChange: (value: string) => void;
@@ -11,30 +14,34 @@ interface ChatPanelProps {
 
 export function ChatPanel({
   creating,
+  projectTitlePlaceholder,
   prompt,
+  strings,
   title,
   onCreateStoryboard,
   onPromptChange,
   onTitleChange,
 }: ChatPanelProps) {
   return (
-    <section className="chat-panel" aria-label="Production assistant">
+    <section className="chat-panel" aria-label={strings.regionLabel}>
       <div className="section-heading">
         <Clapperboard aria-hidden="true" size={18} />
-        <h2>Production Assistant</h2>
+        <h2>{strings.title}</h2>
       </div>
       <div className="prompt-grid">
         <label>
-          <span>Project Title</span>
+          <span>{strings.projectTitleLabel}</span>
           <input
+            aria-label={strings.projectTitleLabel}
             value={title}
             onChange={(event) => onTitleChange(event.target.value)}
-            placeholder="Rain Alley"
+            placeholder={projectTitlePlaceholder}
           />
         </label>
         <label className="prompt-field">
-          <span>Short Drama Prompt</span>
+          <span>{strings.promptLabel}</span>
           <textarea
+            aria-label={strings.promptLabel}
             value={prompt}
             onChange={(event) => onPromptChange(event.target.value)}
             rows={5}
@@ -49,7 +56,7 @@ export function ChatPanel({
           onClick={onCreateStoryboard}
         >
           <Send aria-hidden="true" size={16} />
-          {creating ? "Creating" : "Create storyboard"}
+          {creating ? strings.creatingStoryboardAction : strings.createStoryboardAction}
         </button>
       </div>
     </section>

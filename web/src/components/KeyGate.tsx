@@ -1,4 +1,5 @@
 import { KeyRound, ShieldCheck } from "lucide-react";
+import type { UIStrings } from "../i18n";
 
 interface KeyGateProps {
   baseUrl: string;
@@ -10,6 +11,7 @@ interface KeyGateProps {
   videoModel: string;
   maskedKeys: { text: string; image: string; video: string } | null;
   saving: boolean;
+  strings: UIStrings["keyGate"];
   onBaseUrlChange: (value: string) => void;
   onTextKeyChange: (value: string) => void;
   onImageKeyChange: (value: string) => void;
@@ -37,6 +39,7 @@ export function KeyGate({
   videoModel,
   maskedKeys,
   saving,
+  strings,
   onBaseUrlChange,
   onTextKeyChange,
   onImageKeyChange,
@@ -55,7 +58,7 @@ export function KeyGate({
       }}
     >
       <div className="key-row">
-        <label htmlFor="text-key">Text API Key</label>
+        <label htmlFor="text-key">{strings.textKeyLabel}</label>
         <div className="input-with-icon">
           <KeyRound aria-hidden="true" size={16} />
           <input
@@ -68,7 +71,7 @@ export function KeyGate({
             placeholder="sk-..."
           />
         </div>
-        <label htmlFor="text-model">Text Model</label>
+        <label htmlFor="text-model">{strings.textModelLabel}</label>
         <input
           id="text-model"
           name="text-model"
@@ -78,7 +81,7 @@ export function KeyGate({
       </div>
 
       <div className="key-row">
-        <label htmlFor="image-key">Image API Key</label>
+        <label htmlFor="image-key">{strings.imageKeyLabel}</label>
         <div className="input-with-icon">
           <KeyRound aria-hidden="true" size={16} />
           <input
@@ -91,7 +94,7 @@ export function KeyGate({
             placeholder="sk-..."
           />
         </div>
-        <label htmlFor="image-model">Image Model</label>
+        <label htmlFor="image-model">{strings.imageModelLabel}</label>
         <input
           id="image-model"
           name="image-model"
@@ -101,7 +104,7 @@ export function KeyGate({
       </div>
 
       <div className="key-row">
-        <label htmlFor="video-key">Video API Key</label>
+        <label htmlFor="video-key">{strings.videoKeyLabel}</label>
         <div className="input-with-icon">
           <KeyRound aria-hidden="true" size={16} />
           <input
@@ -114,7 +117,7 @@ export function KeyGate({
             placeholder="sk-..."
           />
         </div>
-        <label htmlFor="video-model">Video Model</label>
+        <label htmlFor="video-model">{strings.videoModelLabel}</label>
         <input
           id="video-model"
           name="video-model"
@@ -129,7 +132,7 @@ export function KeyGate({
         </datalist>
       </div>
 
-      <label htmlFor="base-url">Gateway Base URL</label>
+      <label htmlFor="base-url">{strings.baseUrlLabel}</label>
       <input
         id="base-url"
         name="base-url"
@@ -140,16 +143,14 @@ export function KeyGate({
 
       <button className="primary-button" type="submit" disabled={saving}>
         <ShieldCheck aria-hidden="true" size={16} />
-        {saving ? "Checking" : maskedKeys ? "Update keys" : "Use keys"}
+        {saving ? strings.checkingAction : maskedKeys ? strings.updateKeysAction : strings.useKeysAction}
       </button>
 
       <div className="key-status" aria-live="polite">
         {maskedKeys ? (
-          <span>
-            Active T {maskedKeys.text} / I {maskedKeys.image} / V {maskedKeys.video}
-          </span>
+          <span>{strings.activeKeysStatus(maskedKeys)}</span>
         ) : (
-          <span>Keys not set</span>
+          <span>{strings.keysNotSet}</span>
         )}
       </div>
     </form>

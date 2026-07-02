@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Project(BaseModel):
@@ -89,7 +89,9 @@ class ShotRevision(BaseModel):
     updated_at: str
 
 
-class ShotUpdateRequest(BaseModel):
+class ShotSaveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     prompt: str | None = None
     characters: list[str] | None = None
     location: str | None = None
@@ -97,9 +99,23 @@ class ShotUpdateRequest(BaseModel):
     asset_ids: list[str] | None = None
     shot_intent: str | None = None
     shot_language: ShotLanguage | None = None
-    video_key: str | None = None
+
+
+class ShotRegenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video_key: str = Field(min_length=1)
     base_url: str = "https://api.0000238.xyz"
     video_model: str = "omni_flash-10s"
+
+    @field_validator("video_key")
+    @classmethod
+    def reject_blank_video_key(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("video_key must not be blank")
+        return stripped
+
 
 class Character(BaseModel):
     id: str
@@ -126,6 +142,9 @@ class Shot(BaseModel):
     consistency_score: int = 100
     output_url: str | None = None
     output_path: str | None = None
+    asset_ids: list[str] = Field(default_factory=list)
+    version: int = 1
+    history: list[ShotRevision] = Field(default_factory=list)
 
 
 class ConsistencyIssue(BaseModel):
@@ -156,4 +175,3 @@ class Job(BaseModel):
     stage: str
     status: Literal["queued", "running", "complete", "failed"] = "queued"
     events: list[JobEvent] = Field(default_factory=list)
-

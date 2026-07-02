@@ -5,6 +5,8 @@ import type {
   RenderProjectResponse,
   ShortDramaProjectRequest,
   ShortDramaProjectResponse,
+  ShotRegenerateRequest,
+  ShotSaveRequest,
 } from "../domain/types";
 
 async function requestJson<T>(
@@ -65,10 +67,26 @@ export function createShortDramaProject(
   return postJson<ShortDramaProjectResponse>("/api/projects/short-drama", payload, fetcher);
 }
 
+export function saveShot(
+  projectId: string,
+  shotId: string,
+  payload: ShotSaveRequest,
+  fetcher?: typeof fetch,
+): Promise<RegenerateShotResponse> {
+  return requestJson<RegenerateShotResponse>(
+    `/api/projects/${projectId}/shots/${shotId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+    fetcher,
+  );
+}
+
 export function regenerateShot(
   projectId: string,
   shotId: string,
-  payload: { video_key?: string; base_url: string; video_model: string },
+  payload: ShotRegenerateRequest,
   fetcher?: typeof fetch,
 ): Promise<RegenerateShotResponse> {
   return postJson<RegenerateShotResponse>(

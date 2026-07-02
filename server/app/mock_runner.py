@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from server.app.consistency import evaluate_storyboard_consistency
+from server.app.consistency import apply_consistency_scores, evaluate_storyboard_consistency
 
 
 def build_mock_short_drama(prompt: str) -> dict[str, Any]:
@@ -133,6 +133,7 @@ def build_mock_short_drama(prompt: str) -> dict[str, Any]:
                 "consistency_score": 100,
                 "output_url": None,
                 "output_path": None,
+                "asset_ids": [],
                 "aspect_ratio": "9:16",
                 "visual_style": style_lock,
                 "version": 1,
@@ -161,7 +162,7 @@ def build_mock_short_drama(prompt: str) -> dict[str, Any]:
     }
     storyboard = {"shots": shots}
     report = evaluate_storyboard_consistency(series_bible, storyboard)
-    _apply_scores(storyboard, report)
+    apply_consistency_scores(storyboard, report)
 
     return {
         "series_bible": series_bible,
@@ -170,41 +171,65 @@ def build_mock_short_drama(prompt: str) -> dict[str, Any]:
     }
 
 
-def regenerate_mock_shot(storyboard: dict[str, Any], shot_id: str) -> dict[str, Any]:
+def update_mock_shot(
+    storyboard: dict[str, Any],
+    shot_id: str,
+    edits: dict[str, Any],
+    source: str = "prompt_edit",
+) -> dict[str, Any]:
+    clearable_keys = {"location", "shot_intent", "shot_language"}
+    editable_keys = ("prompt", "characters", "location", "props", "asset_ids", "shot_intent", "shot_language")
     for shot in storyboard.get("shots", []):
-        if shot.get("id") == shot_id:
-            version = int(shot.get("version", 1)) + 1
-            history = list(shot.get("history", []))
-            history.append(
-                {
-                    "version": version - 1,
-                    "source": "regenerate",
-                    "prompt": shot.get("prompt", ""),
-                    "characters": list(shot.get("characters", [])),
-                    "location": shot.get("location"),
-                    "props": list(shot.get("props", [])),
-                    "asset_ids": [],
-                    "shot_intent": shot.get("shot_intent"),
-                    "shot_language": shot.get("shot_language"),
-                    "updated_at": _utc_now(),
-                }
-            )
-            shot["version"] = version
-            shot["status"] = "ready"
-            shot["prompt"] = f"{shot.get('prompt', '').split(' Variant ')[0]} Variant {version}: tighter framing and clearer emotion."
-            shot["history"] = history
+        if shot.get("id") != shot_id:
+            continue
+        changed_fields: dict[str, Any] = {}
+        for key in editable_keys:
+            if key not in edits:
+                continue
+            value = edits[key]
+            if value is None and key not in clearable_keys:
+                continue
+            if shot.get(key) == value:
+                continue
+            changed_fields[key] = value
+        if not changed_fields:
             return shot
+        version = int(shot.get("version", 1)) + 1
+        history = list(shot.get("history", []))
+        history.append(
+            {
+                "version": version - 1,
+                "source": source,
+                "prompt": shot.get("prompt", ""),
+                "characters": list(shot.get("characters", [])),
+                "location": shot.get("location"),
+                "props": list(shot.get("props", [])),
+                "asset_ids": list(shot.get("asset_ids", [])),
+                "shot_intent": shot.get("shot_intent"),
+                "shot_language": shot.get("shot_language"),
+                "updated_at": _utc_now(),
+            }
+        )
+        for key, value in changed_fields.items():
+            shot[key] = value
+        shot["output_path"] = None
+        shot["output_url"] = None
+        shot["version"] = version
+        shot["status"] = "ready"
+        shot["history"] = history
+        return shot
     raise KeyError(f"Shot '{shot_id}' not found")
 
 
-def _apply_scores(storyboard: dict[str, Any], report: dict[str, Any]) -> None:
-    penalties_by_shot: dict[str, int] = {}
-    for issue in report.get("issues", []):
-        shot_id = issue.get("shot_id")
-        if shot_id:
-            penalties_by_shot[shot_id] = penalties_by_shot.get(shot_id, 0) + 10
-    for shot in storyboard.get("shots", []):
-        shot["consistency_score"] = max(0, 100 - penalties_by_shot.get(shot.get("id"), 0))
+def regenerate_mock_shot(storyboard: dict[str, Any], shot_id: str, edits: dict[str, Any] | None = None) -> dict[str, Any]:
+    edits = edits or {}
+    if "prompt" not in edits:
+        for shot in storyboard.get("shots", []):
+            if shot.get("id") == shot_id:
+                version = int(shot.get("version", 1)) + 1
+                edits["prompt"] = f"{shot.get('prompt', '').split(' Variant ')[0]} Variant {version}: tighter framing and clearer emotion."
+                break
+    return update_mock_shot(storyboard, shot_id, edits, source="regenerate")
 
 
 def _title_from_prompt(prompt: str) -> str:

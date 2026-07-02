@@ -122,9 +122,11 @@ export interface Shot {
   consistency_score: number;
   output_url: string | null;
   output_path: string | null;
+  asset_ids: string[];
+  version: number;
+  history: ShotRevision[];
   aspect_ratio?: string;
   visual_style?: string;
-  version?: number;
 }
 
 export interface ShotRevision {
@@ -216,7 +218,7 @@ export interface RenderProjectResponse {
   final_path: string;
 }
 
-export interface ShotUpdateRequest {
+export interface ShotSaveRequest {
   prompt?: string | null;
   characters?: string[] | null;
   location?: string | null;
@@ -224,7 +226,10 @@ export interface ShotUpdateRequest {
   asset_ids?: string[] | null;
   shot_intent?: string | null;
   shot_language?: ShotLanguage | null;
-  video_key?: string | null;
+}
+
+export interface ShotRegenerateRequest {
+  video_key: string;
   base_url: string;
   video_model: string;
 }
