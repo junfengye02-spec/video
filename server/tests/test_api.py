@@ -210,6 +210,35 @@ def test_create_short_drama_project_uses_text_model_storyboard_generator(tmp_pat
     assert response.json()["storyboard"]["shots"][0]["shot_language"]["shot_size"] == "medium_close"
 
 
+def test_create_short_drama_project_returns_502_without_persisting_partial_project(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+
+    def failing_generate_short_drama_storyboard(**kwargs):
+        raise RuntimeError("upstream timeout")
+
+    monkeypatch.setattr("server.app.main.generate_short_drama_storyboard", failing_generate_short_drama_storyboard)
+
+    response = client.post(
+        "/api/projects/short-drama",
+        json={
+            "title": "Rain Alley",
+            "prompt": "rain-night urban reversal short drama",
+            "text_key": TEXT_TEST_KEY,
+            "image_key": IMAGE_TEST_KEY,
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "text_model": "gpt-5.5",
+            "image_model": "gpt-image-2",
+            "video_model": "omni_flash-10s",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"].startswith("Text model storyboard generation failed:")
+    assert list((tmp_path / "projects").iterdir()) == []
+
+
 def test_load_project_returns_written_artifacts(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)

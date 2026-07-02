@@ -102,7 +102,6 @@ def create_app(
         workbench: WorkbenchStore = Depends(get_store),
     ) -> dict[str, Any]:
         key_environment(payload.video_key, payload.base_url)
-        project = workbench.create_project(title=payload.title, mode="short_drama")
         try:
             result = generate_short_drama_storyboard(
                 title=payload.title,
@@ -119,6 +118,7 @@ def create_app(
             result["storyboard"],
         )
 
+        project = workbench.create_project(title=payload.title, mode="short_drama")
         workbench.write_artifact(project.id, "series_bible.json", result["series_bible"])
         workbench.write_artifact(project.id, "episode_storyboard.json", result["storyboard"])
         workbench.write_artifact(project.id, "consistency_report.json", result["consistency_report"])
