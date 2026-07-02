@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ShotUpdateRequest } from "../domain/types";
 import { createShortDramaProject, renderProject } from "./client";
 
 describe("createShortDramaProject", () => {
@@ -59,8 +60,8 @@ describe("createShortDramaProject", () => {
               characters: ["lin"],
               location: "rainy alley",
               props: ["envelope"],
-              status: "pending",
-              consistency_score: 0.92,
+              status: "ready",
+              consistency_score: 92,
               output_url: "https://example.com/shot-1.mp4",
               output_path: "projects/p1/shots/shot-1.mp4",
               shot_intent: "Start with a tense clue reveal.",
@@ -99,6 +100,36 @@ describe("createShortDramaProject", () => {
     expect(result.storyboard.shots[0].shot_intent).toBe(
       "Start with a tense clue reveal.",
     );
+  });
+});
+
+describe("ShotUpdateRequest", () => {
+  it("exposes shot intent and structured shot language for frontend callers", () => {
+    const payload: ShotUpdateRequest = {
+      shot_intent: "Push in as Lin realizes the clue matters.",
+      shot_language: {
+        shot_size: "medium_close",
+        camera_movement: "dolly_in",
+        lens_mm: 50,
+        depth_of_field: "shallow",
+        lighting_key: "neon",
+        color_temperature: "cool",
+      },
+      base_url: "https://api.0000238.xyz",
+      video_model: "veo_3_1-lite",
+    };
+
+    expect(payload.shot_intent).toBe(
+      "Push in as Lin realizes the clue matters.",
+    );
+    expect(payload.shot_language).toEqual({
+      shot_size: "medium_close",
+      camera_movement: "dolly_in",
+      lens_mm: 50,
+      depth_of_field: "shallow",
+      lighting_key: "neon",
+      color_temperature: "cool",
+    });
   });
 });
 
