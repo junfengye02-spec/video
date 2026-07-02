@@ -19,6 +19,35 @@ def test_build_pipeline_inputs_maps_storyboard_to_openmontage_artifacts():
     assert result["proposal_packet"]["production_plan"]["render_runtime"] == "remotion"
 
 
+def test_build_pipeline_inputs_includes_shot_asset_references():
+    series_bible = {
+        "characters": [{"id": "c1", "name": "Lin", "visual_lock": "red coat"}],
+        "assets": [
+            {
+                "id": "asset-c1-ref",
+                "kind": "character",
+                "label": "Lin reference",
+                "reference_images": ["projects/p1/assets/images/characters/c1.png"],
+            }
+        ],
+    }
+    storyboard = {
+        "shots": [
+            {
+                "id": "s1",
+                "prompt": "Lin runs",
+                "characters": ["c1"],
+                "asset_ids": ["asset-c1-ref"],
+            }
+        ]
+    }
+
+    result = build_pipeline_inputs(series_bible, storyboard)
+
+    prompt = result["asset_manifest"]["assets"][0]["prompt"]
+    assert "projects/p1/assets/images/characters/c1.png" in prompt
+
+
 def test_write_pipeline_artifacts_writes_openmontage_json_files(tmp_path):
     pipeline_inputs = build_pipeline_inputs(
         {"characters": [{"id": "c1", "name": "Lin", "visual_lock": "red coat"}]},
@@ -122,3 +151,57 @@ def test_run_single_shot_generation_passes_video_model_and_key(tmp_path, monkeyp
     assert captured["env_key"] == "video-key"
     assert captured["env_base_url"] == "https://api.0000238.xyz"
     assert captured["inputs"]["model_variant"] == "veo_3_1-lite"
+
+
+def test_run_single_shot_generation_prompt_includes_shot_language_and_asset_references(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeResult:
+        success = True
+        data = {"output": str(tmp_path / "assets" / "video" / "s1.mp4"), "url": "https://video.example/s1.mp4"}
+        cost_usd = 0.5
+
+    class FakeVideoSelector:
+        def execute(self, inputs):
+            captured["prompt"] = inputs["prompt"]
+            return FakeResult()
+
+    monkeypatch.setattr("tools.video.video_selector.VideoSelector", FakeVideoSelector)
+
+    run_single_shot_generation(
+        project_dir=tmp_path,
+        shot={
+            "id": "s1",
+            "prompt": "Lin finds the envelope.",
+            "characters": ["c1"],
+            "asset_ids": ["asset-c1-ref"],
+            "shot_intent": "Push into the clue as fear lands.",
+            "shot_language": {
+                "shot_size": "medium_close",
+                "camera_movement": "dolly_in",
+                "lens_mm": 50,
+                "depth_of_field": "shallow",
+            },
+        },
+        series_bible={
+            "style_lock": "rainy neon suspense",
+            "characters": [{"id": "c1", "name": "Lin", "visual_lock": "red coat"}],
+            "assets": [
+                {
+                    "id": "asset-c1-ref",
+                    "kind": "character",
+                    "label": "Lin reference",
+                    "reference_images": ["projects/p1/assets/images/characters/lin.png"],
+                }
+            ],
+        },
+        video_key="video-key",
+        base_url="https://api.0000238.xyz",
+        video_model="omni_flash-10s",
+    )
+
+    assert "medium close-up" in captured["prompt"]
+    assert "slow dolly in toward subject" in captured["prompt"]
+    assert "50mm lens" in captured["prompt"]
+    assert "projects/p1/assets/images/characters/lin.png" in captured["prompt"]
+    assert "Push into the clue" in captured["prompt"]

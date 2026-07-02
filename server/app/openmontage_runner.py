@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+from lib.shot_prompt_builder import build_shot_prompt
 from server.app.keyring import key_environment
 
 RenderRuntime = Literal["remotion", "hyperframes", "ffmpeg"]
@@ -19,8 +20,22 @@ def compile_shot_prompt(
     shot: dict[str, Any],
     character_lookup: dict[str, dict[str, Any]],
     style_lock: str | None,
+    asset_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     prompt_parts = [str(shot.get("prompt", "")).strip()]
+    shot_language_scene = {
+        "description": str(shot.get("prompt", "")).strip(),
+        "shot_language": shot.get("shot_language") or {},
+        "texture_keywords": shot.get("texture_keywords", []),
+    }
+    shot_language_prompt = build_shot_prompt(
+        shot_language_scene,
+        {"visual_language": {"aesthetic": style_lock or ""}},
+    )
+    if shot_language_prompt and shot_language_prompt != prompt_parts[0]:
+        prompt_parts.append(f"Shot language: {shot_language_prompt}")
+    if shot.get("shot_intent"):
+        prompt_parts.append(f"Shot intent: {shot['shot_intent']}")
     locks: list[str] = []
     for character_id in shot.get("characters", []):
         character = character_lookup.get(str(character_id))
@@ -35,6 +50,21 @@ def compile_shot_prompt(
         prompt_parts.append(f"Location: {shot['location']}")
     if shot.get("props"):
         prompt_parts.append("Props: " + ", ".join(str(prop) for prop in shot["props"]))
+    asset_ids = shot.get("asset_ids") or []
+    if asset_lookup and asset_ids:
+        reference_lines = []
+        for asset_id in asset_ids:
+            asset = asset_lookup.get(str(asset_id))
+            if not asset:
+                continue
+            reference_images = asset.get("reference_images", [])
+            if reference_images:
+                reference_lines.append(
+                    f"{asset.get('label', asset_id)} ({asset.get('kind', 'asset')}) -> "
+                    + ", ".join(str(reference) for reference in reference_images)
+                )
+        if reference_lines:
+            prompt_parts.append("Reference assets: " + "; ".join(reference_lines))
     return ". ".join(part for part in prompt_parts if part)
 
 
@@ -46,6 +76,7 @@ def build_pipeline_inputs(
 ) -> dict[str, dict[str, Any]]:
     characters = series_bible.get("characters", [])
     character_lookup = {str(character.get("id")): character for character in characters}
+    asset_lookup = {str(asset.get("id")): asset for asset in series_bible.get("assets", [])}
     style_lock = series_bible.get("style_lock") or "vertical short drama, cinematic continuity"
     shots = sorted(storyboard.get("shots", []), key=lambda shot: int(shot.get("index", 0)))
 
@@ -57,7 +88,7 @@ def build_pipeline_inputs(
         scene_id = str(shot.get("scene_id") or shot_id)
         start_seconds = zero_index * 5
         end_seconds = start_seconds + 5
-        compiled_prompt = compile_shot_prompt(shot, character_lookup, style_lock)
+        compiled_prompt = compile_shot_prompt(shot, character_lookup, style_lock, asset_lookup)
 
         scenes.append(
             {
@@ -72,6 +103,8 @@ def build_pipeline_inputs(
                 "information_role": str(shot.get("beat", "story beat")),
                 "hero_moment": zero_index == max(len(shots) - 2, 0),
                 "texture_keywords": ["rain", "neon", "high contrast"],
+                "shot_language": shot.get("shot_language") or {},
+                "shot_intent": shot.get("shot_intent"),
                 "required_assets": [
                     {
                         "type": "video",
@@ -177,7 +210,16 @@ def run_single_shot_generation(
         str(character.get("id")): character
         for character in series_bible.get("characters", [])
     }
-    prompt = compile_shot_prompt(shot, character_lookup, series_bible.get("style_lock"))
+    asset_lookup = {
+        str(asset.get("id")): asset
+        for asset in series_bible.get("assets", [])
+    }
+    prompt = compile_shot_prompt(
+        shot,
+        character_lookup,
+        series_bible.get("style_lock"),
+        asset_lookup,
+    )
     shot_id = str(shot.get("id", "shot"))
     output_path = project_path / "assets" / "video" / f"{shot_id}.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
