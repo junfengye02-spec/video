@@ -14,6 +14,7 @@ from server.app.keyring import key_environment, mask_key
 from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot
 from server.app.openmontage_runner import render_short_drama_project
 from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
+from server.app.storyboard_generator import generate_short_drama_storyboard
 from server.app.storage import WorkbenchStore
 
 DEFAULT_TEXT_MODEL = "gpt-5.5"
@@ -102,7 +103,21 @@ def create_app(
     ) -> dict[str, Any]:
         key_environment(payload.video_key, payload.base_url)
         project = workbench.create_project(title=payload.title, mode="short_drama")
-        result = build_mock_short_drama(payload.prompt)
+        try:
+            result = generate_short_drama_storyboard(
+                title=payload.title,
+                prompt=payload.prompt,
+                model=payload.text_model,
+                base_url=payload.base_url,
+                api_key=payload.text_key,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Text model storyboard generation failed: {exc}") from exc
+
+        result["consistency_report"] = evaluate_storyboard_consistency(
+            result["series_bible"],
+            result["storyboard"],
+        )
 
         workbench.write_artifact(project.id, "series_bible.json", result["series_bible"])
         workbench.write_artifact(project.id, "episode_storyboard.json", result["storyboard"])

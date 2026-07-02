@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from server.app.main import create_app
@@ -6,6 +7,120 @@ from server.app.main import create_app
 TEXT_TEST_KEY = "txt-test-key-1234567890abcdef"
 IMAGE_TEST_KEY = "img-test-key-1234567890abcdef"
 VIDEO_TEST_KEY = "vid-test-key-1234567890abcdef"
+
+
+def _fake_storyboard_result() -> dict:
+    return {
+        "series_bible": {
+            "title": "Rain Alley",
+            "mode": "short_drama",
+            "style_lock": "rainy neon suspense",
+            "characters": [
+                {
+                    "id": "c1",
+                    "name": "Lin",
+                    "role": "lead investigator",
+                    "visual_lock": "red coat, short hair",
+                    "voice": None,
+                    "reference_images": [],
+                    "locked": True,
+                },
+                {
+                    "id": "c2",
+                    "name": "Chen",
+                    "role": "boss hiding the truth",
+                    "visual_lock": "black suit, silver glasses",
+                    "voice": None,
+                    "reference_images": [],
+                    "locked": True,
+                },
+            ],
+        },
+        "storyboard": {
+            "shots": [
+                {
+                    "id": "s1",
+                    "scene_id": "scene-1",
+                    "index": 1,
+                    "beat": "Hook",
+                    "prompt": "Lin in red coat finds the envelope.",
+                    "characters": ["c1"],
+                    "location": "rainy alley",
+                    "props": ["envelope"],
+                    "shot_intent": "Reveal the clue.",
+                    "shot_language": {"shot_size": "medium_close", "camera_movement": "dolly_in"},
+                    "status": "ready",
+                    "consistency_score": 100,
+                    "output_url": None,
+                    "output_path": None,
+                    "version": 1,
+                    "history": [],
+                },
+                {
+                    "id": "s2",
+                    "scene_id": "scene-1",
+                    "index": 2,
+                    "beat": "Confrontation",
+                    "prompt": "Chen corners Lin at the elevator.",
+                    "characters": ["c1", "c2"],
+                    "location": "office elevator lobby",
+                    "props": ["security badge"],
+                    "shot_intent": "Show the antagonist applying pressure.",
+                    "shot_language": {"shot_size": "medium", "camera_movement": "tracking_right"},
+                    "status": "ready",
+                    "consistency_score": 100,
+                    "output_url": None,
+                    "output_path": None,
+                    "version": 1,
+                    "history": [],
+                },
+                {
+                    "id": "s3",
+                    "scene_id": "scene-2",
+                    "index": 3,
+                    "beat": "Witness",
+                    "prompt": "Aunt Mei reveals the recording.",
+                    "characters": ["c1"],
+                    "location": "tea shop doorway",
+                    "props": ["phone"],
+                    "shot_intent": "Deepen the conspiracy with a witness reveal.",
+                    "shot_language": {"shot_size": "over_shoulder", "camera_movement": "rack_focus"},
+                    "status": "ready",
+                    "consistency_score": 100,
+                    "output_url": None,
+                    "output_path": None,
+                    "version": 1,
+                    "history": [],
+                },
+                {
+                    "id": "s4",
+                    "scene_id": "scene-2",
+                    "index": 4,
+                    "beat": "Reversal",
+                    "prompt": "Lin confronts Chen under the billboard.",
+                    "characters": ["c1", "c2"],
+                    "location": "rainy alley",
+                    "props": ["phone"],
+                    "shot_intent": "Flip the power dynamic.",
+                    "shot_language": {"shot_size": "medium_wide", "camera_movement": "handheld"},
+                    "status": "ready",
+                    "consistency_score": 100,
+                    "output_url": None,
+                    "output_path": None,
+                    "version": 1,
+                    "history": [],
+                },
+            ]
+        },
+    }
+
+
+@pytest.fixture(autouse=True)
+def stub_storyboard_generator(monkeypatch):
+    monkeypatch.setattr(
+        "server.app.main.generate_short_drama_storyboard",
+        lambda **kwargs: _fake_storyboard_result(),
+    )
 
 
 def test_key_session_returns_masked_key(tmp_path):
@@ -61,6 +176,38 @@ def test_create_short_drama_project_returns_storyboard(tmp_path):
     assert body["project"]["title"] == "Rain Alley"
     assert len(body["series_bible"]["characters"]) >= 2
     assert len(body["storyboard"]["shots"]) >= 4
+
+
+def test_create_short_drama_project_uses_text_model_storyboard_generator(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    calls = []
+
+    def fake_generate_short_drama_storyboard(**kwargs):
+        calls.append(kwargs)
+        return _fake_storyboard_result()
+
+    monkeypatch.setattr("server.app.main.generate_short_drama_storyboard", fake_generate_short_drama_storyboard)
+
+    response = client.post(
+        "/api/projects/short-drama",
+        json={
+            "title": "Rain Alley",
+            "prompt": "rain-night urban reversal short drama",
+            "text_key": TEXT_TEST_KEY,
+            "image_key": IMAGE_TEST_KEY,
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "text_model": "gpt-5.5",
+            "image_model": "gpt-image-2",
+            "video_model": "omni_flash-10s",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls[0]["model"] == "gpt-5.5"
+    assert calls[0]["api_key"] == TEXT_TEST_KEY
+    assert response.json()["storyboard"]["shots"][0]["shot_language"]["shot_size"] == "medium_close"
 
 
 def test_load_project_returns_written_artifacts(tmp_path):
