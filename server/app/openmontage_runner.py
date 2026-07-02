@@ -23,16 +23,21 @@ def compile_shot_prompt(
     asset_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     prompt_parts = [str(shot.get("prompt", "")).strip()]
+    shot_language = shot.get("shot_language") or {}
     shot_language_scene = {
         "description": str(shot.get("prompt", "")).strip(),
-        "shot_language": shot.get("shot_language") or {},
+        "shot_language": shot_language,
         "texture_keywords": shot.get("texture_keywords", []),
     }
     shot_language_prompt = build_shot_prompt(
         shot_language_scene,
         {"visual_language": {"aesthetic": style_lock or ""}},
     )
-    if shot_language_prompt and shot_language_prompt != prompt_parts[0]:
+    if (
+        _has_meaningful_shot_language(shot_language)
+        and shot_language_prompt
+        and shot_language_prompt != prompt_parts[0]
+    ):
         prompt_parts.append(f"Shot language: {shot_language_prompt}")
     if shot.get("shot_intent"):
         prompt_parts.append(f"Shot intent: {shot['shot_intent']}")
@@ -66,6 +71,24 @@ def compile_shot_prompt(
         if reference_lines:
             prompt_parts.append("Reference assets: " + "; ".join(reference_lines))
     return ". ".join(part for part in prompt_parts if part)
+
+
+def _has_meaningful_shot_language(shot_language: Any) -> bool:
+    if not isinstance(shot_language, dict):
+        return False
+
+    for value in shot_language.values():
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, (list, tuple, set)) and any(
+            isinstance(item, str) and item.strip() or item not in (None, "", [], {}, ())
+            for item in value
+        ):
+            return True
+        if value not in (None, "", [], {}, ()):
+            return True
+
+    return False
 
 
 def build_pipeline_inputs(

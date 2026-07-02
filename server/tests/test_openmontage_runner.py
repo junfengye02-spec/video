@@ -3,6 +3,7 @@ import os
 
 from server.app.openmontage_runner import (
     build_pipeline_inputs,
+    compile_shot_prompt,
     compose_final_video,
     run_single_shot_generation,
     write_pipeline_artifacts,
@@ -205,3 +206,15 @@ def test_run_single_shot_generation_prompt_includes_shot_language_and_asset_refe
     assert "50mm lens" in captured["prompt"]
     assert "projects/p1/assets/images/characters/lin.png" in captured["prompt"]
     assert "Push into the clue" in captured["prompt"]
+
+
+def test_compile_shot_prompt_skips_shot_language_label_without_structured_values():
+    prompt = compile_shot_prompt(
+        shot={"prompt": "Lin finds the envelope.", "characters": []},
+        character_lookup={},
+        style_lock="rainy neon suspense",
+    )
+
+    assert "Shot language:" not in prompt
+    assert "Shot language: Lin finds the envelope." not in prompt
+    assert "Style lock: rainy neon suspense" in prompt
