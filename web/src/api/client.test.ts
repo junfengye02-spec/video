@@ -42,6 +42,64 @@ describe("createShortDramaProject", () => {
     );
     expect(result.project.id).toBe("p1");
   });
+
+  it("returns shot intent and structured shot language on storyboard shots", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        project: { id: "p1", title: "Rain Alley" },
+        storyboard: {
+          shots: [
+            {
+              id: "shot-1",
+              scene_id: "scene-1",
+              index: 1,
+              beat: "Lin finds the envelope",
+              prompt: "Lin in a red coat finds a soaked envelope.",
+              characters: ["lin"],
+              location: "rainy alley",
+              props: ["envelope"],
+              status: "pending",
+              consistency_score: 0.92,
+              output_url: "https://example.com/shot-1.mp4",
+              output_path: "projects/p1/shots/shot-1.mp4",
+              shot_intent: "Start with a tense clue reveal.",
+              shot_language: {
+                shot_size: "medium_close",
+                camera_movement: "dolly_in",
+                lens_mm: 50,
+                depth_of_field: "shallow",
+                lighting_key: "neon",
+                color_temperature: "cool",
+              },
+            },
+          ],
+        },
+      }),
+    });
+
+    const result = await createShortDramaProject(
+      {
+        title: "Rain Alley",
+        prompt: "rainy short drama",
+        text_key: "text-key",
+        image_key: "image-key",
+        video_key: "video-key",
+        base_url: "https://api.0000238.xyz",
+        text_model: "gpt-5.5",
+        image_model: "gpt-image-2",
+        video_model: "veo_3_1-lite",
+      },
+      fetchMock as unknown as typeof fetch,
+    );
+
+    expect(result.storyboard.shots[0].shot_language?.shot_size).toBe(
+      "medium_close",
+    );
+    expect(result.storyboard.shots[0].shot_intent).toBe(
+      "Start with a tense clue reveal.",
+    );
+  });
 });
 
 describe("renderProject", () => {
