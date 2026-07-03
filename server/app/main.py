@@ -218,9 +218,9 @@ def create_app(
                 api_key=payload.text_key,
                 context={"target": payload.target, "target_id": payload.target_id, "mode": payload.mode},
             )
+            return PromptOptimizeResponse(project_id=project_id, model=payload.text_model, **result)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Text model prompt optimization failed: {exc}") from exc
-        return PromptOptimizeResponse(project_id=project_id, model=payload.text_model, **result)
 
     @app.post("/api/projects/{project_id}/shots/{shot_id}/regenerate")
     def regenerate_shot(

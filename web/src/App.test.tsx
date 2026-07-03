@@ -326,6 +326,59 @@ describe("App", () => {
     ));
   });
 
+  it("preserves newer user-entered shot intent when optimize resolves without shot_intent", async () => {
+    let resolveOptimize: ((value: {
+      project_id: string;
+      model: string;
+      optimized_text: string;
+      notes: string[];
+      shot_language?: { shot_size: "close_up" };
+    }) => void) | undefined;
+
+    apiMocks.optimizePrompt.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOptimize = resolve;
+      }),
+    );
+
+    render(<App />);
+    await createStoryboard();
+
+    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.optimizeAction }));
+    await waitFor(() => expect(apiMocks.optimizePrompt).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText(strings.shotEditor.intentLabel), {
+      target: { value: "Hold on Mara as she rethinks the clue." },
+    });
+
+    resolveOptimize?.({
+      project_id: "p1",
+      model: "gpt-5.5",
+      optimized_text: "Lin in red coat opens the soaked envelope under neon rain.",
+      notes: ["rewritten by text model as structured shot JSON"],
+      shot_language: { shot_size: "close_up" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(strings.shotEditor.promptLabel)).toHaveValue(
+        "Lin in red coat opens the soaked envelope under neon rain.",
+      ),
+    );
+    expect(screen.getByLabelText(strings.shotEditor.intentLabel)).toHaveValue(
+      "Hold on Mara as she rethinks the clue.",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
+
+    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalledWith(
+      "p1",
+      "shot-1",
+      expect.objectContaining({
+        shot_intent: "Hold on Mara as she rethinks the clue.",
+      }),
+    ));
+  });
+
   it("falls back to the default base URL when shot optimization is triggered with a blank base URL input", async () => {
     render(<App />);
     await createStoryboard();

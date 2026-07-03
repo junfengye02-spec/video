@@ -120,6 +120,8 @@ class ShotRegenerateRequest(BaseModel):
 
 
 class PromptOptimizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target: Literal["project", "shot", "asset"]
     target_id: str
     source_text: str = Field(min_length=1)
@@ -134,6 +136,14 @@ class PromptOptimizeRequest(BaseModel):
         stripped = value.strip()
         if not stripped:
             return DEFAULT_SYAPI_BASE_URL
+        return stripped
+
+    @field_validator("text_key")
+    @classmethod
+    def reject_blank_text_key(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("text_key must not be blank")
         return stripped
 
 

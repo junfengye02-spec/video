@@ -265,7 +265,7 @@ export function ShotEditor({
             try {
               const optimized = await onOptimizePrompt(shot, prompt);
               setPrompt(optimized.optimized_text);
-              setShotIntent(optimized.shot_intent ?? shotIntent);
+              setShotIntent((current) => optimized.shot_intent ?? current);
               setShotLanguage((current) => (
                 optimized.shot_language
                   ? { ...current, ...optimized.shot_language }
