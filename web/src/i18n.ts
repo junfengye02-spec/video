@@ -55,6 +55,8 @@ export interface UIStrings {
     renderRequiresStoryboard: string;
     renderFallback: string;
     saveShotFallback: string;
+    optimizeShotFallback: string;
+    missingTextKeyForOptimize: string;
     missingVideoKeyForRender: string;
     missingVideoKeyForRegenerate: string;
     regenerateShotFallback: (shotId: string) => string;
@@ -84,6 +86,8 @@ export interface UIStrings {
     >;
     depthOfFieldOptions: Record<"shallow" | "medium" | "deep", string>;
     colorTemperatureOptions: Record<"cool" | "neutral" | "warm" | "mixed", string>;
+    optimizeAction: string;
+    optimizingAction: string;
     saveAction: string;
     savingAction: string;
   };
@@ -154,6 +158,8 @@ const STRINGS: Record<Locale, UIStrings> = {
       renderRequiresStoryboard: "Create a storyboard before rendering final video.",
       renderFallback: "Unable to render final video.",
       saveShotFallback: "Unable to save shot.",
+      optimizeShotFallback: "Unable to optimize shot prompt.",
+      missingTextKeyForOptimize: "Enter a text API key before optimizing a shot prompt.",
       missingVideoKeyForRender: "Enter a video API key before rendering final video.",
       missingVideoKeyForRegenerate: "Enter a video API key before regenerating a shot.",
       regenerateShotFallback: (shotId: string) => `Unable to regenerate ${shotId}.`,
@@ -222,6 +228,8 @@ const STRINGS: Record<Locale, UIStrings> = {
         warm: "Warm",
         mixed: "Mixed",
       },
+      optimizeAction: "Optimize shot",
+      optimizingAction: "Optimizing shot",
       saveAction: "Save shot",
       savingAction: "Saving shot",
     },
@@ -298,6 +306,9 @@ const STRINGS: Record<Locale, UIStrings> = {
       renderRequiresStoryboard: "\u8bf7\u5148\u521b\u5efa\u6545\u4e8b\u677f\uff0c\u518d\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
       renderFallback: "\u65e0\u6cd5\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
       saveShotFallback: "\u65e0\u6cd5\u4fdd\u5b58\u955c\u5934\u3002",
+      optimizeShotFallback: "\u65e0\u6cd5\u4f18\u5316\u955c\u5934\u63d0\u793a\u8bcd\u3002",
+      missingTextKeyForOptimize:
+        "\u8bf7\u5148\u8f93\u5165 text API key\uff0c\u518d\u4f18\u5316\u955c\u5934\u63d0\u793a\u8bcd\u3002",
       missingVideoKeyForRender:
         "\u8bf7\u5148\u8f93\u5165 video API key\uff0c\u518d\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
       missingVideoKeyForRegenerate:
@@ -369,6 +380,8 @@ const STRINGS: Record<Locale, UIStrings> = {
         warm: "\u6696\u8272",
         mixed: "\u6df7\u5408",
       },
+      optimizeAction: "\u4f18\u5316\u955c\u5934",
+      optimizingAction: "\u6b63\u5728\u4f18\u5316\u955c\u5934",
       saveAction: "\u4fdd\u5b58\u955c\u5934",
       savingAction: "\u6b63\u5728\u4fdd\u5b58\u955c\u5934",
     },

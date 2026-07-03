@@ -6,6 +6,7 @@ import { getStrings } from "./i18n";
 const apiMocks = vi.hoisted(() => ({
   createShortDramaProject: vi.fn(),
   loadProject: vi.fn(),
+  optimizePrompt: vi.fn(),
   regenerateShot: vi.fn(),
   renderProject: vi.fn(),
   saveGatewayKey: vi.fn(),
@@ -77,6 +78,10 @@ const sampleProjectResponse = {
 const strings = getStrings("en");
 const originalNavigatorLanguage = navigator.language;
 
+function cloneProjectResponse() {
+  return structuredClone(sampleProjectResponse);
+}
+
 function setNavigatorLanguage(language: string) {
   Object.defineProperty(window.navigator, "language", {
     configurable: true,
@@ -112,8 +117,21 @@ describe("App", () => {
     vi.clearAllMocks();
     window.localStorage.clear();
     setNavigatorLanguage("en-US");
-    apiMocks.createShortDramaProject.mockResolvedValue(sampleProjectResponse);
-    apiMocks.loadProject.mockResolvedValue(sampleProjectResponse);
+    apiMocks.createShortDramaProject.mockResolvedValue(cloneProjectResponse());
+    apiMocks.loadProject.mockResolvedValue(cloneProjectResponse());
+    apiMocks.optimizePrompt.mockResolvedValue({
+      project_id: "p1",
+      model: "gpt-5.5",
+      optimized_text: "Lin in red coat opens the soaked envelope under neon rain.",
+      notes: ["rewritten by text model as structured shot JSON"],
+      shot_intent: "Push into the clue as Lin realizes the betrayal.",
+      shot_language: {
+        shot_size: "close_up",
+        camera_movement: "dolly_in",
+        lens_mm: 85,
+        depth_of_field: "shallow",
+      },
+    });
     apiMocks.subscribeProjectEvents.mockReturnValue(vi.fn());
     apiMocks.saveShot.mockResolvedValue({
       job_id: "j-save",
@@ -196,7 +214,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Shot size")).toBeInTheDocument();
     expect(screen.getByLabelText("Camera movement")).toBeInTheDocument();
     expect(screen.getByLabelText("Shot intent")).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: /Mara/i })).toBeChecked();
+    await waitFor(() => expect(screen.getByRole("checkbox", { name: /Mara/i })).toBeChecked());
 
     fireEvent.change(screen.getByLabelText("Shot size"), { target: { value: "close_up" } });
     fireEvent.change(screen.getByLabelText("Camera movement"), { target: { value: "dolly_in" } });
@@ -218,6 +236,49 @@ describe("App", () => {
         }),
       }),
     );
+  });
+
+  it("optimizes a shot prompt into prompt, intent, and shot language before save", async () => {
+    render(<App />);
+    await createStoryboard();
+
+    fireEvent.change(screen.getByLabelText(strings.shotEditor.promptLabel), {
+      target: { value: "Lin opens envelope." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.optimizeAction }));
+
+    await waitFor(() => expect(apiMocks.optimizePrompt).toHaveBeenCalledWith(
+      "p1",
+      expect.objectContaining({
+        target: "shot",
+        target_id: "shot-1",
+        source_text: "Lin opens envelope.",
+        mode: "shot_json",
+      }),
+    ));
+    expect(screen.getByLabelText(strings.shotEditor.promptLabel)).toHaveValue(
+      "Lin in red coat opens the soaked envelope under neon rain.",
+    );
+    expect(screen.getByLabelText(strings.shotEditor.intentLabel)).toHaveValue(
+      "Push into the clue as Lin realizes the betrayal.",
+    );
+    expect(screen.getByLabelText(strings.shotEditor.shotSizeLabel)).toHaveValue("close_up");
+    expect(screen.getByLabelText(strings.shotEditor.cameraMovementLabel)).toHaveValue("dolly_in");
+
+    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
+
+    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalledWith(
+      "p1",
+      "shot-1",
+      expect.objectContaining({
+        prompt: "Lin in red coat opens the soaked envelope under neon rain.",
+        shot_intent: "Push into the clue as Lin realizes the betrayal.",
+        shot_language: expect.objectContaining({
+          shot_size: "close_up",
+          camera_movement: "dolly_in",
+        }),
+      }),
+    ));
   });
 
   it("requires a video key before regenerating a shot", async () => {

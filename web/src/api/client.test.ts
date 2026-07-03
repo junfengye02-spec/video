@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ShotRegenerateRequest, ShotSaveRequest } from "../domain/types";
+import type {
+  PromptOptimizeRequest,
+  ShotRegenerateRequest,
+  ShotSaveRequest,
+} from "../domain/types";
 import {
   createShortDramaProject,
+  optimizePrompt,
   regenerateShot,
   renderProject,
   saveShot,
@@ -169,6 +174,46 @@ describe("saveShot", () => {
       expect.objectContaining({ method: "PATCH", body: JSON.stringify(payload) }),
     );
     expect(result.event.stage).toBe("save");
+  });
+});
+
+describe("optimizePrompt", () => {
+  it("posts mode and returns structured shot fields from the optimize endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        project_id: "p1",
+        model: "gpt-5.5",
+        optimized_text: "Lin in red coat opens the soaked envelope under neon rain.",
+        notes: ["rewritten by text model as structured shot JSON"],
+        shot_intent: "Push into the clue as Lin realizes the betrayal.",
+        shot_language: {
+          shot_size: "close_up",
+          camera_movement: "dolly_in",
+          lens_mm: 85,
+          depth_of_field: "shallow",
+        },
+      }),
+    });
+    const payload: PromptOptimizeRequest = {
+      target: "shot",
+      target_id: "s1",
+      source_text: "Lin opens envelope.",
+      text_key: "text-key",
+      base_url: "https://api.0000238.xyz",
+      text_model: "gpt-5.5",
+      mode: "shot_json",
+    };
+
+    const result = await optimizePrompt("p1", payload, fetchMock as unknown as typeof fetch);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/p1/prompt-optimize",
+      expect.objectContaining({ method: "POST", body: JSON.stringify(payload) }),
+    );
+    expect(result.optimized_text).toContain("red coat");
+    expect(result.shot_intent).toContain("betrayal");
+    expect(result.shot_language?.camera_movement).toBe("dolly_in");
   });
 });
 

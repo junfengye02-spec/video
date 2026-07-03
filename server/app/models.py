@@ -117,6 +117,25 @@ class ShotRegenerateRequest(BaseModel):
         return stripped
 
 
+class PromptOptimizeRequest(BaseModel):
+    target: Literal["project", "shot", "asset"]
+    target_id: str
+    source_text: str = Field(min_length=1)
+    text_key: str = Field(min_length=1)
+    base_url: str = "https://api.0000238.xyz"
+    text_model: str = "gpt-5.5"
+    mode: Literal["text", "shot_json"] = "text"
+
+
+class PromptOptimizeResponse(BaseModel):
+    project_id: str
+    model: str
+    optimized_text: str
+    notes: list[str] = Field(default_factory=list)
+    shot_intent: str | None = None
+    shot_language: ShotLanguage | None = None
+
+
 class Character(BaseModel):
     id: str
     name: str

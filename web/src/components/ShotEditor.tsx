@@ -1,13 +1,15 @@
-import { Check } from "lucide-react";
+import { Check, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { Character, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
+import type { Character, PromptOptimizeResponse, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
 import type { UIStrings } from "../i18n";
 
 interface ShotEditorProps {
   characters: Character[];
+  optimizing: boolean;
   shot: Shot | null;
   saving: boolean;
   strings: UIStrings["shotEditor"];
+  onOptimizePrompt: (shot: Shot, prompt: string) => Promise<PromptOptimizeResponse>;
   onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
 }
 
@@ -37,7 +39,15 @@ function splitList(value: string): string[] {
     .filter(Boolean);
 }
 
-export function ShotEditor({ characters, shot, saving, strings, onSaveShot }: ShotEditorProps) {
+export function ShotEditor({
+  characters,
+  optimizing,
+  shot,
+  saving,
+  strings,
+  onOptimizePrompt,
+  onSaveShot,
+}: ShotEditorProps) {
   const [prompt, setPrompt] = useState("");
   const [location, setLocation] = useState("");
   const [propsText, setPropsText] = useState("");
@@ -244,6 +254,27 @@ export function ShotEditor({ characters, shot, saving, strings, onSaveShot }: Sh
         </label>
       </div>
       <div className="chat-actions">
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!shot || saving || optimizing}
+          onClick={async () => {
+            if (!shot) {
+              return;
+            }
+            try {
+              const optimized = await onOptimizePrompt(shot, prompt);
+              setPrompt(optimized.optimized_text);
+              setShotIntent(optimized.shot_intent ?? shotIntent);
+              setShotLanguage(optimized.shot_language ?? shotLanguage);
+            } catch {
+              // App owns the error banner.
+            }
+          }}
+        >
+          <Sparkles aria-hidden="true" size={16} />
+          {optimizing ? strings.optimizingAction : strings.optimizeAction}
+        </button>
         <button
           className="primary-button"
           type="button"

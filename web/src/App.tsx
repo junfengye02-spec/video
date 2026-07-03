@@ -3,6 +3,7 @@ import { Film } from "lucide-react";
 import {
   createShortDramaProject,
   loadProject,
+  optimizePrompt,
   renderProject,
   regenerateShot,
   saveGatewayKey,
@@ -20,6 +21,7 @@ import { detectLocale, getStrings } from "./i18n";
 import type {
   ConsistencyReport,
   JobEvent,
+  PromptOptimizeResponse,
   Project,
   SeriesBible,
   Shot,
@@ -59,6 +61,7 @@ export default function App() {
   const [savingKey, setSavingKey] = useState(false);
   const [creating, setCreating] = useState(false);
   const [rendering, setRendering] = useState(false);
+  const [optimizingShotId, setOptimizingShotId] = useState<string | null>(null);
   const [savingShotId, setSavingShotId] = useState<string | null>(null);
   const [regeneratingShotId, setRegeneratingShotId] = useState<string | null>(null);
   const [finalPath, setFinalPath] = useState<string | null>(null);
@@ -170,6 +173,36 @@ export default function App() {
       setError(err instanceof Error ? err.message : strings.errors.saveShotFallback);
     } finally {
       setSavingShotId(null);
+    }
+  }
+
+  async function handleOptimizeShotPrompt(shot: Shot, sourceText: string): Promise<PromptOptimizeResponse> {
+    if (!project) {
+      throw new Error(strings.errors.optimizeShotFallback);
+    }
+    if (!textKey.trim()) {
+      const message = strings.errors.missingTextKeyForOptimize;
+      setError(message);
+      throw new Error(message);
+    }
+    setOptimizingShotId(shot.id);
+    setError(null);
+    try {
+      return await optimizePrompt(project.id, {
+        target: "shot",
+        target_id: shot.id,
+        source_text: sourceText,
+        text_key: textKey.trim(),
+        base_url: baseUrl.trim(),
+        text_model: textModel.trim() || DEFAULT_TEXT_MODEL,
+        mode: "shot_json",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : strings.errors.optimizeShotFallback;
+      setError(message);
+      throw err instanceof Error ? err : new Error(message);
+    } finally {
+      setOptimizingShotId(null);
     }
   }
 
@@ -294,9 +327,11 @@ export default function App() {
         {error ? <div className="error-banner">{error}</div> : null}
         <ShotEditor
           characters={seriesBible?.characters ?? []}
+          optimizing={optimizingShotId === selectedShot?.id}
           shot={selectedShot}
           saving={savingShotId === selectedShot?.id}
           strings={strings.shotEditor}
+          onOptimizePrompt={handleOptimizeShotPrompt}
           onSaveShot={handleSaveShot}
         />
         <StoryboardWaterfall

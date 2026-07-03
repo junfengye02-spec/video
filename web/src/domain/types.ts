@@ -231,6 +231,25 @@ export interface RenderProjectRequest {
   render_runtime: "ffmpeg";
 }
 
+export interface PromptOptimizeRequest {
+  target: "project" | "shot" | "asset";
+  target_id: string;
+  source_text: string;
+  text_key: string;
+  base_url: string;
+  text_model: string;
+  mode?: "text" | "shot_json";
+}
+
+export interface PromptOptimizeResponse {
+  project_id: string;
+  model: string;
+  optimized_text: string;
+  notes: string[];
+  shot_intent?: string | null;
+  shot_language?: ShotLanguage | null;
+}
+
 export interface ShotSaveRequest {
   prompt?: string | null;
   characters?: string[] | null;

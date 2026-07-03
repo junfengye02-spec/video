@@ -842,6 +842,50 @@ def test_regenerate_shot_failure_persists_failed_status_and_clears_outputs(tmp_p
     assert reloaded_shot["output_url"] is None
 
 
+def test_optimize_prompt_route_returns_structured_shot_fields(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    optimize_calls = []
+
+    def fake_optimize_text_prompt(**kwargs):
+        optimize_calls.append(kwargs)
+        return {
+            "optimized_text": "Lin in red coat opens the soaked envelope under neon rain.",
+            "shot_intent": "Push into the clue as Lin realizes the betrayal.",
+            "shot_language": {
+                "shot_size": "close_up",
+                "camera_movement": "dolly_in",
+                "lens_mm": 85,
+                "depth_of_field": "shallow",
+            },
+            "notes": ["rewritten by text model as structured shot JSON"],
+        }
+
+    monkeypatch.setattr("server.app.main.optimize_text_prompt", fake_optimize_text_prompt)
+
+    response = client.post(
+        f"/api/projects/{project_id}/prompt-optimize",
+        json={
+            "target": "shot",
+            "target_id": "s1",
+            "source_text": "Lin opens envelope.",
+            "text_key": TEXT_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "text_model": "gpt-5.5",
+            "mode": "shot_json",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["optimized_text"].startswith("Lin in red coat")
+    assert body["shot_intent"].startswith("Push into")
+    assert body["shot_language"]["camera_movement"] == "dolly_in"
+    assert optimize_calls[0]["context"] == {"target": "shot", "target_id": "s1", "mode": "shot_json"}
+
+
 def test_render_project_generates_final_video_and_updates_storyboard(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)

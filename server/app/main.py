@@ -14,8 +14,9 @@ from server.app.events import EventBus
 from server.app.key_validation import validate_gateway_models
 from server.app.keyring import key_environment, mask_key
 from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot, update_mock_shot
-from server.app.models import ShotRegenerateRequest, ShotSaveRequest
+from server.app.models import PromptOptimizeRequest, PromptOptimizeResponse, ShotRegenerateRequest, ShotSaveRequest
 from server.app.openmontage_runner import render_short_drama_project, run_single_shot_generation
+from server.app.prompt_optimizer import optimize_text_prompt
 from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
 from server.app.storyboard_generator import generate_short_drama_storyboard
 from server.app.storage import WorkbenchStore
@@ -199,6 +200,27 @@ def create_app(
         )
         event = bus.emit(project_id, job_id=job_id, stage="save", status="complete", message="Shot saved")
         return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
+
+    @app.post("/api/projects/{project_id}/prompt-optimize", response_model=PromptOptimizeResponse)
+    def optimize_prompt(
+        project_id: str,
+        payload: PromptOptimizeRequest,
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> PromptOptimizeResponse:
+        project = workbench.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        try:
+            result = optimize_text_prompt(
+                source_text=payload.source_text,
+                model=payload.text_model,
+                base_url=payload.base_url,
+                api_key=payload.text_key,
+                context={"target": payload.target, "target_id": payload.target_id, "mode": payload.mode},
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Text model prompt optimization failed: {exc}") from exc
+        return PromptOptimizeResponse(project_id=project_id, model=payload.text_model, **result)
 
     @app.post("/api/projects/{project_id}/shots/{shot_id}/regenerate")
     def regenerate_shot(

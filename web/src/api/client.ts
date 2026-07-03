@@ -1,6 +1,8 @@
 import type {
   GatewayKeySession,
   JobEvent,
+  PromptOptimizeRequest,
+  PromptOptimizeResponse,
   ProviderCredentials,
   RenderProjectRequest,
   RegenerateShotResponse,
@@ -83,6 +85,14 @@ export function saveShot(
     },
     fetcher,
   );
+}
+
+export function optimizePrompt(
+  projectId: string,
+  payload: PromptOptimizeRequest,
+  fetcher?: typeof fetch,
+): Promise<PromptOptimizeResponse> {
+  return postJson<PromptOptimizeResponse>(`/api/projects/${projectId}/prompt-optimize`, payload, fetcher);
 }
 
 export function regenerateShot(
