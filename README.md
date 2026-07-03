@@ -152,7 +152,7 @@ The local web workbench is a key-only MVP for SYAPI users. It does not create Op
 
 ### Short Drama Workbench Production Contract
 
-The short-drama Workbench generates structured storyboard shots with shot intent and shot language, including shot size, camera movement, lens, depth of field, lighting, and color temperature. Shot saves update metadata and workflow artifacts; shot regeneration calls the selected video model and includes bound character, scene, and prop references in the generation prompt. The Production panel streams job progress and restores the latest render report when a project is reloaded.
+The short-drama Workbench generates structured storyboard shots through the selected text model, with shot intent and shot language including shot size, camera movement, lens, depth of field, lighting, and color temperature. Shot saves update metadata and refresh workflow artifacts; shot regeneration is a separate video-generation action that calls the selected video model and includes bound character, scene, and prop references in the generation prompt. Provider key checks validate the requested models, the Production panel streams job progress and restores the latest render report on reload, and consistency checks cover shot-language and asset-binding integrity.
 
 Start the backend:
 
