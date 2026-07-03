@@ -215,6 +215,39 @@ describe("optimizePrompt", () => {
     expect(result.shot_intent).toContain("betrayal");
     expect(result.shot_language?.camera_movement).toBe("dolly_in");
   });
+
+  it("supports text-mode optimization when mode and structured shot fields are omitted", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        project_id: "p1",
+        model: "gpt-5.5",
+        optimized_text: "Tighten the alley prompt around Lin's discovery and the rain-soaked envelope.",
+        notes: ["rewritten by text model"],
+      }),
+    });
+    const payload: PromptOptimizeRequest = {
+      target: "project",
+      target_id: "brief-1",
+      source_text: "Lin opens envelope.",
+      text_key: "text-key",
+      base_url: "https://api.0000238.xyz",
+      text_model: "gpt-5.5",
+    };
+
+    const result = await optimizePrompt("p1", payload, fetchMock as unknown as typeof fetch);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/p1/prompt-optimize",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    );
+    expect(result.optimized_text).toContain("rain-soaked envelope");
+    expect(result.shot_intent).toBeUndefined();
+    expect(result.shot_language).toBeUndefined();
+  });
 });
 
 describe("regenerateShot", () => {

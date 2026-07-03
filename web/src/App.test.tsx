@@ -281,6 +281,29 @@ describe("App", () => {
     ));
   });
 
+  it("falls back to the default base URL when shot optimization is triggered with a blank base URL input", async () => {
+    render(<App />);
+    await createStoryboard();
+
+    fireEvent.change(screen.getByLabelText(strings.keyGate.baseUrlLabel), {
+      target: { value: "   " },
+    });
+    fireEvent.change(screen.getByLabelText(strings.shotEditor.promptLabel), {
+      target: { value: "Lin opens envelope." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.optimizeAction }));
+
+    await waitFor(() =>
+      expect(apiMocks.optimizePrompt).toHaveBeenCalledWith(
+        "p1",
+        expect.objectContaining({
+          base_url: "https://api.0000238.xyz",
+          mode: "shot_json",
+        }),
+      ),
+    );
+  });
+
   it("requires a video key before regenerating a shot", async () => {
     render(<App />);
     enterKeys();

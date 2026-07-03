@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from server.app.settings import DEFAULT_SYAPI_BASE_URL
+
 
 class Project(BaseModel):
     id: str
@@ -122,9 +124,17 @@ class PromptOptimizeRequest(BaseModel):
     target_id: str
     source_text: str = Field(min_length=1)
     text_key: str = Field(min_length=1)
-    base_url: str = "https://api.0000238.xyz"
+    base_url: str = DEFAULT_SYAPI_BASE_URL
     text_model: str = "gpt-5.5"
     mode: Literal["text", "shot_json"] = "text"
+
+    @field_validator("base_url")
+    @classmethod
+    def default_blank_base_url(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            return DEFAULT_SYAPI_BASE_URL
+        return stripped
 
 
 class PromptOptimizeResponse(BaseModel):

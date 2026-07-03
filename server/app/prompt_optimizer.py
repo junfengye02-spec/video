@@ -5,6 +5,8 @@ from typing import Any
 
 import requests
 
+from server.app.settings import DEFAULT_SYAPI_BASE_URL
+
 
 def _build_user_message(source_text: str, context: dict[str, Any] | None = None) -> str:
     context = context or {}
@@ -31,8 +33,9 @@ def optimize_text_prompt(
     api_key: str,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    normalized_base_url = base_url.strip() or DEFAULT_SYAPI_BASE_URL
     response = requests.post(
-        url=f"{base_url.rstrip('/')}/v1/chat/completions",
+        url=f"{normalized_base_url.rstrip('/')}/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",

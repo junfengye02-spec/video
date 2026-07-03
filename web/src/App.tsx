@@ -193,7 +193,7 @@ export default function App() {
         target_id: shot.id,
         source_text: sourceText,
         text_key: textKey.trim(),
-        base_url: baseUrl.trim(),
+        base_url: baseUrl.trim() || DEFAULT_BASE_URL,
         text_model: textModel.trim() || DEFAULT_TEXT_MODEL,
         mode: "shot_json",
       });

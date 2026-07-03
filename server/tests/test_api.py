@@ -886,6 +886,42 @@ def test_optimize_prompt_route_returns_structured_shot_fields(tmp_path, monkeypa
     assert optimize_calls[0]["context"] == {"target": "shot", "target_id": "s1", "mode": "shot_json"}
 
 
+def test_optimize_prompt_route_defaults_blank_base_url_and_text_mode(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    optimize_calls = []
+
+    def fake_optimize_text_prompt(**kwargs):
+        optimize_calls.append(kwargs)
+        return {
+            "optimized_text": "Tighten the alley prompt around Lin's discovery and the rain-soaked envelope.",
+            "notes": ["rewritten by text model"],
+        }
+
+    monkeypatch.setattr("server.app.main.optimize_text_prompt", fake_optimize_text_prompt)
+
+    response = client.post(
+        f"/api/projects/{project_id}/prompt-optimize",
+        json={
+            "target": "shot",
+            "target_id": "s1",
+            "source_text": "Lin opens envelope.",
+            "text_key": TEXT_TEST_KEY,
+            "base_url": "   ",
+            "text_model": "gpt-5.5",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["optimized_text"].startswith("Tighten the alley prompt")
+    assert body["notes"] == ["rewritten by text model"]
+    assert optimize_calls[0]["base_url"] == "https://api.0000238.xyz"
+    assert optimize_calls[0]["context"] == {"target": "shot", "target_id": "s1", "mode": "text"}
+
+
 def test_render_project_generates_final_video_and_updates_storyboard(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
