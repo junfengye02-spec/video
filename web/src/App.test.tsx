@@ -26,7 +26,13 @@ const sampleShot = {
   location: "rainy alley",
   props: ["envelope"],
   shot_intent: "Reveal the clue.",
-  shot_language: { shot_size: "medium_close", camera_movement: "dolly_in" },
+  shot_language: {
+    shot_size: "medium_close",
+    camera_movement: "dolly_in",
+    lighting_key: "neon",
+    depth_of_field: "shallow",
+    color_temperature: "cool",
+  },
   status: "ready",
   consistency_score: 100,
   output_url: null,
@@ -276,6 +282,45 @@ describe("App", () => {
         shot_language: expect.objectContaining({
           shot_size: "close_up",
           camera_movement: "dolly_in",
+        }),
+      }),
+    ));
+  });
+
+  it("preserves existing shot language fields when optimize returns only a subset", async () => {
+    apiMocks.optimizePrompt.mockResolvedValueOnce({
+      project_id: "p1",
+      model: "gpt-5.5",
+      optimized_text: "Lin in red coat opens the soaked envelope under neon rain.",
+      notes: ["rewritten by text model as structured shot JSON"],
+      shot_intent: "Push into the clue as Lin realizes the betrayal.",
+      shot_language: {
+        shot_size: "close_up",
+        camera_movement: "dolly_in",
+      },
+    });
+
+    render(<App />);
+    await createStoryboard();
+
+    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.optimizeAction }));
+
+    await waitFor(() =>
+      expect(apiMocks.saveShot).not.toHaveBeenCalled(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
+
+    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalledWith(
+      "p1",
+      "shot-1",
+      expect.objectContaining({
+        shot_language: expect.objectContaining({
+          shot_size: "close_up",
+          camera_movement: "dolly_in",
+          lighting_key: "neon",
+          depth_of_field: "shallow",
+          color_temperature: "cool",
         }),
       }),
     ));

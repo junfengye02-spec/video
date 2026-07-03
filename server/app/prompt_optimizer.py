@@ -61,8 +61,9 @@ def optimize_text_prompt(
 
     if context and context.get("mode") == "shot_json":
         parsed = json.loads(str(content).strip())
+        optimized_text = str(parsed.get("prompt", "")).strip() or source_text.strip()
         return {
-            "optimized_text": str(parsed.get("prompt", "")).strip(),
+            "optimized_text": optimized_text,
             "shot_intent": parsed.get("shot_intent"),
             "shot_language": parsed.get("shot_language"),
             "notes": ["rewritten by text model as structured shot JSON"],

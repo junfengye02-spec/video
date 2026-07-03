@@ -72,3 +72,40 @@ def test_optimize_text_prompt_keeps_text_mode_response_without_shot_fields(monke
         "optimized_text": "Tighten the alley prompt around Lin's discovery and the rain-soaked envelope.",
         "notes": ["rewritten by text model"],
     }
+
+
+def test_optimize_text_prompt_structured_mode_falls_back_to_source_text_when_prompt_missing(monkeypatch):
+    class StructuredResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": """
+{
+  "shot_intent": "Push into the clue as Lin realizes the betrayal.",
+  "shot_language": {
+    "shot_size": "close_up"
+  }
+}
+"""
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("server.app.prompt_optimizer.requests.post", lambda **kwargs: StructuredResponse())
+
+    result = optimize_text_prompt(
+        source_text="Lin opens envelope.",
+        model="gpt-5.5",
+        base_url="https://api.0000238.xyz",
+        api_key="text-key",
+        context={"target": "shot", "target_id": "s1", "mode": "shot_json"},
+    )
+
+    assert result["optimized_text"] == "Lin opens envelope."
+    assert result["shot_intent"].startswith("Push into")

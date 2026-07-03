@@ -266,7 +266,11 @@ export function ShotEditor({
               const optimized = await onOptimizePrompt(shot, prompt);
               setPrompt(optimized.optimized_text);
               setShotIntent(optimized.shot_intent ?? shotIntent);
-              setShotLanguage(optimized.shot_language ?? shotLanguage);
+              setShotLanguage((current) => (
+                optimized.shot_language
+                  ? { ...current, ...optimized.shot_language }
+                  : current
+              ));
             } catch {
               // App owns the error banner.
             }
