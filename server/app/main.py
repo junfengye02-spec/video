@@ -48,8 +48,8 @@ class ShortDramaRequest(BaseModel):
 
 
 class RenderProjectRequest(BaseModel):
-    text_key: str = Field(min_length=1)
-    image_key: str = Field(min_length=1)
+    text_key: str | None = None
+    image_key: str | None = None
     video_key: str = Field(min_length=1)
     base_url: str = DEFAULT_SYAPI_BASE_URL
     text_model: str = DEFAULT_TEXT_MODEL
@@ -150,11 +150,17 @@ def create_app(
         project = workbench.get_project(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
+        render_report = workbench.read_artifact(project_id, "render_report.json")
+        final_path = None
+        if render_report and render_report.get("outputs"):
+            final_path = render_report["outputs"][0].get("path")
         return {
             "project": project.model_dump(),
             "series_bible": workbench.read_artifact(project_id, "series_bible.json"),
             "storyboard": workbench.read_artifact(project_id, "episode_storyboard.json"),
             "consistency_report": workbench.read_artifact(project_id, "consistency_report.json"),
+            "render_report": render_report,
+            "final_path": final_path,
         }
 
     @app.patch("/api/projects/{project_id}/shots/{shot_id}")

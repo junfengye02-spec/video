@@ -5,6 +5,7 @@ import { getStrings } from "./i18n";
 
 const apiMocks = vi.hoisted(() => ({
   createShortDramaProject: vi.fn(),
+  loadProject: vi.fn(),
   regenerateShot: vi.fn(),
   renderProject: vi.fn(),
   saveGatewayKey: vi.fn(),
@@ -94,8 +95,10 @@ describe("App", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
     setNavigatorLanguage("en-US");
     apiMocks.createShortDramaProject.mockResolvedValue(sampleProjectResponse);
+    apiMocks.loadProject.mockResolvedValue(sampleProjectResponse);
     apiMocks.subscribeProjectEvents.mockReturnValue(vi.fn());
     apiMocks.saveShot.mockResolvedValue({
       job_id: "j-save",
@@ -183,7 +186,7 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Video API Key"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "Regenerate shot 1" }));
 
-    expect(await screen.findByText(strings.errors.regenerateRequiresVideoKey)).toBeInTheDocument();
+    expect(await screen.findByText(strings.errors.missingVideoKeyForRegenerate)).toBeInTheDocument();
     expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
   });
 
@@ -203,7 +206,7 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText(zh.keyGate.videoKeyLabel), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) }));
 
-    expect(await screen.findByText(zh.errors.regenerateRequiresVideoKey)).toBeInTheDocument();
+    expect(await screen.findByText(zh.errors.missingVideoKeyForRegenerate)).toBeInTheDocument();
     expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
   });
 
@@ -242,11 +245,114 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
     await screen.findByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) });
 
-    fireEvent.change(screen.getByLabelText(zh.keyGate.imageKeyLabel), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText(zh.keyGate.videoKeyLabel), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: zh.appShell.renderFinalVideoAction }));
 
-    expect(await screen.findByText(zh.errors.renderRequiresKeys)).toBeInTheDocument();
+    expect(await screen.findByText(zh.errors.missingVideoKeyForRender)).toBeInTheDocument();
     expect(apiMocks.renderProject).not.toHaveBeenCalled();
+  });
+
+  it("allows render with only a video key after a storyboard exists", async () => {
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-1",
+      event: {
+        id: "event-render-1",
+        job_id: "render-1",
+        project_id: "p1",
+        stage: "render",
+        status: "complete",
+        message: "Rendered",
+        created_at: "now",
+      },
+      project: sampleProjectResponse.project,
+      storyboard: sampleProjectResponse.storyboard,
+      consistency_report: sampleProjectResponse.consistency_report,
+      render_report: {
+        version: "1.0",
+        outputs: [
+          {
+            path: "projects/p1/renders/final.mp4",
+            format: "mp4",
+            resolution: "720x1280",
+            duration_seconds: 25,
+          },
+        ],
+      },
+      final_path: "projects/p1/renders/final.mp4",
+    });
+
+    render(<App />);
+    enterKeys();
+    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
+
+    await screen.findByRole("button", { name: "Render final video" });
+    fireEvent.change(screen.getByLabelText("Text API Key"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Image API Key"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Render final video" }));
+
+    await waitFor(() =>
+      expect(apiMocks.renderProject).toHaveBeenCalledWith(
+        "p1",
+        expect.objectContaining({ video_key: "video-key" }),
+      ),
+    );
+  });
+
+  it("refreshes project state after render and restores final_path from the loaded snapshot", async () => {
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-1",
+      event: {
+        id: "event-render-1",
+        job_id: "render-1",
+        project_id: "p1",
+        stage: "render",
+        status: "complete",
+        message: "Rendered",
+        created_at: "now",
+      },
+      project: sampleProjectResponse.project,
+      storyboard: sampleProjectResponse.storyboard,
+      consistency_report: sampleProjectResponse.consistency_report,
+      render_report: {
+        version: "1.0",
+        outputs: [],
+      },
+      final_path: "",
+    });
+    apiMocks.loadProject.mockResolvedValue({
+      ...sampleProjectResponse,
+      render_report: {
+        version: "1.0",
+        outputs: [
+          {
+            path: "projects/p1/renders/final.mp4",
+            format: "mp4",
+            resolution: "720x1280",
+            duration_seconds: 25,
+          },
+        ],
+      },
+      final_path: "projects/p1/renders/final.mp4",
+    });
+
+    render(<App />);
+    enterKeys();
+    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
+
+    await screen.findByRole("button", { name: "Render final video" });
+    fireEvent.click(screen.getByRole("button", { name: "Render final video" }));
+
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledWith("p1"));
+    expect(await screen.findByText("projects/p1/renders/final.mp4")).toBeInTheDocument();
+  });
+
+  it("does not auto-load a stored project on mount", async () => {
+    window.localStorage.setItem("openmontage:projectId", "p1");
+
+    render(<App />);
+
+    await waitFor(() => expect(apiMocks.loadProject).not.toHaveBeenCalled());
+    expect(screen.queryByText("projects/p1/renders/final.mp4")).not.toBeInTheDocument();
   });
 
   it("localizes storyboard status labels in Chinese while preserving current English labels", async () => {
@@ -324,11 +430,13 @@ describe("App", () => {
 
     expect(strings.shotEditor.promptLabel).toBe("Shot prompt");
     expect(strings.shotEditor.saveAction).toBe("Save shot");
-    expect(strings.errors.regenerateRequiresVideoKey).toBe("Enter a video API key before regenerating a shot.");
+    expect(strings.errors.missingVideoKeyForRegenerate).toBe("Enter a video API key before regenerating a shot.");
+    expect(strings.errors.missingVideoKeyForRender).toBe("Enter a video API key before rendering final video.");
 
     expect(zh.shotEditor.promptLabel).toBeTruthy();
     expect(zh.shotEditor.saveAction).toBeTruthy();
-    expect(zh.errors.regenerateRequiresVideoKey).toBeTruthy();
+    expect(zh.errors.missingVideoKeyForRegenerate).toBeTruthy();
+    expect(zh.errors.missingVideoKeyForRender).toBeTruthy();
   });
 
   it("renders the Chinese project-title placeholder for zh-CN browser locales", () => {

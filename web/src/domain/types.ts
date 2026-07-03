@@ -184,6 +184,8 @@ export interface ShortDramaProjectResponse {
   series_bible: SeriesBible;
   storyboard: Storyboard;
   consistency_report: ConsistencyReport;
+  render_report?: RenderReport | null;
+  final_path?: string | null;
 }
 
 export interface RegenerateShotResponse {
@@ -216,6 +218,17 @@ export interface RenderProjectResponse {
   consistency_report: ConsistencyReport;
   render_report: RenderReport;
   final_path: string;
+}
+
+export interface RenderProjectRequest {
+  text_key?: string | null;
+  image_key?: string | null;
+  video_key: string;
+  base_url: string;
+  text_model?: string | null;
+  image_model?: string | null;
+  video_model: string;
+  render_runtime: "ffmpeg";
 }
 
 export interface ShotSaveRequest {

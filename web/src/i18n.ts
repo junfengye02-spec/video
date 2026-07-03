@@ -53,10 +53,10 @@ export interface UIStrings {
     createStoryboardRequiresKeys: string;
     createProjectFallback: string;
     renderRequiresStoryboard: string;
-    renderRequiresKeys: string;
     renderFallback: string;
     saveShotFallback: string;
-    regenerateRequiresVideoKey: string;
+    missingVideoKeyForRender: string;
+    missingVideoKeyForRegenerate: string;
     regenerateShotFallback: (shotId: string) => string;
   };
   shotEditor: {
@@ -136,10 +136,10 @@ const STRINGS: Record<Locale, UIStrings> = {
       createStoryboardRequiresKeys: "Enter text, image, and video API keys before creating a storyboard.",
       createProjectFallback: "Unable to create project.",
       renderRequiresStoryboard: "Create a storyboard before rendering final video.",
-      renderRequiresKeys: "Enter text, image, and video API keys before rendering final video.",
       renderFallback: "Unable to render final video.",
       saveShotFallback: "Unable to save shot.",
-      regenerateRequiresVideoKey: "Enter a video API key before regenerating a shot.",
+      missingVideoKeyForRender: "Enter a video API key before rendering final video.",
+      missingVideoKeyForRegenerate: "Enter a video API key before regenerating a shot.",
       regenerateShotFallback: (shotId: string) => `Unable to regenerate ${shotId}.`,
     },
     shotEditor: {
@@ -225,11 +225,11 @@ const STRINGS: Record<Locale, UIStrings> = {
         "\u8bf7\u5148\u8f93\u5165 text\u3001image \u548c video API key\uff0c\u518d\u521b\u5efa\u6545\u4e8b\u677f\u3002",
       createProjectFallback: "\u65e0\u6cd5\u521b\u5efa\u9879\u76ee\u3002",
       renderRequiresStoryboard: "\u8bf7\u5148\u521b\u5efa\u6545\u4e8b\u677f\uff0c\u518d\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
-      renderRequiresKeys:
-        "\u8bf7\u5148\u8f93\u5165 text\u3001image \u548c video API key\uff0c\u518d\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
       renderFallback: "\u65e0\u6cd5\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
       saveShotFallback: "\u65e0\u6cd5\u4fdd\u5b58\u955c\u5934\u3002",
-      regenerateRequiresVideoKey:
+      missingVideoKeyForRender:
+        "\u8bf7\u5148\u8f93\u5165 video API key\uff0c\u518d\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
+      missingVideoKeyForRegenerate:
         "\u8bf7\u5148\u8f93\u5165 video API key\uff0c\u518d\u91cd\u65b0\u751f\u6210\u955c\u5934\u3002",
       regenerateShotFallback: (shotId: string) =>
         `\u65e0\u6cd5\u91cd\u65b0\u751f\u6210\u955c\u5934 ${shotId}\u3002`,

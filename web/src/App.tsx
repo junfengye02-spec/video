@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Film } from "lucide-react";
 import {
   createShortDramaProject,
+  loadProject,
   renderProject,
   regenerateShot,
   saveGatewayKey,
@@ -97,6 +98,15 @@ export default function App() {
     return Boolean(textKey.trim() && imageKey.trim() && videoKey.trim());
   }
 
+  async function refreshProjectState(projectId: string) {
+    const snapshot = await loadProject(projectId);
+    setProject(snapshot.project);
+    setSeriesBible(snapshot.series_bible);
+    setStoryboard(snapshot.storyboard);
+    setConsistencyReport(snapshot.consistency_report);
+    setFinalPath(snapshot.final_path ?? null);
+  }
+
   async function handleSaveKey() {
     if (!hasRequiredKeys()) {
       setError(strings.errors.saveKeysRequiresAll);
@@ -168,7 +178,7 @@ export default function App() {
       return;
     }
     if (!videoKey.trim()) {
-      setError(strings.errors.regenerateRequiresVideoKey);
+      setError(strings.errors.missingVideoKeyForRegenerate);
       return;
     }
     setRegeneratingShotId(shot.id);
@@ -194,8 +204,8 @@ export default function App() {
       setError(strings.errors.renderRequiresStoryboard);
       return;
     }
-    if (!hasRequiredKeys()) {
-      setError(strings.errors.renderRequiresKeys);
+    if (!videoKey.trim()) {
+      setError(strings.errors.missingVideoKeyForRender);
       return;
     }
     setRendering(true);
@@ -203,13 +213,13 @@ export default function App() {
     setFinalPath(null);
     try {
       const result = await renderProject(project.id, {
-        ...providerCredentials(),
+        video_key: videoKey.trim(),
+        base_url: baseUrl.trim(),
+        video_model: videoModel.trim() || DEFAULT_VIDEO_MODEL,
         render_runtime: "ffmpeg",
       });
-      setStoryboard(result.storyboard);
-      setConsistencyReport(result.consistency_report);
       setEvents((current) => appendUniqueEvent(current, result.event));
-      setFinalPath(result.final_path);
+      await refreshProjectState(project.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : strings.errors.renderFallback);
     } finally {

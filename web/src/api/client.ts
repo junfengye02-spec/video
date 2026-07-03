@@ -2,6 +2,7 @@ import type {
   GatewayKeySession,
   JobEvent,
   ProviderCredentials,
+  RenderProjectRequest,
   RegenerateShotResponse,
   RenderProjectResponse,
   ShortDramaProjectRequest,
@@ -99,7 +100,7 @@ export function regenerateShot(
 
 export function renderProject(
   projectId: string,
-  payload: ProviderCredentials & { render_runtime: "ffmpeg" },
+  payload: RenderProjectRequest,
   fetcher?: typeof fetch,
 ): Promise<RenderProjectResponse> {
   return postJson<RenderProjectResponse>(`/api/projects/${projectId}/render`, payload, fetcher);

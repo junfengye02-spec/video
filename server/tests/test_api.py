@@ -920,6 +920,57 @@ def test_render_project_generates_final_video_and_updates_storyboard(tmp_path, m
 
     loaded = client.get(f"/api/projects/{project_id}").json()
     assert loaded["storyboard"]["shots"][0]["status"] == "complete"
+    assert loaded["final_path"].endswith("final.mp4")
+    assert loaded["render_report"]["outputs"][0]["path"].endswith("final.mp4")
+
+
+def test_load_project_returns_render_report_and_final_path_after_render(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+
+    def fake_render_short_drama_project(**kwargs):
+        final_path = kwargs["project_dir"] / "renders" / "final.mp4"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_bytes(b"fake video")
+        return {
+            "final_path": str(final_path),
+            "render_report": {
+                "version": "1.0",
+                "outputs": [
+                    {
+                        "path": str(final_path),
+                        "format": "mp4",
+                        "resolution": "720x1280",
+                        "duration_seconds": 5,
+                    }
+                ],
+                "warnings": [],
+                "verification_notes": ["fake render"],
+            },
+            "storyboard": kwargs["storyboard"],
+            "artifacts": {},
+            "outputs": [],
+        }
+
+    monkeypatch.setattr("server.app.main.render_short_drama_project", fake_render_short_drama_project)
+
+    response = client.post(
+        f"/api/projects/{project_id}/render",
+        json={
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "video_model": "omni_flash-10s",
+            "render_runtime": "ffmpeg",
+        },
+    )
+
+    assert response.status_code == 200
+    loaded = client.get(f"/api/projects/{project_id}").json()
+
+    assert loaded["final_path"].endswith("final.mp4")
+    assert loaded["render_report"]["outputs"][0]["path"].endswith("final.mp4")
 
 
 def test_render_project_returns_provider_error_detail(tmp_path, monkeypatch):
