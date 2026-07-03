@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from server.app.artifact_sync import rewrite_workflow_artifacts
 from server.app.main import create_app
 
 
@@ -618,6 +619,153 @@ def test_save_shot_accepts_prompt_edits_and_tracks_history(tmp_path):
     assert body["shot"]["history"][-1]["shot_language"]["shot_size"] == "medium_close"
     assert body["shot"]["shot_intent"] == "Reveal the clue with a more deliberate pause."
     assert body["shot"]["shot_language"]["shot_size"] == "medium"
+
+
+def test_save_shot_updates_asset_shot_ids_and_rewrites_workflow_artifacts(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    store = app.state.store
+    series_bible = store.read_artifact(project_id, "series_bible.json")
+    assert series_bible is not None
+    series_bible["assets"] = [
+        {
+            "id": "asset-c1-ref",
+            "kind": "character",
+            "label": "Lin reference",
+            "description": "red coat",
+            "prompt": "red coat",
+            "reference_images": ["assets/images/character/asset-c1-ref.png"],
+            "shot_ids": [],
+            "version": 1,
+        }
+    ]
+    store.write_artifact(project_id, "series_bible.json", series_bible)
+
+    response = client.patch(
+        f"/api/projects/{project_id}/shots/{shot_id}",
+        json={
+            "asset_ids": ["asset-c1-ref"],
+            "prompt": "Lin in red coat finds the envelope.",
+            "characters": ["c1"],
+            "location": "rainy alley",
+            "props": ["envelope"],
+            "shot_intent": "Reveal the clue.",
+            "shot_language": {"shot_size": "medium_close", "camera_movement": "dolly_in"},
+        },
+    )
+
+    assert response.status_code == 200
+    loaded = client.get(f"/api/projects/{project_id}").json()
+    assert loaded["series_bible"]["assets"][0]["shot_ids"] == [shot_id]
+    scene_plan = store.read_artifact(project_id, "scene_plan.json")
+    assert scene_plan is not None
+    assert scene_plan["scenes"][0]["description"] == "Lin in red coat finds the envelope."
+
+
+def test_save_shot_preserves_existing_workflow_video_model_on_metadata_only_save(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/projects/short-drama",
+        json={
+            "title": "Rain Alley",
+            "prompt": "rain-night urban reversal short drama",
+            "text_key": TEXT_TEST_KEY,
+            "image_key": IMAGE_TEST_KEY,
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "text_model": "gpt-5.5",
+            "image_model": "gpt-image-2",
+            "video_model": "veo_3_1-lite",
+        },
+    ).json()
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    store = app.state.store
+
+    response = client.patch(
+        f"/api/projects/{project_id}/shots/{shot_id}",
+        json={"shot_intent": "Hold the reveal a beat longer."},
+    )
+
+    assert response.status_code == 200
+    proposal_packet = store.read_artifact(project_id, "proposal_packet.json")
+    asset_manifest = store.read_artifact(project_id, "asset_manifest.json")
+    edit_decisions = store.read_artifact(project_id, "edit_decisions.json")
+    assert proposal_packet is not None
+    assert asset_manifest is not None
+    assert edit_decisions is not None
+    assert proposal_packet["cost_estimate"]["line_items"][0]["model"] == "veo_3_1-lite"
+    assert asset_manifest["assets"][0]["model"] == "veo_3_1-lite"
+    assert edit_decisions["render_runtime"] == "ffmpeg"
+
+
+def test_regenerate_shot_updates_asset_shot_ids_and_rewrites_workflow_artifacts(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    store = app.state.store
+    series_bible = store.read_artifact(project_id, "series_bible.json")
+    storyboard = store.read_artifact(project_id, "episode_storyboard.json")
+    assert series_bible is not None
+    assert storyboard is not None
+    series_bible["assets"] = [
+        {
+            "id": "asset-c1-ref",
+            "kind": "character",
+            "label": "Lin reference",
+            "description": "red coat",
+            "prompt": "red coat",
+            "reference_images": ["assets/images/character/asset-c1-ref.png"],
+            "shot_ids": [],
+            "version": 1,
+        }
+    ]
+    storyboard["shots"][0]["asset_ids"] = ["asset-c1-ref"]
+    store.write_artifact(project_id, "series_bible.json", series_bible)
+    store.write_artifact(project_id, "episode_storyboard.json", storyboard)
+    rewrite_workflow_artifacts(
+        workbench=store,
+        project_id=project_id,
+        series_bible=series_bible,
+        storyboard=storyboard,
+        render_runtime="remotion",
+        video_model="omni_flash-10s",
+    )
+
+    def fake_run_single_shot_generation(**kwargs):
+        return {
+            "shot_id": shot_id,
+            "output_path": str(kwargs["project_dir"] / "assets" / "video" / f"{shot_id}.mp4"),
+            "tool_result": {"url": "https://video.example/s1.mp4"},
+            "cost_usd": 0.2,
+        }
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "veo_3_1-lite"},
+    )
+
+    assert response.status_code == 200
+    loaded = client.get(f"/api/projects/{project_id}").json()
+    proposal_packet = store.read_artifact(project_id, "proposal_packet.json")
+    asset_manifest = store.read_artifact(project_id, "asset_manifest.json")
+    edit_decisions = store.read_artifact(project_id, "edit_decisions.json")
+    assert loaded["series_bible"]["assets"][0]["shot_ids"] == [shot_id]
+    assert proposal_packet is not None
+    assert asset_manifest is not None
+    assert edit_decisions is not None
+    assert proposal_packet["cost_estimate"]["line_items"][0]["model"] == "veo_3_1-lite"
+    assert asset_manifest["assets"][0]["model"] == "veo_3_1-lite"
+    assert edit_decisions["render_runtime"] == "remotion"
 
 
 def test_regenerate_shot_failure_persists_failed_status_and_clears_outputs(tmp_path, monkeypatch):

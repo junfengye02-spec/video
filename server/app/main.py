@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from server.app.artifact_sync import read_workflow_settings, rewrite_workflow_artifacts, sync_asset_shot_ids
 from server.app.consistency import apply_consistency_scores, evaluate_storyboard_consistency
 from server.app.events import EventBus
 from server.app.keyring import key_environment, mask_key
@@ -118,6 +119,14 @@ def create_app(
         workbench.write_artifact(project.id, "series_bible.json", result["series_bible"])
         workbench.write_artifact(project.id, "episode_storyboard.json", result["storyboard"])
         workbench.write_artifact(project.id, "consistency_report.json", result["consistency_report"])
+        rewrite_workflow_artifacts(
+            workbench=workbench,
+            project_id=project.id,
+            series_bible=result["series_bible"],
+            storyboard=result["storyboard"],
+            render_runtime="ffmpeg",
+            video_model=payload.video_model,
+        )
 
         return {"project": project.model_dump(), **result}
 
@@ -156,8 +165,20 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         report = evaluate_storyboard_consistency(series_bible, storyboard)
         apply_consistency_scores(storyboard, report)
+        assets = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
+        series_bible["assets"] = assets
+        workflow_settings = read_workflow_settings(workbench, project_id)
         workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
+        workbench.write_artifact(project_id, "series_bible.json", series_bible)
         workbench.write_artifact(project_id, "consistency_report.json", report)
+        rewrite_workflow_artifacts(
+            workbench=workbench,
+            project_id=project_id,
+            series_bible=series_bible,
+            storyboard=storyboard,
+            render_runtime=workflow_settings["render_runtime"],
+            video_model=workflow_settings["video_model"],
+        )
         event = bus.emit(project_id, job_id=job_id, stage="save", status="complete", message="Shot saved")
         return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
 
@@ -200,8 +221,20 @@ def create_app(
             shot["status"] = "failed"
             report = evaluate_storyboard_consistency(series_bible, storyboard)
             apply_consistency_scores(storyboard, report)
+            assets = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
+            series_bible["assets"] = assets
+            workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
             workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
+            workbench.write_artifact(project_id, "series_bible.json", series_bible)
             workbench.write_artifact(project_id, "consistency_report.json", report)
+            rewrite_workflow_artifacts(
+                workbench=workbench,
+                project_id=project_id,
+                series_bible=series_bible,
+                storyboard=storyboard,
+                render_runtime=workflow_settings["render_runtime"],
+                video_model=payload.video_model,
+            )
             bus.emit(project_id, job_id=job_id, stage="regenerate", status="failed", message=str(exc))
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         shot["status"] = "complete"
@@ -209,8 +242,20 @@ def create_app(
         shot["output_url"] = output["tool_result"].get("url")
         report = evaluate_storyboard_consistency(series_bible, storyboard)
         apply_consistency_scores(storyboard, report)
+        assets = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
+        series_bible["assets"] = assets
+        workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
         workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
+        workbench.write_artifact(project_id, "series_bible.json", series_bible)
         workbench.write_artifact(project_id, "consistency_report.json", report)
+        rewrite_workflow_artifacts(
+            workbench=workbench,
+            project_id=project_id,
+            series_bible=series_bible,
+            storyboard=storyboard,
+            render_runtime=workflow_settings["render_runtime"],
+            video_model=payload.video_model,
+        )
         event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
         return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
 
