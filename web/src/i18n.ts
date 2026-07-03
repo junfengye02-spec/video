@@ -1,4 +1,4 @@
-import type { ShotStatus } from "./domain/types";
+import type { CameraMovement, ShotSize, ShotStatus } from "./domain/types";
 
 export type Locale = "en" | "zh";
 
@@ -68,6 +68,22 @@ export interface UIStrings {
     charactersLabel: string;
     propsLabel: string;
     intentLabel: string;
+    shotSizeLabel: string;
+    cameraMovementLabel: string;
+    lensLabel: string;
+    lightingLabel: string;
+    depthOfFieldLabel: string;
+    colorTemperatureLabel: string;
+    unspecifiedOption: string;
+    shotSizeOptions: Record<"wide" | "medium" | "medium_close" | "close_up" | "establishing", string>;
+    cameraMovementOptions: Record<"static" | "dolly_in" | "dolly_out" | "handheld" | "steadicam" | "orbital", string>;
+    lensOptions: Record<"14" | "24" | "35" | "50" | "85" | "135" | "200", string>;
+    lightingOptions: Record<
+      "high_key" | "low_key" | "natural" | "golden_hour" | "blue_hour" | "tungsten_warm" | "neon" | "silhouette" | "rim_lit" | "volumetric" | "overcast_soft",
+      string
+    >;
+    depthOfFieldOptions: Record<"shallow" | "medium" | "deep", string>;
+    colorTemperatureOptions: Record<"cool" | "neutral" | "warm" | "mixed", string>;
     saveAction: string;
     savingAction: string;
   };
@@ -151,6 +167,61 @@ const STRINGS: Record<Locale, UIStrings> = {
       charactersLabel: "Characters",
       propsLabel: "Props",
       intentLabel: "Shot intent",
+      shotSizeLabel: "Shot size",
+      cameraMovementLabel: "Camera movement",
+      lensLabel: "Lens",
+      lightingLabel: "Lighting",
+      depthOfFieldLabel: "Depth of field",
+      colorTemperatureLabel: "Color temperature",
+      unspecifiedOption: "Unspecified",
+      shotSizeOptions: {
+        wide: "Wide",
+        medium: "Medium",
+        medium_close: "Medium close",
+        close_up: "Close up",
+        establishing: "Establishing",
+      },
+      cameraMovementOptions: {
+        static: "Static",
+        dolly_in: "Dolly in",
+        dolly_out: "Dolly out",
+        handheld: "Handheld",
+        steadicam: "Steadicam",
+        orbital: "Orbital",
+      },
+      lensOptions: {
+        "14": "14 mm",
+        "24": "24 mm",
+        "35": "35 mm",
+        "50": "50 mm",
+        "85": "85 mm",
+        "135": "135 mm",
+        "200": "200 mm",
+      },
+      lightingOptions: {
+        high_key: "High key",
+        low_key: "Low key",
+        natural: "Natural",
+        golden_hour: "Golden hour",
+        blue_hour: "Blue hour",
+        tungsten_warm: "Tungsten warm",
+        neon: "Neon",
+        silhouette: "Silhouette",
+        rim_lit: "Rim lit",
+        volumetric: "Volumetric",
+        overcast_soft: "Overcast soft",
+      },
+      depthOfFieldOptions: {
+        shallow: "Shallow",
+        medium: "Medium",
+        deep: "Deep",
+      },
+      colorTemperatureOptions: {
+        cool: "Cool",
+        neutral: "Neutral",
+        warm: "Warm",
+        mixed: "Mixed",
+      },
       saveAction: "Save shot",
       savingAction: "Saving shot",
     },
@@ -243,6 +314,61 @@ const STRINGS: Record<Locale, UIStrings> = {
       charactersLabel: "\u89d2\u8272",
       propsLabel: "\u9053\u5177",
       intentLabel: "\u955c\u5934\u610f\u56fe",
+      shotSizeLabel: "\u955c\u5934\u666f\u522b",
+      cameraMovementLabel: "\u8fd0\u955c\u65b9\u5f0f",
+      lensLabel: "\u955c\u5934\u7126\u6bb5",
+      lightingLabel: "\u6253\u5149",
+      depthOfFieldLabel: "\u666f\u6df1",
+      colorTemperatureLabel: "\u8272\u6e29",
+      unspecifiedOption: "\u672a\u6307\u5b9a",
+      shotSizeOptions: {
+        wide: "\u8fdc\u666f",
+        medium: "\u4e2d\u666f",
+        medium_close: "\u4e2d\u8fd1\u666f",
+        close_up: "\u7279\u5199",
+        establishing: "\u5efa\u7acb\u955c\u5934",
+      },
+      cameraMovementOptions: {
+        static: "\u56fa\u5b9a",
+        dolly_in: "\u63a8\u955c",
+        dolly_out: "\u62c9\u955c",
+        handheld: "\u624b\u6301",
+        steadicam: "\u7a33\u5b9a\u5668",
+        orbital: "\u73af\u7ed5",
+      },
+      lensOptions: {
+        "14": "14 \u6beb\u7c73",
+        "24": "24 \u6beb\u7c73",
+        "35": "35 \u6beb\u7c73",
+        "50": "50 \u6beb\u7c73",
+        "85": "85 \u6beb\u7c73",
+        "135": "135 \u6beb\u7c73",
+        "200": "200 \u6beb\u7c73",
+      },
+      lightingOptions: {
+        high_key: "\u9ad8\u8c03",
+        low_key: "\u4f4e\u8c03",
+        natural: "\u81ea\u7136\u5149",
+        golden_hour: "\u9ec4\u660f\u5149",
+        blue_hour: "\u84dd\u8c03\u65f6\u5206",
+        tungsten_warm: "\u6696\u8272\u94a8\u4e1d\u706f",
+        neon: "\u9713\u8679",
+        silhouette: "\u526a\u5f71",
+        rim_lit: "\u8f6e\u5ed3\u5149",
+        volumetric: "\u4f53\u79ef\u5149",
+        overcast_soft: "\u9634\u5929\u67d4\u5149",
+      },
+      depthOfFieldOptions: {
+        shallow: "\u6d45",
+        medium: "\u4e2d",
+        deep: "\u6df1",
+      },
+      colorTemperatureOptions: {
+        cool: "\u51b7\u8272",
+        neutral: "\u4e2d\u6027",
+        warm: "\u6696\u8272",
+        mixed: "\u6df7\u5408",
+      },
       saveAction: "\u4fdd\u5b58\u955c\u5934",
       savingAction: "\u6b63\u5728\u4fdd\u5b58\u955c\u5934",
     },

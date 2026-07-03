@@ -16,12 +16,12 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("./api/client", () => apiMocks);
 
 const sampleShot = {
-  id: "s1",
+  id: "shot-1",
   scene_id: "scene-1",
   index: 1,
   beat: "Hook",
-  prompt: "Lin in red coat finds the envelope.",
-  characters: ["c1"],
+  prompt: "Mara in red coat finds the envelope.",
+  characters: ["char-1"],
   location: "rainy alley",
   props: ["envelope"],
   shot_intent: "Reveal the clue.",
@@ -37,10 +37,10 @@ const sampleShot = {
 
 const sampleShot2 = {
   ...sampleShot,
-  id: "s2",
+  id: "shot-2",
   index: 2,
   beat: "Turn",
-  prompt: "Lin spots her boss across the alley.",
+  prompt: "Mara spots her boss across the alley.",
 };
 
 const sampleProjectResponse = {
@@ -51,10 +51,19 @@ const sampleProjectResponse = {
     style_lock: "rainy neon suspense",
     characters: [
       {
-        id: "c1",
-        name: "Lin",
+        id: "char-1",
+        name: "Mara",
         role: "lead investigator",
         visual_lock: "red coat, short hair",
+        voice: null,
+        reference_images: [],
+        locked: true,
+      },
+      {
+        id: "char-2",
+        name: "Jin",
+        role: "boss",
+        visual_lock: "dark trench coat",
         voice: null,
         reference_images: [],
         locked: true,
@@ -86,6 +95,12 @@ function enterKeys(
   fireEvent.change(screen.getByLabelText(labels.text), { target: { value: "text-key" } });
   fireEvent.change(screen.getByLabelText(labels.image), { target: { value: "image-key" } });
   fireEvent.change(screen.getByLabelText(labels.video), { target: { value: videoKey } });
+}
+
+async function createStoryboard(actionName = "Create storyboard") {
+  enterKeys();
+  fireEvent.click(screen.getByRole("button", { name: actionName }));
+  await waitFor(() => expect(screen.getByRole("button", { name: strings.shotEditor.saveAction })).toBeEnabled());
 }
 
 describe("App", () => {
@@ -156,10 +171,7 @@ describe("App", () => {
 
   it("saves shot metadata without provider fields", async () => {
     render(<App />);
-    enterKeys();
-    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
-
-    await screen.findByLabelText(strings.shotEditor.promptLabel);
+    await createStoryboard();
     fireEvent.change(screen.getByLabelText(strings.shotEditor.promptLabel), {
       target: { value: "Lin pauses under the neon sign." },
     });
@@ -168,13 +180,44 @@ describe("App", () => {
     await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalled());
     expect(apiMocks.saveShot).toHaveBeenCalledWith(
       "p1",
-      "s1",
+      sampleShot.id,
       expect.objectContaining({ prompt: "Lin pauses under the neon sign." }),
     );
     expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty("video_key");
     expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty("base_url");
     expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty("video_model");
     expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
+  });
+
+  it("edits shot language and character bindings with structured controls", async () => {
+    render(<App />);
+    await createStoryboard();
+
+    expect(screen.getByLabelText("Shot size")).toBeInTheDocument();
+    expect(screen.getByLabelText("Camera movement")).toBeInTheDocument();
+    expect(screen.getByLabelText("Shot intent")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Mara/i })).toBeChecked();
+
+    fireEvent.change(screen.getByLabelText("Shot size"), { target: { value: "close_up" } });
+    fireEvent.change(screen.getByLabelText("Camera movement"), { target: { value: "dolly_in" } });
+    fireEvent.change(screen.getByLabelText("Shot intent"), { target: { value: "Push into Mara's realization." } });
+    fireEvent.click(screen.getByRole("checkbox", { name: /Jin/i }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+
+    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalled());
+    expect(apiMocks.saveShot).toHaveBeenCalledWith(
+      "p1",
+      "shot-1",
+      expect.objectContaining({
+        characters: ["char-1", "char-2"],
+        shot_intent: "Push into Mara's realization.",
+        shot_language: expect.objectContaining({
+          shot_size: "close_up",
+          camera_movement: "dolly_in",
+        }),
+      }),
+    );
   });
 
   it("requires a video key before regenerating a shot", async () => {

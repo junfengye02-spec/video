@@ -293,6 +293,7 @@ export default function App() {
         />
         {error ? <div className="error-banner">{error}</div> : null}
         <ShotEditor
+          characters={seriesBible?.characters ?? []}
           shot={selectedShot}
           saving={savingShotId === selectedShot?.id}
           strings={strings.shotEditor}

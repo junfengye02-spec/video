@@ -1,14 +1,34 @@
 import { Check } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { Shot, ShotSaveRequest } from "../domain/types";
+import type { Character, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
 import type { UIStrings } from "../i18n";
 
 interface ShotEditorProps {
+  characters: Character[];
   shot: Shot | null;
   saving: boolean;
   strings: UIStrings["shotEditor"];
   onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
 }
+
+const SHOT_SIZES = ["wide", "medium", "medium_close", "close_up", "establishing"] as const;
+const CAMERA_MOVEMENTS = ["static", "dolly_in", "dolly_out", "handheld", "steadicam", "orbital"] as const;
+const LENS_VALUES = [14, 24, 35, 50, 85, 135, 200] as const;
+const LIGHTING_KEYS = [
+  "high_key",
+  "low_key",
+  "natural",
+  "golden_hour",
+  "blue_hour",
+  "tungsten_warm",
+  "neon",
+  "silhouette",
+  "rim_lit",
+  "volumetric",
+  "overcast_soft",
+] as const;
+const DEPTH_VALUES = ["shallow", "medium", "deep"] as const;
+const COLOR_TEMPERATURES = ["cool", "neutral", "warm", "mixed"] as const;
 
 function splitList(value: string): string[] {
   return value
@@ -17,32 +37,41 @@ function splitList(value: string): string[] {
     .filter(Boolean);
 }
 
-export function ShotEditor({ shot, saving, strings, onSaveShot }: ShotEditorProps) {
+export function ShotEditor({ characters, shot, saving, strings, onSaveShot }: ShotEditorProps) {
   const [prompt, setPrompt] = useState("");
   const [location, setLocation] = useState("");
   const [propsText, setPropsText] = useState("");
-  const [charactersText, setCharactersText] = useState("");
+  const [characterIds, setCharacterIds] = useState<string[]>([]);
   const [shotIntent, setShotIntent] = useState("");
+  const [shotLanguage, setShotLanguage] = useState<ShotLanguage>({});
 
   useEffect(() => {
     setPrompt(shot?.prompt ?? "");
     setLocation(shot?.location ?? "");
     setPropsText((shot?.props ?? []).join(", "));
-    setCharactersText((shot?.characters ?? []).join(", "));
+    setCharacterIds(shot?.characters ?? []);
     setShotIntent(shot?.shot_intent ?? "");
+    setShotLanguage(shot?.shot_language ?? {});
   }, [shot]);
+
+  function updateShotLanguage<Key extends keyof ShotLanguage>(key: Key, value: ShotLanguage[Key]) {
+    setShotLanguage((current) => ({
+      ...current,
+      [key]: value ?? null,
+    }));
+  }
 
   const payload = useMemo<ShotSaveRequest>(
     () => ({
       prompt,
-      characters: splitList(charactersText),
+      characters: characterIds,
       location: location.trim() || null,
       props: splitList(propsText),
       asset_ids: shot?.asset_ids ?? [],
       shot_intent: shotIntent.trim() || null,
-      shot_language: shot?.shot_language ?? null,
+      shot_language: shotLanguage,
     }),
-    [charactersText, location, prompt, propsText, shot, shotIntent],
+    [characterIds, location, prompt, propsText, shot, shotIntent, shotLanguage],
   );
 
   return (
@@ -61,10 +90,27 @@ export function ShotEditor({ shot, saving, strings, onSaveShot }: ShotEditorProp
           <span>{strings.locationLabel}</span>
           <input value={location} disabled={!shot} onChange={(event) => setLocation(event.target.value)} />
         </label>
-        <label>
-          <span>{strings.charactersLabel}</span>
-          <input value={charactersText} disabled={!shot} onChange={(event) => setCharactersText(event.target.value)} />
-        </label>
+        <fieldset disabled={!shot}>
+          <legend>{strings.charactersLabel}</legend>
+          {characters.map((character) => (
+            <label key={character.id}>
+              <input
+                type="checkbox"
+                checked={characterIds.includes(character.id)}
+                onChange={(event) => {
+                  setCharacterIds((current) =>
+                    event.target.checked
+                      ? [...current, character.id]
+                      : current.filter((id) => id !== character.id),
+                  );
+                }}
+              />
+              <span>
+                {character.name} <small>{character.id}</small>
+              </span>
+            </label>
+          ))}
+        </fieldset>
         <label>
           <span>{strings.propsLabel}</span>
           <input value={propsText} disabled={!shot} onChange={(event) => setPropsText(event.target.value)} />
@@ -72,6 +118,129 @@ export function ShotEditor({ shot, saving, strings, onSaveShot }: ShotEditorProp
         <label className="prompt-field">
           <span>{strings.intentLabel}</span>
           <textarea value={shotIntent} disabled={!shot} rows={2} onChange={(event) => setShotIntent(event.target.value)} />
+        </label>
+        <label>
+          <span>{strings.shotSizeLabel}</span>
+          <select
+            aria-label={strings.shotSizeLabel}
+            value={shotLanguage.shot_size ?? ""}
+            disabled={!shot}
+            onChange={(event) =>
+              updateShotLanguage(
+                "shot_size",
+                (event.target.value as (typeof SHOT_SIZES)[number] | "") || null,
+              )
+            }
+          >
+            <option value="">{strings.unspecifiedOption}</option>
+            {SHOT_SIZES.map((value) => (
+              <option key={value} value={value}>
+                {strings.shotSizeOptions[value]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>{strings.cameraMovementLabel}</span>
+          <select
+            aria-label={strings.cameraMovementLabel}
+            value={shotLanguage.camera_movement ?? ""}
+            disabled={!shot}
+            onChange={(event) =>
+              updateShotLanguage(
+                "camera_movement",
+                (event.target.value as (typeof CAMERA_MOVEMENTS)[number] | "") || null,
+              )
+            }
+          >
+            <option value="">{strings.unspecifiedOption}</option>
+            {CAMERA_MOVEMENTS.map((value) => (
+              <option key={value} value={value}>
+                {strings.cameraMovementOptions[value]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>{strings.lensLabel}</span>
+          <select
+            aria-label={strings.lensLabel}
+            value={shotLanguage.lens_mm ?? ""}
+            disabled={!shot}
+            onChange={(event) =>
+              updateShotLanguage("lens_mm", event.target.value ? Number(event.target.value) as ShotLanguage["lens_mm"] : null)
+            }
+          >
+            <option value="">{strings.unspecifiedOption}</option>
+            {LENS_VALUES.map((value) => (
+              <option key={value} value={value}>
+                {strings.lensOptions[String(value) as keyof typeof strings.lensOptions]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>{strings.lightingLabel}</span>
+          <select
+            aria-label={strings.lightingLabel}
+            value={shotLanguage.lighting_key ?? ""}
+            disabled={!shot}
+            onChange={(event) =>
+              updateShotLanguage(
+                "lighting_key",
+                (event.target.value as (typeof LIGHTING_KEYS)[number] | "") || null,
+              )
+            }
+          >
+            <option value="">{strings.unspecifiedOption}</option>
+            {LIGHTING_KEYS.map((value) => (
+              <option key={value} value={value}>
+                {strings.lightingOptions[value]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>{strings.depthOfFieldLabel}</span>
+          <select
+            aria-label={strings.depthOfFieldLabel}
+            value={shotLanguage.depth_of_field ?? ""}
+            disabled={!shot}
+            onChange={(event) =>
+              updateShotLanguage(
+                "depth_of_field",
+                (event.target.value as (typeof DEPTH_VALUES)[number] | "") || null,
+              )
+            }
+          >
+            <option value="">{strings.unspecifiedOption}</option>
+            {DEPTH_VALUES.map((value) => (
+              <option key={value} value={value}>
+                {strings.depthOfFieldOptions[value]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>{strings.colorTemperatureLabel}</span>
+          <select
+            aria-label={strings.colorTemperatureLabel}
+            value={shotLanguage.color_temperature ?? ""}
+            disabled={!shot}
+            onChange={(event) =>
+              updateShotLanguage(
+                "color_temperature",
+                (event.target.value as (typeof COLOR_TEMPERATURES)[number] | "") || null,
+              )
+            }
+          >
+            <option value="">{strings.unspecifiedOption}</option>
+            {COLOR_TEMPERATURES.map((value) => (
+              <option key={value} value={value}>
+                {strings.colorTemperatureOptions[value]}
+              </option>
+            ))}
+          </select>
         </label>
       </div>
       <div className="chat-actions">
