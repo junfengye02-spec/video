@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ShotRegenerateRequest, ShotSaveRequest } from "../domain/types";
-import { createShortDramaProject, regenerateShot, renderProject, saveShot } from "./client";
+import {
+  createShortDramaProject,
+  regenerateShot,
+  renderProject,
+  saveShot,
+  subscribeProjectEvents,
+} from "./client";
 
 describe("createShortDramaProject", () => {
   it("posts prompt, provider keys, and model choices to backend", async () => {
@@ -233,5 +239,64 @@ describe("renderProject", () => {
       }),
     );
     expect(result.final_path).toContain("final.mp4");
+  });
+});
+
+describe("subscribeProjectEvents", () => {
+  it("opens event stream, forwards job events, and returns cleanup", () => {
+    const close = vi.fn();
+    const addEventListener = vi.fn();
+    const instances: Array<{
+      url: string;
+      addEventListener: typeof addEventListener;
+      close: typeof close;
+      onerror: ((event: Event) => void) | null;
+    }> = [];
+    const onEvent = vi.fn();
+
+    class FakeEventSource {
+      url: string;
+      addEventListener = addEventListener;
+      close = close;
+      onerror: ((event: Event) => void) | null = null;
+
+      constructor(url: string) {
+        this.url = url;
+        instances.push(this);
+      }
+    }
+
+    const originalEventSource = globalThis.EventSource;
+    vi.stubGlobal("EventSource", FakeEventSource);
+
+    const cleanup = subscribeProjectEvents("p1", onEvent);
+    const jobListener = addEventListener.mock.calls[0]?.[1] as (event: MessageEvent) => void;
+
+    expect(instances[0]?.url).toBe("/api/projects/p1/events");
+    expect(addEventListener).toHaveBeenCalledWith("job", expect.any(Function));
+
+    jobListener(
+      new MessageEvent("job", {
+        data: JSON.stringify({
+          id: "e1",
+          job_id: "j1",
+          project_id: "p1",
+          stage: "render",
+          status: "running",
+          message: "Rendering",
+          created_at: "2026-07-03T00:00:00Z",
+        }),
+      }),
+    );
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "e1", stage: "render", status: "running" }),
+    );
+
+    instances[0]?.onerror?.(new Event("error"));
+    cleanup();
+
+    expect(close).toHaveBeenCalledTimes(2);
+
+    vi.stubGlobal("EventSource", originalEventSource);
   });
 });

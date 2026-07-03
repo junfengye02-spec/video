@@ -9,6 +9,7 @@ const apiMocks = vi.hoisted(() => ({
   renderProject: vi.fn(),
   saveGatewayKey: vi.fn(),
   saveShot: vi.fn(),
+  subscribeProjectEvents: vi.fn(),
 }));
 
 vi.mock("./api/client", () => apiMocks);
@@ -95,6 +96,7 @@ describe("App", () => {
     vi.clearAllMocks();
     setNavigatorLanguage("en-US");
     apiMocks.createShortDramaProject.mockResolvedValue(sampleProjectResponse);
+    apiMocks.subscribeProjectEvents.mockReturnValue(vi.fn());
     apiMocks.saveShot.mockResolvedValue({
       job_id: "j-save",
       event: {
@@ -339,5 +341,48 @@ describe("App", () => {
       "placeholder",
       zh.appFlow.defaultTitle,
     );
+  });
+
+  it("subscribes to project events after storyboard creation and appends only unique events", async () => {
+    render(<App />);
+    enterKeys();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
+
+    await waitFor(() =>
+      expect(apiMocks.subscribeProjectEvents).toHaveBeenCalledWith("p1", expect.any(Function)),
+    );
+
+    const onEvent = apiMocks.subscribeProjectEvents.mock.calls[0]?.[1] as (event: {
+      id: string;
+      job_id: string;
+      project_id: string;
+      stage: string;
+      status: string;
+      message: string;
+      created_at: string;
+    }) => void;
+
+    onEvent({
+      id: "event-1",
+      job_id: "job-1",
+      project_id: "p1",
+      stage: "render",
+      status: "running",
+      message: "Rendering final video",
+      created_at: "2026-07-03T00:00:00Z",
+    });
+    onEvent({
+      id: "event-1",
+      job_id: "job-1",
+      project_id: "p1",
+      stage: "render",
+      status: "running",
+      message: "Rendering final video",
+      created_at: "2026-07-03T00:00:01Z",
+    });
+
+    expect(await screen.findByText("Rendering final video")).toBeInTheDocument();
+    expect(screen.getAllByText("Rendering final video")).toHaveLength(1);
   });
 });

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Film } from "lucide-react";
 import {
   createShortDramaProject,
@@ -6,6 +6,7 @@ import {
   regenerateShot,
   saveGatewayKey,
   saveShot,
+  subscribeProjectEvents,
 } from "./api/client";
 import { ChatPanel } from "./components/ChatPanel";
 import { CharacterLibrary } from "./components/CharacterLibrary";
@@ -29,6 +30,14 @@ const DEFAULT_BASE_URL = "https://api.0000238.xyz";
 const DEFAULT_TEXT_MODEL = "gpt-5.5";
 const DEFAULT_IMAGE_MODEL = "gpt-image-2";
 const DEFAULT_VIDEO_MODEL = "omni_flash-10s";
+
+function appendUniqueEvent(current: JobEvent[], event: JobEvent) {
+  if (current.some((existing) => existing.id === event.id)) {
+    return current;
+  }
+  return [...current, event];
+}
+
 export default function App() {
   const strings = useMemo(() => getStrings(detectLocale(globalThis.navigator?.language)), []);
   const [textKey, setTextKey] = useState("");
@@ -61,6 +70,16 @@ export default function App() {
   }, [seriesBible, storyboard]);
 
   const selectedShot = useMemo(() => storyboard?.shots[0] ?? null, [storyboard]);
+
+  useEffect(() => {
+    if (!project?.id) {
+      return;
+    }
+
+    return subscribeProjectEvents(project.id, (event) => {
+      setEvents((current) => appendUniqueEvent(current, event));
+    });
+  }, [project?.id]);
 
   function providerCredentials() {
     return {
@@ -135,7 +154,7 @@ export default function App() {
       const result = await saveShot(project.id, shotId, payload);
       setStoryboard(result.storyboard);
       setConsistencyReport(result.consistency_report);
-      setEvents((current) => [...current, result.event]);
+      setEvents((current) => appendUniqueEvent(current, result.event));
       setFinalPath(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : strings.errors.saveShotFallback);
@@ -162,7 +181,7 @@ export default function App() {
       });
       setStoryboard(result.storyboard);
       setConsistencyReport(result.consistency_report);
-      setEvents((current) => [...current, result.event]);
+      setEvents((current) => appendUniqueEvent(current, result.event));
     } catch (err) {
       setError(err instanceof Error ? err.message : strings.errors.regenerateShotFallback(shot.id));
     } finally {
@@ -189,7 +208,7 @@ export default function App() {
       });
       setStoryboard(result.storyboard);
       setConsistencyReport(result.consistency_report);
-      setEvents((current) => [...current, result.event]);
+      setEvents((current) => appendUniqueEvent(current, result.event));
       setFinalPath(result.final_path);
     } catch (err) {
       setError(err instanceof Error ? err.message : strings.errors.renderFallback);

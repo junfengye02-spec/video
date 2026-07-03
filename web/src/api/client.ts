@@ -1,5 +1,6 @@
 import type {
   GatewayKeySession,
+  JobEvent,
   ProviderCredentials,
   RegenerateShotResponse,
   RenderProjectResponse,
@@ -113,4 +114,24 @@ export function loadProject(
     { method: "GET" },
     fetcher,
   );
+}
+
+export function subscribeProjectEvents(
+  projectId: string,
+  onEvent: (event: JobEvent) => void,
+): () => void {
+  const source = new EventSource(`/api/projects/${projectId}/events`);
+
+  source.addEventListener("job", (message) => {
+    const event = JSON.parse((message as MessageEvent).data) as JobEvent;
+    onEvent(event);
+  });
+
+  source.onerror = () => {
+    source.close();
+  };
+
+  return () => {
+    source.close();
+  };
 }
