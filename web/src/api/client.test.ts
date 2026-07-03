@@ -363,9 +363,10 @@ describe("subscribeProjectEvents", () => {
     );
 
     instances[0]?.onerror?.(new Event("error"));
+    expect(close).not.toHaveBeenCalled();
     cleanup();
 
-    expect(close).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledTimes(1);
 
     vi.stubGlobal("EventSource", originalEventSource);
   });

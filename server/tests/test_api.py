@@ -692,6 +692,9 @@ def test_save_shot_updates_asset_shot_ids_and_rewrites_workflow_artifacts(tmp_pa
     assert response.status_code == 200
     loaded = client.get(f"/api/projects/{project_id}").json()
     assert loaded["series_bible"]["assets"][0]["shot_ids"] == [shot_id]
+    asset_library = store.read_artifact(project_id, "asset_library.json")
+    assert asset_library is not None
+    assert asset_library["assets"][0]["shot_ids"] == [shot_id]
     scene_plan = store.read_artifact(project_id, "scene_plan.json")
     assert scene_plan is not None
     assert scene_plan["scenes"][0]["description"] == "Lin in red coat finds the envelope."
@@ -792,12 +795,58 @@ def test_regenerate_shot_updates_asset_shot_ids_and_rewrites_workflow_artifacts(
     asset_manifest = store.read_artifact(project_id, "asset_manifest.json")
     edit_decisions = store.read_artifact(project_id, "edit_decisions.json")
     assert loaded["series_bible"]["assets"][0]["shot_ids"] == [shot_id]
+    asset_library = store.read_artifact(project_id, "asset_library.json")
+    assert asset_library is not None
+    assert asset_library["assets"][0]["shot_ids"] == [shot_id]
     assert proposal_packet is not None
     assert asset_manifest is not None
     assert edit_decisions is not None
     assert proposal_packet["cost_estimate"]["line_items"][0]["model"] == "veo_3_1-lite"
     assert asset_manifest["assets"][0]["model"] == "veo_3_1-lite"
     assert edit_decisions["render_runtime"] == "remotion"
+
+
+def test_regenerate_shot_failure_updates_asset_library_shot_ids_before_rewriting_artifacts(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    store = app.state.store
+    series_bible = store.read_artifact(project_id, "series_bible.json")
+    storyboard = store.read_artifact(project_id, "episode_storyboard.json")
+    assert series_bible is not None
+    assert storyboard is not None
+    series_bible["assets"] = [
+        {
+            "id": "asset-c1-ref",
+            "kind": "character",
+            "label": "Lin reference",
+            "description": "red coat",
+            "prompt": "red coat",
+            "reference_images": ["assets/images/character/asset-c1-ref.png"],
+            "shot_ids": [],
+            "version": 1,
+        }
+    ]
+    storyboard["shots"][0]["asset_ids"] = ["asset-c1-ref"]
+    store.write_artifact(project_id, "series_bible.json", series_bible)
+    store.write_artifact(project_id, "episode_storyboard.json", storyboard)
+
+    def fake_failing_generation(**kwargs):
+        raise RuntimeError("video provider timeout")
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_failing_generation)
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "veo_3_1-lite"},
+    )
+
+    assert response.status_code == 500
+    asset_library = store.read_artifact(project_id, "asset_library.json")
+    assert asset_library is not None
+    assert asset_library["assets"][0]["shot_ids"] == [shot_id]
 
 
 def test_regenerate_shot_failure_persists_failed_status_and_clears_outputs(tmp_path, monkeypatch):

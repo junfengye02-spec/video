@@ -12,8 +12,13 @@ def sync_asset_shot_ids(assets: list[dict[str, Any]], storyboard: dict[str, Any]
     shot_ids_by_asset: dict[str, list[str]] = {}
     for shot in storyboard.get("shots", []):
         shot_id = str(shot.get("id"))
+        seen_asset_ids: set[str] = set()
         for asset_id in shot.get("asset_ids", []) or []:
-            shot_ids_by_asset.setdefault(str(asset_id), []).append(shot_id)
+            asset_key = str(asset_id)
+            if asset_key in seen_asset_ids:
+                continue
+            seen_asset_ids.add(asset_key)
+            shot_ids_by_asset.setdefault(asset_key, []).append(shot_id)
 
     synced = []
     for asset in assets:

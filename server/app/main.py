@@ -26,6 +26,20 @@ DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_VIDEO_MODEL = "omni_flash-10s"
 
 
+def _persist_storyboard_state(
+    *,
+    workbench: WorkbenchStore,
+    project_id: str,
+    storyboard: dict[str, Any],
+    series_bible: dict[str, Any],
+    consistency_report: dict[str, Any],
+) -> None:
+    workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
+    workbench.write_artifact(project_id, "series_bible.json", series_bible)
+    workbench.write_asset_library(project_id, list(series_bible.get("assets", [])))
+    workbench.write_artifact(project_id, "consistency_report.json", consistency_report)
+
+
 class KeySessionRequest(BaseModel):
     text_key: str = Field(min_length=1)
     image_key: str = Field(min_length=1)
@@ -129,9 +143,13 @@ def create_app(
         apply_consistency_scores(result["storyboard"], result["consistency_report"])
 
         project = workbench.create_project(title=payload.title, mode="short_drama")
-        workbench.write_artifact(project.id, "series_bible.json", result["series_bible"])
-        workbench.write_artifact(project.id, "episode_storyboard.json", result["storyboard"])
-        workbench.write_artifact(project.id, "consistency_report.json", result["consistency_report"])
+        _persist_storyboard_state(
+            workbench=workbench,
+            project_id=project.id,
+            storyboard=result["storyboard"],
+            series_bible=result["series_bible"],
+            consistency_report=result["consistency_report"],
+        )
         rewrite_workflow_artifacts(
             workbench=workbench,
             project_id=project.id,
@@ -184,12 +202,15 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         report = evaluate_storyboard_consistency(series_bible, storyboard)
         apply_consistency_scores(storyboard, report)
-        assets = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
-        series_bible["assets"] = assets
+        series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
         workflow_settings = read_workflow_settings(workbench, project_id)
-        workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
-        workbench.write_artifact(project_id, "series_bible.json", series_bible)
-        workbench.write_artifact(project_id, "consistency_report.json", report)
+        _persist_storyboard_state(
+            workbench=workbench,
+            project_id=project_id,
+            storyboard=storyboard,
+            series_bible=series_bible,
+            consistency_report=report,
+        )
         rewrite_workflow_artifacts(
             workbench=workbench,
             project_id=project_id,
@@ -261,12 +282,15 @@ def create_app(
             shot["status"] = "failed"
             report = evaluate_storyboard_consistency(series_bible, storyboard)
             apply_consistency_scores(storyboard, report)
-            assets = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
-            series_bible["assets"] = assets
+            series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
             workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
-            workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
-            workbench.write_artifact(project_id, "series_bible.json", series_bible)
-            workbench.write_artifact(project_id, "consistency_report.json", report)
+            _persist_storyboard_state(
+                workbench=workbench,
+                project_id=project_id,
+                storyboard=storyboard,
+                series_bible=series_bible,
+                consistency_report=report,
+            )
             rewrite_workflow_artifacts(
                 workbench=workbench,
                 project_id=project_id,
@@ -282,12 +306,15 @@ def create_app(
         shot["output_url"] = output["tool_result"].get("url")
         report = evaluate_storyboard_consistency(series_bible, storyboard)
         apply_consistency_scores(storyboard, report)
-        assets = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
-        series_bible["assets"] = assets
+        series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
         workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
-        workbench.write_artifact(project_id, "episode_storyboard.json", storyboard)
-        workbench.write_artifact(project_id, "series_bible.json", series_bible)
-        workbench.write_artifact(project_id, "consistency_report.json", report)
+        _persist_storyboard_state(
+            workbench=workbench,
+            project_id=project_id,
+            storyboard=storyboard,
+            series_bible=series_bible,
+            consistency_report=report,
+        )
         rewrite_workflow_artifacts(
             workbench=workbench,
             project_id=project_id,

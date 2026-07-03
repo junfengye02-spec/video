@@ -571,6 +571,47 @@ describe("App", () => {
     expect(await screen.findByText("projects/p1/renders/final.mp4")).toBeInTheDocument();
   });
 
+  it("keeps successful render results when the follow-up project refresh fails", async () => {
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-1",
+      event: {
+        id: "event-render-1",
+        job_id: "render-1",
+        project_id: "p1",
+        stage: "render",
+        status: "complete",
+        message: "Rendered",
+        created_at: "now",
+      },
+      project: sampleProjectResponse.project,
+      storyboard: sampleProjectResponse.storyboard,
+      consistency_report: sampleProjectResponse.consistency_report,
+      render_report: {
+        version: "1.0",
+        outputs: [
+          {
+            path: "projects/p1/renders/final.mp4",
+            format: "mp4",
+            resolution: "720x1280",
+            duration_seconds: 25,
+          },
+        ],
+      },
+      final_path: "projects/p1/renders/final.mp4",
+    });
+    apiMocks.loadProject.mockRejectedValue(new Error("reload failed"));
+
+    render(<App />);
+    await createStoryboard();
+
+    fireEvent.click(screen.getByRole("button", { name: "Render final video" }));
+
+    expect(await screen.findByText("projects/p1/renders/final.mp4")).toBeInTheDocument();
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledWith("p1"));
+    expect(screen.queryByText(strings.errors.renderFallback)).not.toBeInTheDocument();
+    expect(screen.queryByText("reload failed")).not.toBeInTheDocument();
+  });
+
   it("does not auto-load a stored project on mount", async () => {
     window.localStorage.setItem("openmontage:projectId", "p1");
 

@@ -75,6 +75,12 @@ class WorkbenchStore:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def write_asset_library(self, project_id: str, assets: list[dict[str, Any]]) -> Path:
+        return self.write_artifact(project_id, "asset_library.json", {"assets": assets})
+
+    def read_asset_library(self, project_id: str) -> dict[str, Any] | None:
+        return self.read_artifact(project_id, "asset_library.json")
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -108,4 +114,3 @@ class WorkbenchStore:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
-

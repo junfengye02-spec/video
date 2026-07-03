@@ -138,10 +138,6 @@ export function subscribeProjectEvents(
     onEvent(event);
   });
 
-  source.onerror = () => {
-    source.close();
-  };
-
   return () => {
     source.close();
   };

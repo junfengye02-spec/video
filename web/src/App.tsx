@@ -252,7 +252,11 @@ export default function App() {
         render_runtime: "ffmpeg",
       });
       setEvents((current) => appendUniqueEvent(current, result.event));
-      await refreshProjectState(project.id);
+      setProject(result.project);
+      setStoryboard(result.storyboard);
+      setConsistencyReport(result.consistency_report);
+      setFinalPath(result.final_path ?? null);
+      void refreshProjectState(project.id).catch(() => undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : strings.errors.renderFallback);
     } finally {

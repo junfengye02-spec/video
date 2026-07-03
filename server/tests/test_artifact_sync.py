@@ -22,6 +22,22 @@ def test_sync_asset_shot_ids_derives_links_from_storyboard():
     assert synced[1]["shot_ids"] == ["s1"]
 
 
+def test_sync_asset_shot_ids_dedupes_repeated_asset_ids_per_shot():
+    assets = [
+        {"id": "asset-c1", "kind": "character", "label": "Lin", "shot_ids": []},
+    ]
+    storyboard = {
+        "shots": [
+            {"id": "s1", "asset_ids": ["asset-c1", "asset-c1"]},
+            {"id": "s2", "asset_ids": ["asset-c1"]},
+        ]
+    }
+
+    synced = sync_asset_shot_ids(assets, storyboard)
+
+    assert synced[0]["shot_ids"] == ["s1", "s2"]
+
+
 def test_rewrite_workflow_artifacts_refreshes_scene_plan_after_shot_change(tmp_path):
     store = WorkbenchStore(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     project = store.create_project("Rain Alley", "short_drama")
