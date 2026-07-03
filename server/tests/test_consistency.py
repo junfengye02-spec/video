@@ -18,3 +18,35 @@ def test_consistency_flags_missing_locked_character_reference():
     assert report["score"] < 100
     assert report["issues"][0]["code"] == "missing_visual_lock"
 
+
+def test_consistency_flags_missing_shot_language():
+    series_bible = {"characters": [], "assets": []}
+    storyboard = {
+        "shots": [
+            {"id": "s1", "characters": [], "prompt": "Alley shot", "location": "alley", "shot_language": {}}
+        ]
+    }
+
+    report = evaluate_storyboard_consistency(series_bible, storyboard)
+
+    assert any(issue["code"] == "missing_shot_language" for issue in report["issues"])
+
+
+def test_consistency_flags_unknown_asset_reference():
+    series_bible = {"characters": [], "assets": [{"id": "asset-known"}]}
+    storyboard = {
+        "shots": [
+            {
+                "id": "s1",
+                "characters": [],
+                "prompt": "Alley shot",
+                "location": "alley",
+                "asset_ids": ["asset-missing"],
+                "shot_language": {"shot_size": "wide", "camera_movement": "static"},
+            }
+        ]
+    }
+
+    report = evaluate_storyboard_consistency(series_bible, storyboard)
+
+    assert any(issue["code"] == "unknown_asset" for issue in report["issues"])

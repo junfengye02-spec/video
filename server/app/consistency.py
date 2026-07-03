@@ -12,6 +12,11 @@ def evaluate_storyboard_consistency(
         for character in series_bible.get("characters", [])
         if character.get("id")
     }
+    assets = {
+        asset.get("id"): asset
+        for asset in series_bible.get("assets", [])
+        if asset.get("id")
+    }
     shots = storyboard.get("shots", [])
     issues: list[dict[str, str | None]] = []
 
@@ -54,6 +59,28 @@ def evaluate_storyboard_consistency(
                     "Shot has no location.",
                 )
             )
+
+        shot_language = shot.get("shot_language") or {}
+        if not shot_language.get("shot_size") or not shot_language.get("camera_movement"):
+            issues.append(
+                _issue(
+                    shot_id,
+                    "warning",
+                    "missing_shot_language",
+                    "Shot is missing shot size or camera movement.",
+                )
+            )
+
+        for asset_id in shot.get("asset_ids", []) or []:
+            if asset_id not in assets:
+                issues.append(
+                    _issue(
+                        shot_id,
+                        "error",
+                        "unknown_asset",
+                        f"Shot references unknown asset '{asset_id}'.",
+                    )
+                )
 
         aspect_ratio = shot.get("aspect_ratio")
         if previous_aspect_ratio and aspect_ratio and aspect_ratio != previous_aspect_ratio:
