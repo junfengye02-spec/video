@@ -148,7 +148,11 @@ That's it. The agent researches your topic with live web search, generates AI im
 
 ### Short Drama Web Workbench
 
-The local web workbench is a key-only MVP for SYAPI users. It does not create OpenMontage accounts, store raw gateway keys, or manage billing. The first loop uses a deterministic mock runner for chat, characters, storyboard, consistency checks, and single-shot regenerate; the runner adapter prepares OpenMontage-compatible handoff artifacts for real generation.
+The local web workbench is a key-only MVP for SYAPI users. It does not create OpenMontage accounts, store raw gateway keys, or manage billing. The workbench now creates storyboard shots through the selected text model, preserves structured shot language, validates supplied provider keys, streams live production progress, and restores the latest render state when a project is reloaded. Shot regeneration uses the chosen video model with bound character, scene, and prop references so the generated prompt stays asset-aware.
+
+### Short Drama Workbench Production Contract
+
+The short-drama Workbench generates structured storyboard shots with shot intent and shot language, including shot size, camera movement, lens, depth of field, lighting, and color temperature. Shot saves update metadata and workflow artifacts; shot regeneration calls the selected video model and includes bound character, scene, and prop references in the generation prompt. The Production panel streams job progress and restores the latest render report when a project is reloaded.
 
 Start the backend:
 
