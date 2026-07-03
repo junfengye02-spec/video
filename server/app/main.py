@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from server.app.artifact_sync import read_workflow_settings, rewrite_workflow_artifacts, sync_asset_shot_ids
 from server.app.consistency import apply_consistency_scores, evaluate_storyboard_consistency
 from server.app.events import EventBus
+from server.app.key_validation import validate_gateway_models
 from server.app.keyring import key_environment, mask_key
 from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot, update_mock_shot
 from server.app.models import ShotRegenerateRequest, ShotSaveRequest
@@ -76,6 +77,17 @@ def create_app(
     @app.post("/api/session/key")
     def save_gateway_key(payload: KeySessionRequest) -> dict[str, Any]:
         env = key_environment(payload.video_key, payload.base_url)
+        validation = validate_gateway_models(
+            base_url=payload.base_url,
+            text_key=payload.text_key,
+            image_key=payload.image_key,
+            video_key=payload.video_key,
+            text_model=payload.text_model,
+            image_model=payload.image_model,
+            video_model=payload.video_model,
+        )
+        if not validation["valid"]:
+            raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
         return {
             "masked_keys": {
                 "text": mask_key(payload.text_key),

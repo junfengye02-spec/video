@@ -136,6 +136,10 @@ def _fake_storyboard_result() -> dict:
     }
 
 
+def _fake_valid_gateway(**kwargs):
+    return {"valid": True, "errors": []}
+
+
 @pytest.fixture(autouse=True)
 def stub_storyboard_generator(monkeypatch):
     monkeypatch.setattr(
@@ -144,9 +148,10 @@ def stub_storyboard_generator(monkeypatch):
     )
 
 
-def test_key_session_returns_masked_key(tmp_path):
+def test_key_session_returns_masked_key(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
+    monkeypatch.setattr("server.app.main.validate_gateway_models", _fake_valid_gateway)
 
     response = client.post(
         "/api/session/key",
@@ -163,6 +168,7 @@ def test_key_session_returns_masked_key(tmp_path):
 
     assert response.status_code == 200
     body = response.json()
+    assert body["valid"] is True
     assert body["masked_keys"]["text"] == "txt-...cdef"
     assert body["masked_keys"]["image"] == "img-...cdef"
     assert body["masked_keys"]["video"] == "vid-...cdef"
@@ -171,6 +177,32 @@ def test_key_session_returns_masked_key(tmp_path):
         "image": "gpt-image-2",
         "video": "veo_3_1-lite",
     }
+
+
+def test_key_session_returns_validation_failure(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        "server.app.main.validate_gateway_models",
+        lambda **kwargs: {"valid": False, "errors": ["video model 'omni_flash-10s' was not returned"]},
+    )
+
+    response = client.post(
+        "/api/session/key",
+        json={
+            "text_key": TEXT_TEST_KEY,
+            "image_key": IMAGE_TEST_KEY,
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "text_model": "gpt-5.5",
+            "image_model": "gpt-image-2",
+            "video_model": "omni_flash-10s",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "video model" in response.json()["detail"]
 
 
 def test_create_short_drama_project_returns_storyboard(tmp_path):

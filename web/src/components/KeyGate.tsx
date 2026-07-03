@@ -49,6 +49,12 @@ export function KeyGate({
   onVideoModelChange,
   onSubmit,
 }: KeyGateProps) {
+  const submitLabel = saving
+    ? strings.checkingAction
+    : maskedKeys
+      ? strings.updateKeysAction
+      : strings.useKeysAction;
+
   return (
     <form
       className="key-gate"
@@ -143,7 +149,7 @@ export function KeyGate({
 
       <button className="primary-button" type="submit" disabled={saving}>
         <ShieldCheck aria-hidden="true" size={16} />
-        {saving ? strings.checkingAction : maskedKeys ? strings.updateKeysAction : strings.useKeysAction}
+        {submitLabel}
       </button>
 
       <div className="key-status" aria-live="polite">

@@ -130,22 +130,23 @@ describe("App", () => {
 
   it("localizes key gate and storyboard creation controls for zh-CN browser locales", () => {
     setNavigatorLanguage("zh-CN");
+    const zh = getStrings("zh");
 
     render(<App />);
 
-    expect(screen.getByLabelText("Text API 密钥")).toBeInTheDocument();
-    expect(screen.getByLabelText("Image API 密钥")).toBeInTheDocument();
-    expect(screen.getByLabelText("Video API 密钥")).toBeInTheDocument();
-    expect(screen.getByLabelText("Text 模型")).toBeInTheDocument();
-    expect(screen.getByLabelText("Image 模型")).toBeInTheDocument();
-    expect(screen.getByLabelText("Video 模型")).toBeInTheDocument();
-    expect(screen.getByLabelText("网关 Base URL")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "制作助手" })).toBeInTheDocument();
-    expect(screen.getByLabelText("项目标题")).toBeInTheDocument();
-    expect(screen.getByLabelText("短剧提示词")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "使用密钥" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "创建故事板" })).toBeInTheDocument();
-    expect(screen.getByText("密钥未设置")).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.keyGate.textKeyLabel)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.keyGate.imageKeyLabel)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.keyGate.videoKeyLabel)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.keyGate.textModelLabel)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.keyGate.imageModelLabel)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.keyGate.videoModelLabel)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.keyGate.baseUrlLabel)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: zh.chatPanel.title })).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.chatPanel.projectTitleLabel)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.chatPanel.promptLabel)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: zh.keyGate.useKeysAction })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction })).toBeInTheDocument();
+    expect(screen.getByText(zh.keyGate.keysNotSet)).toBeInTheDocument();
   });
 
   it("saves shot metadata without provider fields", async () => {
@@ -190,14 +191,14 @@ describe("App", () => {
 
     render(<App />);
     enterKeys("video-key", {
-      text: "Text API 密钥",
-      image: "Image API 密钥",
-      video: "Video API 密钥",
+      text: zh.keyGate.textKeyLabel,
+      image: zh.keyGate.imageKeyLabel,
+      video: zh.keyGate.videoKeyLabel,
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建故事板" }));
+    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
 
     await screen.findByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) });
-    fireEvent.change(screen.getByLabelText("Video API 密钥"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText(zh.keyGate.videoKeyLabel), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) }));
 
     expect(await screen.findByText(zh.errors.regenerateRequiresVideoKey)).toBeInTheDocument();
@@ -210,11 +211,11 @@ describe("App", () => {
 
     render(<App />);
     enterKeys("video-key", {
-      text: "Text API 密钥",
-      image: "Image API 密钥",
-      video: "Video API 密钥",
+      text: zh.keyGate.textKeyLabel,
+      image: zh.keyGate.imageKeyLabel,
+      video: zh.keyGate.videoKeyLabel,
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建故事板" }));
+    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
 
     expect(await screen.findByRole("heading", { name: zh.storyboardWaterfall.title })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: zh.storyboardWaterfall.regionLabel })).toBeInTheDocument();
@@ -227,19 +228,19 @@ describe("App", () => {
 
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "创建故事板" }));
+    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
     expect(await screen.findByText(zh.errors.createStoryboardRequiresKeys)).toBeInTheDocument();
     expect(apiMocks.createShortDramaProject).not.toHaveBeenCalled();
 
     enterKeys("video-key", {
-      text: "Text API 密钥",
-      image: "Image API 密钥",
-      video: "Video API 密钥",
+      text: zh.keyGate.textKeyLabel,
+      image: zh.keyGate.imageKeyLabel,
+      video: zh.keyGate.videoKeyLabel,
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建故事板" }));
+    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
     await screen.findByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) });
 
-    fireEvent.change(screen.getByLabelText("Image API 密钥"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText(zh.keyGate.imageKeyLabel), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: zh.appShell.renderFinalVideoAction }));
 
     expect(await screen.findByText(zh.errors.renderRequiresKeys)).toBeInTheDocument();
@@ -274,11 +275,11 @@ describe("App", () => {
 
     render(<App />);
     enterKeys("video-key", {
-      text: "Text API 密钥",
-      image: "Image API 密钥",
-      video: "Video API 密钥",
+      text: zh.keyGate.textKeyLabel,
+      image: zh.keyGate.imageKeyLabel,
+      video: zh.keyGate.videoKeyLabel,
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建故事板" }));
+    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
 
     expect(await screen.findAllByText(zh.storyboardWaterfall.statusLabels.ready)).toHaveLength(1);
     expect(screen.getAllByText(zh.storyboardWaterfall.statusLabels.generating)).toHaveLength(1);
@@ -300,12 +301,12 @@ describe("App", () => {
     expect(screen.getByDisplayValue(zh.appFlow.defaultPrompt)).toBeInTheDocument();
 
     enterKeys("video-key", {
-      text: "Text API 密钥",
-      image: "Image API 密钥",
-      video: "Video API 密钥",
+      text: zh.keyGate.textKeyLabel,
+      image: zh.keyGate.imageKeyLabel,
+      video: zh.keyGate.videoKeyLabel,
     });
     fireEvent.change(screen.getByDisplayValue(zh.appFlow.defaultTitle), { target: { value: "   " } });
-    fireEvent.click(screen.getByRole("button", { name: "创建故事板" }));
+    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
 
     await waitFor(() => expect(apiMocks.createShortDramaProject).toHaveBeenCalled());
     expect(apiMocks.createShortDramaProject).toHaveBeenCalledWith(
