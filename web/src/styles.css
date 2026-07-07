@@ -321,8 +321,62 @@ textarea:focus {
 
 .chat-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+.asset-binding-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid #d8e0e5;
+  border-radius: 8px;
+}
+
+.asset-binding-group legend {
+  padding: 0 4px;
+  color: #344653;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.asset-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.asset-grid label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.asset-grid input {
+  width: auto;
+  min-height: auto;
+}
+
+.generation-mode {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid #cfe0e4;
+  border-radius: 6px;
+  background: #f4faf9;
+  color: #244a4f;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.generation-mode span {
+  overflow-wrap: anywhere;
 }
 
 .error-banner {

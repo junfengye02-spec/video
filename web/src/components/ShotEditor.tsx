@@ -1,15 +1,25 @@
-import { Check, Sparkles } from "lucide-react";
+import { Check, Images, RefreshCw, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Character, PromptOptimizeResponse, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
 import type { UIStrings } from "../i18n";
 
+interface AssetRecord {
+  id: string;
+  kind: string;
+  label: string;
+  reference_images: string[];
+}
+
 interface ShotEditorProps {
+  assets: AssetRecord[];
   characters: Character[];
   optimizing: boolean;
+  regenerating: boolean;
   shot: Shot | null;
   saving: boolean;
   strings: UIStrings["shotEditor"];
   onOptimizePrompt: (shot: Shot, prompt: string) => Promise<PromptOptimizeResponse>;
+  onRegenerateShot: (shot: Shot) => Promise<void>;
   onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
 }
 
@@ -40,18 +50,22 @@ function splitList(value: string): string[] {
 }
 
 export function ShotEditor({
+  assets,
   characters,
   optimizing,
+  regenerating,
   shot,
   saving,
   strings,
   onOptimizePrompt,
+  onRegenerateShot,
   onSaveShot,
 }: ShotEditorProps) {
   const [prompt, setPrompt] = useState("");
   const [location, setLocation] = useState("");
   const [propsText, setPropsText] = useState("");
   const [characterIds, setCharacterIds] = useState<string[]>([]);
+  const [assetIds, setAssetIds] = useState<string[]>([]);
   const [shotIntent, setShotIntent] = useState("");
   const [shotLanguage, setShotLanguage] = useState<ShotLanguage>({});
 
@@ -60,6 +74,7 @@ export function ShotEditor({
     setLocation(shot?.location ?? "");
     setPropsText((shot?.props ?? []).join(", "));
     setCharacterIds(shot?.characters ?? []);
+    setAssetIds(shot?.asset_ids ?? []);
     setShotIntent(shot?.shot_intent ?? "");
     setShotLanguage(shot?.shot_language ?? {});
   }, [shot]);
@@ -71,18 +86,34 @@ export function ShotEditor({
     }));
   }
 
-  const payload = useMemo<ShotSaveRequest>(
-    () => ({
+  const parsedCharacters = useMemo(() => characterIds, [characterIds]);
+  const parsedProps = useMemo(() => splitList(propsText), [propsText]);
+  const groupedAssets = useMemo(
+    () => assets.slice().sort((left, right) => left.label.localeCompare(right.label)),
+    [assets],
+  );
+  const selectedReferenceCount = useMemo(
+    () =>
+      assetIds.reduce((count, assetId) => {
+        const asset = assets.find((item) => item.id === assetId);
+        return count + (asset?.reference_images.length ?? 0);
+      }, 0),
+    [assetIds, assets],
+  );
+  const generationModeLabel =
+    selectedReferenceCount > 0 ? strings.imageToVideoMode(selectedReferenceCount) : strings.textToVideoMode;
+
+  function currentSavePayload(): ShotSaveRequest {
+    return {
       prompt,
-      characters: characterIds,
+      characters: parsedCharacters,
       location: location.trim() || null,
-      props: splitList(propsText),
-      asset_ids: shot?.asset_ids ?? [],
+      props: parsedProps,
+      asset_ids: assetIds,
       shot_intent: shotIntent.trim() || null,
       shot_language: shotLanguage,
-    }),
-    [characterIds, location, prompt, propsText, shot, shotIntent, shotLanguage],
-  );
+    };
+  }
 
   return (
     <section className="storyboard-panel shot-editor" aria-label={strings.regionLabel}>
@@ -129,6 +160,31 @@ export function ShotEditor({
           <span>{strings.intentLabel}</span>
           <textarea value={shotIntent} disabled={!shot} rows={2} onChange={(event) => setShotIntent(event.target.value)} />
         </label>
+        <fieldset className="asset-binding-group" disabled={!shot || groupedAssets.length === 0}>
+          <legend>Reference assets</legend>
+          <div className="asset-grid">
+            {groupedAssets.length > 0 ? (
+              groupedAssets.map((asset) => (
+                <label key={asset.id}>
+                  <input
+                    type="checkbox"
+                    checked={assetIds.includes(asset.id)}
+                    onChange={(event) => {
+                      setAssetIds((current) =>
+                        event.target.checked
+                          ? [...current, asset.id]
+                          : current.filter((id) => id !== asset.id),
+                      );
+                    }}
+                  />
+                  <span>{asset.label}</span>
+                </label>
+              ))
+            ) : (
+              <span className="empty-state">No saved reference assets yet.</span>
+            )}
+          </div>
+        </fieldset>
         <label>
           <span>{strings.shotSizeLabel}</span>
           <select
@@ -253,6 +309,10 @@ export function ShotEditor({
           </select>
         </label>
       </div>
+      <div className="generation-mode" role="status" aria-live="polite">
+        <Images aria-hidden="true" size={16} />
+        <span>{generationModeLabel}</span>
+      </div>
       <div className="chat-actions">
         <button
           className="primary-button"
@@ -285,12 +345,37 @@ export function ShotEditor({
           disabled={!shot || saving}
           onClick={() => {
             if (shot) {
-              void onSaveShot(shot.id, payload);
+              void onSaveShot(shot.id, currentSavePayload());
             }
           }}
         >
           <Check aria-hidden="true" size={16} />
           {saving ? strings.savingAction : strings.saveAction}
+        </button>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!shot || saving || regenerating}
+          onClick={async () => {
+            if (!shot) {
+              return;
+            }
+            const payload = currentSavePayload();
+            await onSaveShot(shot.id, payload);
+            await onRegenerateShot({
+              ...shot,
+              prompt: payload.prompt ?? shot.prompt,
+              characters: payload.characters ?? shot.characters,
+              location: payload.location ?? null,
+              props: payload.props ?? shot.props,
+              asset_ids: payload.asset_ids ?? shot.asset_ids,
+              shot_intent: payload.shot_intent ?? shot.shot_intent,
+              shot_language: payload.shot_language ?? shot.shot_language,
+            });
+          }}
+        >
+          <RefreshCw aria-hidden="true" size={16} />
+          {regenerating ? strings.regeneratingAction : strings.regenerateAction}
         </button>
       </div>
     </section>

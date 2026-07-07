@@ -34,6 +34,13 @@ const DEFAULT_TEXT_MODEL = "gpt-5.5";
 const DEFAULT_IMAGE_MODEL = "gpt-image-2";
 const DEFAULT_VIDEO_MODEL = "omni_flash-10s";
 
+interface AssetRecord {
+  id: string;
+  kind: string;
+  label: string;
+  reference_images: string[];
+}
+
 function appendUniqueEvent(current: JobEvent[], event: JobEvent) {
   if (current.some((existing) => existing.id === event.id)) {
     return current;
@@ -74,6 +81,10 @@ export default function App() {
   }, [seriesBible, storyboard]);
 
   const selectedShot = useMemo(() => storyboard?.shots[0] ?? null, [storyboard]);
+  const assets = useMemo(
+    () => ((seriesBible as (SeriesBible & { assets?: AssetRecord[] }) | null)?.assets ?? []),
+    [seriesBible],
+  );
 
   useEffect(() => {
     if (!project?.id) {
@@ -330,12 +341,15 @@ export default function App() {
         />
         {error ? <div className="error-banner">{error}</div> : null}
         <ShotEditor
+          assets={assets}
           characters={seriesBible?.characters ?? []}
           optimizing={optimizingShotId === selectedShot?.id}
+          regenerating={regeneratingShotId === selectedShot?.id}
           shot={selectedShot}
           saving={savingShotId === selectedShot?.id}
           strings={strings.shotEditor}
           onOptimizePrompt={handleOptimizeShotPrompt}
+          onRegenerateShot={handleRegenerateShot}
           onSaveShot={handleSaveShot}
         />
         <StoryboardWaterfall

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getStrings } from "./i18n";
@@ -74,6 +74,18 @@ const sampleProjectResponse = {
         voice: null,
         reference_images: [],
         locked: true,
+      },
+    ],
+    assets: [
+      {
+        id: "asset-char-1",
+        kind: "character",
+        label: "Mara reference",
+        description: "Red coat hero reference",
+        prompt: "Mara red coat hero reference",
+        reference_images: ["assets/images/character/mara.png"],
+        shot_ids: [],
+        version: 1,
       },
     ],
   },
@@ -213,6 +225,71 @@ describe("App", () => {
     expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
   });
 
+  it("shows image-to-video mode and saves selected assets before regenerating", async () => {
+    apiMocks.saveShot.mockResolvedValue({
+      job_id: "save-job",
+      event: {
+        id: "save-event",
+        job_id: "save-job",
+        project_id: "p1",
+        stage: "save",
+        status: "complete",
+        message: "Shot saved",
+        created_at: "now",
+      },
+      shot: { ...sampleShot, asset_ids: ["asset-char-1"] },
+      storyboard: {
+        shots: [
+          { ...sampleShot, asset_ids: ["asset-char-1"] },
+          sampleShot2,
+        ],
+      },
+      consistency_report: { score: 100, issues: [] },
+    });
+    apiMocks.regenerateShot.mockResolvedValue({
+      job_id: "regen-job",
+      event: {
+        id: "regen-event",
+        job_id: "regen-job",
+        project_id: "p1",
+        stage: "regenerate",
+        status: "complete",
+        message: "Shot regenerated",
+        created_at: "now",
+      },
+      shot: { ...sampleShot, status: "complete", asset_ids: ["asset-char-1"] },
+      storyboard: { shots: [{ ...sampleShot, status: "complete", asset_ids: ["asset-char-1"] }, sampleShot2] },
+      consistency_report: { score: 100, issues: [] },
+      generation: {
+        operation: "reference_to_video",
+        reference_image_paths: ["assets/images/character/mara.png"],
+        output_path: "assets/video/shot-1.mp4",
+        cost_usd: 0.2,
+      },
+    });
+
+    render(<App />);
+    await createStoryboard();
+
+    expect(screen.getByText("Text-to-video: no saved reference image selected")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Mara reference/i }));
+    expect(screen.getByText("Image-to-video: 1 reference image selected")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Regenerate selected shot" }).click();
+    });
+
+    expect(apiMocks.saveShot).toHaveBeenCalledWith(
+      "p1",
+      sampleShot.id,
+      expect.objectContaining({ asset_ids: ["asset-char-1"] }),
+    );
+    expect(apiMocks.regenerateShot).toHaveBeenCalled();
+    expect(apiMocks.saveShot.mock.invocationCallOrder[0]).toBeLessThan(
+      apiMocks.regenerateShot.mock.invocationCallOrder[0],
+    );
+  });
+
   it("edits shot language and character bindings with structured controls", async () => {
     render(<App />);
     await createStoryboard();
@@ -220,7 +297,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Shot size")).toBeInTheDocument();
     expect(screen.getByLabelText("Camera movement")).toBeInTheDocument();
     expect(screen.getByLabelText("Shot intent")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("checkbox", { name: /Mara/i })).toBeChecked());
+    await waitFor(() => expect(screen.getAllByRole("checkbox", { name: /Mara/i })[0]).toBeChecked());
 
     fireEvent.change(screen.getByLabelText("Shot size"), { target: { value: "close_up" } });
     fireEvent.change(screen.getByLabelText("Camera movement"), { target: { value: "dolly_in" } });

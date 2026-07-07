@@ -86,10 +86,14 @@ export interface UIStrings {
     >;
     depthOfFieldOptions: Record<"shallow" | "medium" | "deep", string>;
     colorTemperatureOptions: Record<"cool" | "neutral" | "warm" | "mixed", string>;
+    textToVideoMode: string;
+    imageToVideoMode: (count: number) => string;
     optimizeAction: string;
     optimizingAction: string;
     saveAction: string;
     savingAction: string;
+    regenerateAction: string;
+    regeneratingAction: string;
   };
   storyboardWaterfall: {
     regionLabel: string;
@@ -228,10 +232,14 @@ const STRINGS: Record<Locale, UIStrings> = {
         warm: "Warm",
         mixed: "Mixed",
       },
+      textToVideoMode: "Text-to-video: no saved reference image selected",
+      imageToVideoMode: (count) => `Image-to-video: ${count} reference image${count === 1 ? "" : "s"} selected`,
       optimizeAction: "Optimize shot",
       optimizingAction: "Optimizing shot",
       saveAction: "Save shot",
       savingAction: "Saving shot",
+      regenerateAction: "Regenerate selected shot",
+      regeneratingAction: "Regenerating selected shot",
     },
     storyboardWaterfall: {
       regionLabel: "Storyboard waterfall",
@@ -380,10 +388,14 @@ const STRINGS: Record<Locale, UIStrings> = {
         warm: "\u6696\u8272",
         mixed: "\u6df7\u5408",
       },
+      textToVideoMode: "\u6587\u751f\u89c6\u9891\uff1a\u5f53\u524d\u672a\u9009\u4e2d\u53c2\u8003\u56fe",
+      imageToVideoMode: (count) => `\u56fe\u751f\u89c6\u9891\uff1a\u5df2\u9009 ${count} \u5f20\u53c2\u8003\u56fe`,
       optimizeAction: "\u4f18\u5316\u955c\u5934",
       optimizingAction: "\u6b63\u5728\u4f18\u5316\u955c\u5934",
       saveAction: "\u4fdd\u5b58\u955c\u5934",
       savingAction: "\u6b63\u5728\u4fdd\u5b58\u955c\u5934",
+      regenerateAction: "\u91cd\u65b0\u751f\u6210\u5f53\u524d\u955c\u5934",
+      regeneratingAction: "\u6b63\u5728\u91cd\u65b0\u751f\u6210\u5f53\u524d\u955c\u5934",
     },
     storyboardWaterfall: {
       regionLabel: "\u5206\u955c\u7011\u5e03",
