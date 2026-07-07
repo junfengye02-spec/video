@@ -161,7 +161,7 @@ export function ShotEditor({
           <textarea value={shotIntent} disabled={!shot} rows={2} onChange={(event) => setShotIntent(event.target.value)} />
         </label>
         <fieldset className="asset-binding-group" disabled={!shot || groupedAssets.length === 0}>
-          <legend>Reference assets</legend>
+          <legend>{strings.referenceAssetsLabel}</legend>
           <div className="asset-grid">
             {groupedAssets.length > 0 ? (
               groupedAssets.map((asset) => (
@@ -181,7 +181,7 @@ export function ShotEditor({
                 </label>
               ))
             ) : (
-              <span className="empty-state">No saved reference assets yet.</span>
+              <span className="empty-state">{strings.noSavedReferenceAssetsYet}</span>
             )}
           </div>
         </fieldset>
@@ -345,7 +345,7 @@ export function ShotEditor({
           disabled={!shot || saving}
           onClick={() => {
             if (shot) {
-              void onSaveShot(shot.id, currentSavePayload());
+              void onSaveShot(shot.id, currentSavePayload()).catch(() => undefined);
             }
           }}
         >
@@ -361,17 +361,21 @@ export function ShotEditor({
               return;
             }
             const payload = currentSavePayload();
-            await onSaveShot(shot.id, payload);
-            await onRegenerateShot({
-              ...shot,
-              prompt: payload.prompt ?? shot.prompt,
-              characters: payload.characters ?? shot.characters,
-              location: payload.location ?? null,
-              props: payload.props ?? shot.props,
-              asset_ids: payload.asset_ids ?? shot.asset_ids,
-              shot_intent: payload.shot_intent ?? shot.shot_intent,
-              shot_language: payload.shot_language ?? shot.shot_language,
-            });
+            try {
+              await onSaveShot(shot.id, payload);
+              await onRegenerateShot({
+                ...shot,
+                prompt: payload.prompt ?? shot.prompt,
+                characters: payload.characters ?? shot.characters,
+                location: payload.location ?? null,
+                props: payload.props ?? shot.props,
+                asset_ids: payload.asset_ids ?? shot.asset_ids,
+                shot_intent: payload.shot_intent ?? shot.shot_intent,
+                shot_language: payload.shot_language ?? shot.shot_language,
+              });
+            } catch {
+              // Save failures are surfaced by App; stop before regenerate.
+            }
           }}
         >
           <RefreshCw aria-hidden="true" size={16} />

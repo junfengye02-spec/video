@@ -86,6 +86,8 @@ export interface UIStrings {
     >;
     depthOfFieldOptions: Record<"shallow" | "medium" | "deep", string>;
     colorTemperatureOptions: Record<"cool" | "neutral" | "warm" | "mixed", string>;
+    referenceAssetsLabel: string;
+    noSavedReferenceAssetsYet: string;
     textToVideoMode: string;
     imageToVideoMode: (count: number) => string;
     optimizeAction: string;
@@ -232,6 +234,8 @@ const STRINGS: Record<Locale, UIStrings> = {
         warm: "Warm",
         mixed: "Mixed",
       },
+      referenceAssetsLabel: "Reference assets",
+      noSavedReferenceAssetsYet: "No saved reference assets yet.",
       textToVideoMode: "Text-to-video: no saved reference image selected",
       imageToVideoMode: (count) => `Image-to-video: ${count} reference image${count === 1 ? "" : "s"} selected`,
       optimizeAction: "Optimize shot",
@@ -388,6 +392,8 @@ const STRINGS: Record<Locale, UIStrings> = {
         warm: "\u6696\u8272",
         mixed: "\u6df7\u5408",
       },
+      referenceAssetsLabel: "\u53c2\u8003\u8d44\u6e90",
+      noSavedReferenceAssetsYet: "\u5c1a\u672a\u4fdd\u5b58\u53c2\u8003\u8d44\u6e90\u3002",
       textToVideoMode: "\u6587\u751f\u89c6\u9891\uff1a\u5f53\u524d\u672a\u9009\u4e2d\u53c2\u8003\u56fe",
       imageToVideoMode: (count) => `\u56fe\u751f\u89c6\u9891\uff1a\u5df2\u9009 ${count} \u5f20\u53c2\u8003\u56fe`,
       optimizeAction: "\u4f18\u5316\u955c\u5934",

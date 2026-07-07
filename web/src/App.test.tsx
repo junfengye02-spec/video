@@ -290,6 +290,18 @@ describe("App", () => {
     );
   });
 
+  it("does not regenerate when the save before regenerate fails", async () => {
+    apiMocks.saveShot.mockRejectedValueOnce(new Error("save exploded"));
+
+    render(<App />);
+    await createStoryboard();
+
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate selected shot" }));
+
+    expect(await screen.findByText("save exploded")).toBeInTheDocument();
+    expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
+  });
+
   it("edits shot language and character bindings with structured controls", async () => {
     render(<App />);
     await createStoryboard();

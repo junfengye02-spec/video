@@ -182,6 +182,7 @@ export default function App() {
       setFinalPath(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : strings.errors.saveShotFallback);
+      throw err instanceof Error ? err : new Error(strings.errors.saveShotFallback);
     } finally {
       setSavingShotId(null);
     }
