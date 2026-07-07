@@ -154,6 +154,107 @@ def test_run_single_shot_generation_passes_video_model_and_key(tmp_path, monkeyp
     assert captured["inputs"]["model_variant"] == "veo_3_1-lite"
 
 
+def test_run_single_shot_generation_uses_reference_to_video_when_asset_images_exist(tmp_path, monkeypatch):
+    image = tmp_path / "assets" / "images" / "character" / "lin.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fake png")
+    captured = {}
+
+    class FakeResult:
+        success = True
+        data = {
+            "output": str(tmp_path / "assets" / "video" / "s1.mp4"),
+            "url": "https://video.example/s1.mp4",
+            "operation": "reference_to_video",
+        }
+        cost_usd = 0.5
+
+    class FakeVideoSelector:
+        def execute(self, inputs):
+            captured["inputs"] = inputs
+            return FakeResult()
+
+    monkeypatch.setattr("tools.video.video_selector.VideoSelector", FakeVideoSelector)
+
+    result = run_single_shot_generation(
+        project_dir=tmp_path,
+        shot={
+            "id": "s1",
+            "prompt": "Lin opens the envelope.",
+            "characters": [],
+            "asset_ids": ["asset-lin"],
+        },
+        series_bible={
+            "characters": [],
+            "assets": [
+                {
+                    "id": "asset-lin",
+                    "kind": "character",
+                    "label": "Lin reference",
+                    "reference_images": ["assets/images/character/lin.png"],
+                }
+            ],
+        },
+        video_key="video-key",
+        base_url="https://api.0000238.xyz",
+        video_model="omni_flash-10s",
+    )
+
+    assert captured["inputs"]["operation"] == "reference_to_video"
+    assert captured["inputs"]["reference_image_paths"] == [str(image.resolve())]
+    assert result["operation"] == "reference_to_video"
+    assert result["reference_image_paths"] == [str(image.resolve())]
+
+
+def test_run_single_shot_generation_keeps_text_to_video_without_existing_reference_images(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeResult:
+        success = True
+        data = {
+            "output": str(tmp_path / "assets" / "video" / "s1.mp4"),
+            "url": "https://video.example/s1.mp4",
+            "operation": "text_to_video",
+        }
+        cost_usd = 0.4
+
+    class FakeVideoSelector:
+        def execute(self, inputs):
+            captured["inputs"] = inputs
+            return FakeResult()
+
+    monkeypatch.setattr("tools.video.video_selector.VideoSelector", FakeVideoSelector)
+
+    result = run_single_shot_generation(
+        project_dir=tmp_path,
+        shot={
+            "id": "s1",
+            "prompt": "Lin opens the envelope.",
+            "characters": [],
+            "asset_ids": ["asset-lin"],
+        },
+        series_bible={
+            "characters": [],
+            "assets": [
+                {
+                    "id": "asset-lin",
+                    "kind": "character",
+                    "label": "Lin reference",
+                    "reference_images": ["assets/images/character/missing.png"],
+                }
+            ],
+        },
+        video_key="video-key",
+        base_url="https://api.0000238.xyz",
+        video_model="omni_flash-10s",
+    )
+
+    assert captured["inputs"]["operation"] == "text_to_video"
+    assert "reference_image_paths" not in captured["inputs"]
+    assert result["operation"] == "text_to_video"
+    assert result["reference_image_paths"] == []
+
+
 def test_run_single_shot_generation_prompt_includes_shot_language_and_asset_references(tmp_path, monkeypatch):
     captured = {}
 

@@ -14,6 +14,7 @@ from server.app.keyring import key_environment
 
 RenderRuntime = Literal["remotion", "hyperframes", "ffmpeg"]
 DEFAULT_VIDEO_MODEL = "omni_flash-10s"
+REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def compile_shot_prompt(
@@ -89,6 +90,80 @@ def _has_meaningful_shot_language(shot_language: Any) -> bool:
             return True
 
     return False
+
+
+def _resolve_project_reference_image(project_path: Path, reference: Any) -> Path | None:
+    if not isinstance(reference, str) or not reference.strip():
+        return None
+
+    raw_path = Path(reference.strip())
+    candidate = raw_path if raw_path.is_absolute() else project_path / raw_path
+    try:
+        resolved_project = project_path.resolve()
+        resolved_candidate = candidate.resolve()
+        resolved_candidate.relative_to(resolved_project)
+    except (OSError, ValueError):
+        return None
+
+    if resolved_candidate.suffix.lower() not in REFERENCE_IMAGE_EXTENSIONS:
+        return None
+    if not resolved_candidate.is_file():
+        return None
+    return resolved_candidate
+
+
+def resolve_shot_reference_image_paths(
+    project_dir: str | Path,
+    shot: dict[str, Any],
+    asset_lookup: dict[str, dict[str, Any]],
+    max_images: int = 3,
+) -> list[str]:
+    project_path = Path(project_dir)
+    references: list[str] = []
+    seen: set[str] = set()
+
+    for asset_id in shot.get("asset_ids") or []:
+        asset = asset_lookup.get(str(asset_id))
+        if not asset:
+            continue
+        for reference in asset.get("reference_images") or []:
+            resolved = _resolve_project_reference_image(project_path, reference)
+            if resolved is None:
+                continue
+            resolved_text = str(resolved)
+            if resolved_text in seen:
+                continue
+            references.append(resolved_text)
+            seen.add(resolved_text)
+            if len(references) >= max_images:
+                return references
+
+    return references
+
+
+def build_video_selector_inputs(
+    *,
+    project_dir: str | Path,
+    shot: dict[str, Any],
+    prompt: str,
+    video_model: str,
+    output_path: str | Path,
+    asset_lookup: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    reference_image_paths = resolve_shot_reference_image_paths(project_dir, shot, asset_lookup)
+    operation = "reference_to_video" if reference_image_paths else "text_to_video"
+    inputs: dict[str, Any] = {
+        "prompt": prompt,
+        "preferred_provider": "syapi",
+        "operation": operation,
+        "model_variant": video_model,
+        "aspect_ratio": str(shot.get("aspect_ratio", "9:16")),
+        "duration": "5",
+        "output_path": str(output_path),
+    }
+    if reference_image_paths:
+        inputs["reference_image_paths"] = reference_image_paths
+    return inputs
 
 
 def build_pipeline_inputs(
@@ -247,21 +322,26 @@ def run_single_shot_generation(
     output_path = project_path / "assets" / "video" / f"{shot_id}.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    selector_inputs = build_video_selector_inputs(
+        project_dir=project_path,
+        shot=shot,
+        prompt=prompt,
+        video_model=video_model,
+        output_path=output_path,
+        asset_lookup=asset_lookup,
+    )
+
     if emit_event:
-        emit_event("assets", "running", f"Generating video for {shot_id}")
+        reference_count = len(selector_inputs.get("reference_image_paths", []))
+        mode = selector_inputs["operation"]
+        emit_event(
+            "assets",
+            "running",
+            f"Generating video for {shot_id} with {mode} ({reference_count} reference images)",
+        )
 
     with _patched_environment(key_environment(video_key, base_url)):
-        result = VideoSelector().execute(
-            {
-                "prompt": prompt,
-                "preferred_provider": "syapi",
-                "operation": "text_to_video",
-                "model_variant": video_model,
-                "aspect_ratio": str(shot.get("aspect_ratio", "9:16")),
-                "duration": "5",
-                "output_path": str(output_path),
-            }
-        )
+        result = VideoSelector().execute(selector_inputs)
 
     if not result.success:
         if emit_event:
@@ -276,6 +356,8 @@ def run_single_shot_generation(
         "output_path": result.data.get("output") or str(output_path),
         "tool_result": result.data,
         "cost_usd": result.cost_usd,
+        "operation": selector_inputs["operation"],
+        "reference_image_paths": selector_inputs.get("reference_image_paths", []),
     }
 
 
