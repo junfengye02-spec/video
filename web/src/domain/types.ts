@@ -188,12 +188,20 @@ export interface ShortDramaProjectResponse {
   final_path?: string | null;
 }
 
+export interface ShotGenerationSummary {
+  operation: "text_to_video" | "image_to_video" | "reference_to_video" | "first_last_frame_to_video";
+  reference_image_paths: string[];
+  output_path?: string | null;
+  cost_usd?: number | null;
+}
+
 export interface RegenerateShotResponse {
   job_id: string;
   event: JobEvent;
   shot: Shot;
   storyboard: Storyboard;
   consistency_report: ConsistencyReport;
+  generation?: ShotGenerationSummary;
 }
 
 export interface RenderReportOutput {

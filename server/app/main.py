@@ -15,7 +15,11 @@ from server.app.key_validation import validate_gateway_models
 from server.app.keyring import key_environment, mask_key
 from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot, update_mock_shot
 from server.app.models import PromptOptimizeRequest, PromptOptimizeResponse, ShotRegenerateRequest, ShotSaveRequest
-from server.app.openmontage_runner import render_short_drama_project, run_single_shot_generation
+from server.app.openmontage_runner import (
+    REFERENCE_IMAGE_EXTENSIONS,
+    render_short_drama_project,
+    run_single_shot_generation,
+)
 from server.app.prompt_optimizer import optimize_text_prompt
 from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
 from server.app.storyboard_generator import generate_short_drama_storyboard
@@ -24,6 +28,37 @@ from server.app.storage import WorkbenchStore
 DEFAULT_TEXT_MODEL = "gpt-5.5"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_VIDEO_MODEL = "omni_flash-10s"
+
+
+def sanitize_project_path(project_dir: Path, path_value: Any) -> str | None:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+
+    project_root = project_dir.resolve()
+    candidate = Path(path_value.strip())
+    resolved_candidate = (candidate if candidate.is_absolute() else project_dir / candidate).resolve(strict=False)
+    try:
+        relative_path = resolved_candidate.relative_to(project_root)
+    except ValueError:
+        return None
+
+    if resolved_candidate.suffix.lower() in REFERENCE_IMAGE_EXTENSIONS and not resolved_candidate.is_file():
+        return None
+
+    return relative_path.as_posix()
+
+
+def _sanitize_generation_output(project_dir: Path, output: dict[str, Any]) -> dict[str, Any]:
+    decorated = dict(output)
+    if "output_path" in decorated:
+        decorated["output_path"] = sanitize_project_path(project_dir, decorated.get("output_path"))
+    if "reference_image_paths" in decorated:
+        decorated["reference_image_paths"] = [
+            relative_path
+            for reference in decorated.get("reference_image_paths", [])
+            if (relative_path := sanitize_project_path(project_dir, reference)) is not None
+        ]
+    return decorated
 
 
 def _persist_storyboard_state(
@@ -324,7 +359,18 @@ def create_app(
             video_model=payload.video_model,
         )
         event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
-        return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
+        project_dir = workbench.project_dir(project_id)
+        response_storyboard = storyboard
+        response_shot = shot
+        generation = _sanitize_generation_output(project_dir, output)
+        return {
+            "job_id": job_id,
+            "event": event,
+            "shot": response_shot,
+            "storyboard": response_storyboard,
+            "consistency_report": report,
+            "generation": generation,
+        }
 
     @app.post("/api/projects/{project_id}/render")
     def render_project(

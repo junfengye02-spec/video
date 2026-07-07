@@ -582,6 +582,46 @@ def test_regenerate_shot_generates_single_video(tmp_path, monkeypatch):
     assert body["shot"]["status"] == "complete"
 
 
+def test_regenerate_shot_returns_sanitized_generation_summary(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+
+    def fake_run_single_shot_generation(**kwargs):
+        project_dir = kwargs["project_dir"]
+        reference = project_dir / "assets" / "images" / "character" / "lin.png"
+        reference.parent.mkdir(parents=True)
+        reference.write_bytes(b"fake png")
+        return {
+            "shot_id": shot_id,
+            "output_path": str(project_dir / "assets" / "video" / f"{shot_id}.mp4"),
+            "tool_result": {"url": "https://video.example/s1.mp4", "operation": "reference_to_video"},
+            "cost_usd": 0.2,
+            "operation": "reference_to_video",
+            "reference_image_paths": [str(reference)],
+        }
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "video_model": "omni_flash-10s",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["generation"]["operation"] == "reference_to_video"
+    assert body["generation"]["reference_image_paths"] == ["assets/images/character/lin.png"]
+    assert body["generation"]["output_path"] == f"assets/video/{shot_id}.mp4"
+    assert str(tmp_path) not in str(body["generation"])
+
+
 def test_regenerate_shot_requires_video_key(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)

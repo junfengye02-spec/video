@@ -260,6 +260,12 @@ describe("regenerateShot", () => {
         shot: { id: "s1", status: "complete" },
         storyboard: { shots: [] },
         consistency_report: { score: 100, issues: [] },
+        generation: {
+          operation: "reference_to_video",
+          reference_image_paths: ["assets/images/character/lin.png"],
+          output_path: "assets/video/s1.mp4",
+          cost_usd: 0.2,
+        },
       }),
     });
     const payload: ShotRegenerateRequest = {
@@ -275,6 +281,8 @@ describe("regenerateShot", () => {
       expect.objectContaining({ method: "POST", body: JSON.stringify(payload) }),
     );
     expect(result.event.stage).toBe("regenerate");
+    expect(result.generation?.operation).toBe("reference_to_video");
+    expect(result.generation?.reference_image_paths).toEqual(["assets/images/character/lin.png"]);
   });
 });
 
