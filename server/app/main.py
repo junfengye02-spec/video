@@ -439,16 +439,24 @@ def create_app(
         workbench.write_artifact(project_id, "episode_storyboard.json", result["storyboard"])
         workbench.write_artifact(project_id, "consistency_report.json", report)
         workbench.write_artifact(project_id, "render_report.json", result["render_report"])
+        project_dir = workbench.project_dir(project_id)
+        response_storyboard = _sanitize_storyboard_response(project_dir, result["storyboard"])
+        response_render_report = _sanitize_render_report_response(project_dir, result["render_report"])
+        response_final_path = sanitize_project_path(project_dir, result["final_path"])
+        response_outputs = [
+            _sanitize_generation_output(project_dir, output) if isinstance(output, dict) else output
+            for output in result["outputs"]
+        ]
         event = bus.emit(project_id, job_id=job_id, stage="render", status="complete", message="Final video rendered")
         return {
             "job_id": job_id,
             "event": event,
             "project": project.model_dump(),
-            "storyboard": result["storyboard"],
+            "storyboard": response_storyboard,
             "consistency_report": report,
-            "render_report": result["render_report"],
-            "final_path": result["final_path"],
-            "outputs": result["outputs"],
+            "render_report": response_render_report,
+            "final_path": response_final_path,
+            "outputs": response_outputs,
         }
 
     @app.get("/api/projects/{project_id}/events")

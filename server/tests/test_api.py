@@ -1166,6 +1166,102 @@ def test_render_project_generates_final_video_and_updates_storyboard(tmp_path, m
     assert loaded["render_report"]["outputs"][0]["path"].endswith("final.mp4")
 
 
+def test_render_project_sanitizes_response_absolute_paths(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/projects/short-drama",
+        json={
+            "title": "Rain Alley",
+            "prompt": "rain-night urban reversal short drama",
+            "text_key": TEXT_TEST_KEY,
+            "image_key": IMAGE_TEST_KEY,
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "text_model": "gpt-5.5",
+            "image_model": "gpt-image-2",
+            "video_model": "omni_flash-10s",
+        },
+    ).json()
+    project_id = created["project"]["id"]
+
+    def fake_render_short_drama_project(**kwargs):
+        project_dir = kwargs["project_dir"]
+        storyboard = kwargs["storyboard"]
+        reference_image = project_dir / "assets" / "images" / "character" / "lin.png"
+        reference_image.parent.mkdir(parents=True, exist_ok=True)
+        reference_image.write_bytes(b"fake reference image")
+
+        for shot in storyboard["shots"]:
+            shot["status"] = "complete"
+            shot["output_path"] = str(project_dir / "assets" / "video" / f"{shot['id']}.mp4")
+
+        final_path = project_dir / "renders" / "final.mp4"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_bytes(b"fake video")
+        generation_output = {
+            "operation": "reference_to_video",
+            "reference_image_paths": [str(reference_image)],
+            "output_path": str(project_dir / "assets" / "video" / "s1.mp4"),
+            "cost_usd": 0.2,
+            "tool_result": {"url": "https://video.example/s1.mp4", "provider": "syapi"},
+        }
+        return {
+            "final_path": str(final_path),
+            "render_report": {
+                "version": "1.0",
+                "outputs": [
+                    {
+                        "path": str(final_path),
+                        "format": "mp4",
+                        "resolution": "720x1280",
+                        "duration_seconds": 25,
+                    }
+                ],
+                "warnings": [],
+                "verification_notes": ["fake render"],
+            },
+            "storyboard": storyboard,
+            "artifacts": {},
+            "outputs": [generation_output],
+        }
+
+    monkeypatch.setattr("server.app.main.render_short_drama_project", fake_render_short_drama_project)
+
+    response = client.post(
+        f"/api/projects/{project_id}/render",
+        json={
+            "video_key": VIDEO_TEST_KEY,
+            "base_url": "https://api.0000238.xyz",
+            "video_model": "veo_3_1-lite",
+            "render_runtime": "ffmpeg",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    def collect_strings(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from collect_strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from collect_strings(item)
+        elif isinstance(value, str):
+            yield value
+
+    leaked_values = [item for item in collect_strings(body) if str(tmp_path) in item]
+    assert leaked_values == []
+    assert body["storyboard"]["shots"][0]["output_path"] == "assets/video/s1.mp4"
+    assert body["render_report"]["outputs"][0]["path"] == "renders/final.mp4"
+    assert body["final_path"] == "renders/final.mp4"
+    assert body["outputs"][0]["output_path"] == "assets/video/s1.mp4"
+    assert body["outputs"][0]["reference_image_paths"] == ["assets/images/character/lin.png"]
+    assert "tool_result" not in body["outputs"][0]
+
+
 def test_load_project_returns_render_report_and_final_path_after_render(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
