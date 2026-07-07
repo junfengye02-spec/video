@@ -19,6 +19,7 @@ import { ShotEditor } from "./components/ShotEditor";
 import { StoryboardWaterfall } from "./components/StoryboardWaterfall";
 import { detectLocale, getStrings } from "./i18n";
 import type {
+  AssetRecord,
   ConsistencyReport,
   JobEvent,
   PromptOptimizeResponse,
@@ -33,13 +34,6 @@ const DEFAULT_BASE_URL = "https://api.0000238.xyz";
 const DEFAULT_TEXT_MODEL = "gpt-5.5";
 const DEFAULT_IMAGE_MODEL = "gpt-image-2";
 const DEFAULT_VIDEO_MODEL = "omni_flash-10s";
-
-interface AssetRecord {
-  id: string;
-  kind: string;
-  label: string;
-  reference_images: string[];
-}
 
 function appendUniqueEvent(current: JobEvent[], event: JobEvent) {
   if (current.some((existing) => existing.id === event.id)) {
@@ -81,10 +75,7 @@ export default function App() {
   }, [seriesBible, storyboard]);
 
   const selectedShot = useMemo(() => storyboard?.shots[0] ?? null, [storyboard]);
-  const assets = useMemo(
-    () => ((seriesBible as (SeriesBible & { assets?: AssetRecord[] }) | null)?.assets ?? []),
-    [seriesBible],
-  );
+  const assets = useMemo(() => seriesBible?.assets ?? [], [seriesBible]);
 
   useEffect(() => {
     if (!project?.id) {

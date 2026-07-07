@@ -46,11 +46,19 @@ export interface Character {
   locked: boolean;
 }
 
+export interface AssetRecord {
+  id: string;
+  kind: string;
+  label: string;
+  reference_images: string[];
+}
+
 export interface SeriesBible {
   title?: string;
   mode?: ProjectMode;
   style_lock?: string;
   characters: Character[];
+  assets?: AssetRecord[];
 }
 
 export type ShotStatus = "draft" | "ready" | "generating" | "complete" | "failed";

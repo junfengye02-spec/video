@@ -1215,6 +1215,72 @@ def test_load_project_returns_render_report_and_final_path_after_render(tmp_path
     assert loaded["render_report"]["outputs"][0]["path"].endswith("final.mp4")
 
 
+def test_get_project_sanitizes_persisted_absolute_paths(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    store = app.state.store
+    project_dir = store.project_dir(project_id)
+
+    shot_output = project_dir / "assets" / "video" / "s1.mp4"
+    shot_output.write_bytes(b"fake shot video")
+    render_output = project_dir / "renders" / "final.mp4"
+    render_output.write_bytes(b"fake final video")
+    alt_output = project_dir / "assets" / "video" / "preview.mp4"
+    alt_output.write_bytes(b"fake preview video")
+
+    storyboard = store.read_artifact(project_id, "episode_storyboard.json")
+    assert storyboard is not None
+    storyboard["shots"][0]["output_path"] = str(shot_output)
+    store.write_artifact(project_id, "episode_storyboard.json", storyboard)
+    store.write_artifact(
+        project_id,
+        "render_report.json",
+        {
+            "version": "1.0",
+            "outputs": [
+                {
+                    "path": str(render_output),
+                    "format": "mp4",
+                    "resolution": "720x1280",
+                    "duration_seconds": 5,
+                },
+                {
+                    "path": str(alt_output),
+                    "format": "mp4",
+                    "resolution": "720x1280",
+                    "duration_seconds": 2,
+                },
+            ],
+            "warnings": [],
+            "verification_notes": ["persisted absolute paths"],
+        },
+    )
+
+    response = client.get(f"/api/projects/{project_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+
+    def collect_strings(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from collect_strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from collect_strings(item)
+        elif isinstance(value, str):
+            yield value
+
+    leaked_values = [item for item in collect_strings(body) if str(project_dir) in item or str(tmp_path) in item]
+    assert leaked_values == []
+    assert body["storyboard"]["shots"][0]["output_path"] == "assets/video/s1.mp4"
+    assert body["render_report"]["outputs"][0]["path"] == "renders/final.mp4"
+    assert body["render_report"]["outputs"][1]["path"] == "assets/video/preview.mp4"
+    assert body["final_path"] == "renders/final.mp4"
+
+
 def test_render_project_returns_provider_error_detail(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)

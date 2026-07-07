@@ -1,14 +1,7 @@
 import { Check, Images, RefreshCw, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { Character, PromptOptimizeResponse, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
+import type { AssetRecord, Character, PromptOptimizeResponse, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
 import type { UIStrings } from "../i18n";
-
-interface AssetRecord {
-  id: string;
-  kind: string;
-  label: string;
-  reference_images: string[];
-}
 
 interface ShotEditorProps {
   assets: AssetRecord[];
@@ -94,10 +87,13 @@ export function ShotEditor({
   );
   const selectedReferenceCount = useMemo(
     () =>
-      assetIds.reduce((count, assetId) => {
-        const asset = assets.find((item) => item.id === assetId);
-        return count + (asset?.reference_images.length ?? 0);
-      }, 0),
+      Math.min(
+        assetIds.reduce((count, assetId) => {
+          const asset = assets.find((item) => item.id === assetId);
+          return count + (asset?.reference_images.length ?? 0);
+        }, 0),
+        3,
+      ),
     [assetIds, assets],
   );
   const generationModeLabel =

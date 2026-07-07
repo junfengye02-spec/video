@@ -76,6 +76,14 @@ def _sanitize_storyboard_response(project_dir: Path, storyboard: dict[str, Any])
     return response_storyboard
 
 
+def _sanitize_render_report_response(project_dir: Path, render_report: dict[str, Any]) -> dict[str, Any]:
+    response_render_report = deepcopy(render_report)
+    for output in response_render_report.get("outputs", []):
+        if isinstance(output, dict):
+            output["path"] = sanitize_project_path(project_dir, output.get("path"))
+    return response_render_report
+
+
 def _persist_storyboard_state(
     *,
     workbench: WorkbenchStore,
@@ -219,16 +227,22 @@ def create_app(
         project = workbench.get_project(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
+        project_dir = workbench.project_dir(project_id)
+        storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         render_report = workbench.read_artifact(project_id, "render_report.json")
+        response_storyboard = _sanitize_storyboard_response(project_dir, storyboard) if storyboard else None
+        response_render_report = (
+            _sanitize_render_report_response(project_dir, render_report) if render_report else None
+        )
         final_path = None
-        if render_report and render_report.get("outputs"):
-            final_path = render_report["outputs"][0].get("path")
+        if response_render_report and response_render_report.get("outputs"):
+            final_path = response_render_report["outputs"][0].get("path")
         return {
             "project": project.model_dump(),
             "series_bible": workbench.read_artifact(project_id, "series_bible.json"),
-            "storyboard": workbench.read_artifact(project_id, "episode_storyboard.json"),
+            "storyboard": response_storyboard,
             "consistency_report": workbench.read_artifact(project_id, "consistency_report.json"),
-            "render_report": render_report,
+            "render_report": response_render_report,
             "final_path": final_path,
         }
 

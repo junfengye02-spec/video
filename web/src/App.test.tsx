@@ -290,6 +290,25 @@ describe("App", () => {
     );
   });
 
+  it("caps the displayed image-to-video reference count at three", async () => {
+    const projectWithManyReferences = cloneProjectResponse();
+    projectWithManyReferences.series_bible.assets[0].reference_images = [
+      "assets/images/character/mara-1.png",
+      "assets/images/character/mara-2.png",
+      "assets/images/character/mara-3.png",
+      "assets/images/character/mara-4.png",
+    ];
+    apiMocks.createShortDramaProject.mockResolvedValue(projectWithManyReferences);
+    apiMocks.loadProject.mockResolvedValue(projectWithManyReferences);
+
+    render(<App />);
+    await createStoryboard();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Mara reference/i }));
+
+    expect(screen.getByText("Image-to-video: 3 reference images selected")).toBeInTheDocument();
+  });
+
   it("does not regenerate when the save before regenerate fails", async () => {
     apiMocks.saveShot.mockRejectedValueOnce(new Error("save exploded"));
 
