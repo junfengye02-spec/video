@@ -597,7 +597,11 @@ def test_regenerate_shot_returns_sanitized_generation_summary(tmp_path, monkeypa
         return {
             "shot_id": shot_id,
             "output_path": str(project_dir / "assets" / "video" / f"{shot_id}.mp4"),
-            "tool_result": {"url": "https://video.example/s1.mp4", "operation": "reference_to_video"},
+            "tool_result": {
+                "url": "https://video.example/s1.mp4",
+                "operation": "reference_to_video",
+                "output_path": str(project_dir / "assets" / "video" / "tool-result.mp4"),
+            },
             "cost_usd": 0.2,
             "operation": "reference_to_video",
             "reference_image_paths": [str(reference)],
@@ -616,10 +620,23 @@ def test_regenerate_shot_returns_sanitized_generation_summary(tmp_path, monkeypa
 
     assert response.status_code == 200
     body = response.json()
+
+    def collect_strings(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from collect_strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from collect_strings(item)
+        elif isinstance(value, str):
+            yield value
+
+    leaked_values = [item for item in collect_strings(body) if str(tmp_path) in item]
+    assert leaked_values == []
+    assert set(body["generation"].keys()) == {"operation", "reference_image_paths", "output_path", "cost_usd"}
     assert body["generation"]["operation"] == "reference_to_video"
     assert body["generation"]["reference_image_paths"] == ["assets/images/character/lin.png"]
     assert body["generation"]["output_path"] == f"assets/video/{shot_id}.mp4"
-    assert str(tmp_path) not in str(body["generation"])
 
 
 def test_regenerate_shot_requires_video_key(tmp_path):

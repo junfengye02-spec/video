@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -49,16 +50,30 @@ def sanitize_project_path(project_dir: Path, path_value: Any) -> str | None:
 
 
 def _sanitize_generation_output(project_dir: Path, output: dict[str, Any]) -> dict[str, Any]:
-    decorated = dict(output)
-    if "output_path" in decorated:
-        decorated["output_path"] = sanitize_project_path(project_dir, decorated.get("output_path"))
-    if "reference_image_paths" in decorated:
-        decorated["reference_image_paths"] = [
+    return {
+        "operation": output.get("operation"),
+        "reference_image_paths": [
             relative_path
-            for reference in decorated.get("reference_image_paths", [])
+            for reference in output.get("reference_image_paths", [])
             if (relative_path := sanitize_project_path(project_dir, reference)) is not None
-        ]
-    return decorated
+        ],
+        "output_path": sanitize_project_path(project_dir, output.get("output_path")),
+        "cost_usd": output.get("cost_usd"),
+    }
+
+
+def _sanitize_shot_response(project_dir: Path, shot: dict[str, Any]) -> dict[str, Any]:
+    response_shot = deepcopy(shot)
+    response_shot["output_path"] = sanitize_project_path(project_dir, response_shot.get("output_path"))
+    return response_shot
+
+
+def _sanitize_storyboard_response(project_dir: Path, storyboard: dict[str, Any]) -> dict[str, Any]:
+    response_storyboard = deepcopy(storyboard)
+    for response_shot in response_storyboard.get("shots", []):
+        if isinstance(response_shot, dict):
+            response_shot["output_path"] = sanitize_project_path(project_dir, response_shot.get("output_path"))
+    return response_storyboard
 
 
 def _persist_storyboard_state(
@@ -360,16 +375,15 @@ def create_app(
         )
         event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
         project_dir = workbench.project_dir(project_id)
-        response_storyboard = storyboard
-        response_shot = shot
-        generation = _sanitize_generation_output(project_dir, output)
+        response_storyboard = _sanitize_storyboard_response(project_dir, storyboard)
+        response_shot = _sanitize_shot_response(project_dir, shot)
         return {
             "job_id": job_id,
             "event": event,
             "shot": response_shot,
             "storyboard": response_storyboard,
             "consistency_report": report,
-            "generation": generation,
+            "generation": _sanitize_generation_output(project_dir, output),
         }
 
     @app.post("/api/projects/{project_id}/render")
