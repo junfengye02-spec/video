@@ -68,6 +68,7 @@ internal/
 .claude/memory/
 .claude/settings.local.json
 .superpowers/
+.worktrees/
 
 # Agent skills lock (local install tracking)
 skills-lock.json
