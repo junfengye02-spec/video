@@ -231,6 +231,77 @@ def test_create_short_drama_project_returns_storyboard(tmp_path):
     assert len(body["storyboard"]["shots"]) >= 4
 
 
+def test_create_draft_project_returns_continuity_and_workflow_shell(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+
+    response = client.post("/api/projects", json={"title": "Draft", "project_type": "mini_series"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project"]["title"] == "Draft"
+    assert body["project"]["project_type"] == "mini_series"
+    assert body["continuity_plan"]["project_type"] == "mini_series"
+    assert body["storyboard"]["shots"] == []
+    assert body["workflow_artifacts"]
+
+
+def test_reference_image_upload_persists_asset_library_and_project_snapshot(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = client.post("/api/projects", json={"title": "Draft", "project_type": "single_video"}).json()
+    project_id = created["project"]["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/assets/upload",
+        data={
+            "kind": "character",
+            "label": "Lin reference",
+            "description": "red coat",
+            "prompt": "red coat portrait",
+        },
+        files={"file": ("lin.png", b"fake-png", "image/png")},
+    )
+
+    assert response.status_code == 200
+    asset = response.json()["asset"]
+    assert asset["label"] == "Lin reference"
+    assert asset["media_urls"][0].startswith(f"/api/projects/{project_id}/media/assets/images/character/")
+    loaded = client.get(f"/api/projects/{project_id}").json()
+    assert loaded["series_bible"]["assets"][0]["id"] == asset["id"]
+
+
+def test_save_continuity_plan_updates_project_snapshot_and_handoff(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = client.post("/api/projects", json={"title": "Draft", "project_type": "long_series"}).json()
+    project_id = created["project"]["id"]
+
+    continuity_plan = created["continuity_plan"]
+    continuity_plan["active_episode_number"] = 1
+    continuity_plan["series_bible"]["worldview"] = "Rain city relay network"
+    continuity_plan["episodes"] = [
+        {
+            "episode_number": 1,
+            "title": "Pilot",
+            "goal": "Expose the missing package",
+            "conflict": "Lin is blocked by Chen",
+            "twist": "The package is a decoy",
+            "cliffhanger": "A second relay appears",
+            "inherited_state": [],
+            "locked": False,
+        }
+    ]
+
+    response = client.patch(f"/api/projects/{project_id}/continuity", json=continuity_plan)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["continuity_plan"]["active_episode_number"] == 1
+    loaded = client.get(f"/api/projects/{project_id}").json()
+    assert loaded["continuity_plan"]["series_bible"]["worldview"] == "Rain city relay network"
+
+
 def test_create_short_drama_project_uses_text_model_storyboard_generator(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)

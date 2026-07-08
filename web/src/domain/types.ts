@@ -1,9 +1,11 @@
 export type ProjectMode = "short_drama" | "general_video";
+export type ProjectType = "single_video" | "mini_series" | "long_series";
 
 export interface Project {
   id: string;
   title: string;
   mode: ProjectMode;
+  project_type?: ProjectType;
   created_at?: string;
   updated_at?: string;
 }
@@ -48,9 +50,14 @@ export interface Character {
 
 export interface AssetRecord {
   id: string;
-  kind: string;
+  kind: "character" | "scene" | "prop";
   label: string;
+  description?: string;
+  prompt?: string;
   reference_images: string[];
+  media_urls?: string[];
+  shot_ids?: string[];
+  version?: number;
 }
 
 export interface SeriesBible {
@@ -165,6 +172,52 @@ export interface ConsistencyReport {
   issues: ConsistencyIssue[];
 }
 
+export interface ContinuitySeriesBible {
+  worldview: string;
+  main_arc: string;
+  style_lock: string;
+  visual_rules: string;
+  taboos: string[];
+  locations: string[];
+  props: string[];
+  relationship_map: string[];
+}
+
+export interface EpisodeOutlineItem {
+  episode_number: number;
+  title: string;
+  goal: string;
+  conflict: string;
+  twist: string;
+  cliffhanger: string;
+  inherited_state: string[];
+  locked: boolean;
+}
+
+export interface StoryState {
+  character_knowledge: string[];
+  relationship_changes: string[];
+  active_foreshadowing: string[];
+  resolved_foreshadowing: string[];
+  prop_state: string[];
+  character_status: string[];
+  current_locations: string[];
+}
+
+export interface ContinuityPlan {
+  project_type: ProjectType;
+  active_episode_number: number | null;
+  series_bible: ContinuitySeriesBible;
+  episodes: EpisodeOutlineItem[];
+  story_state: StoryState;
+}
+
+export interface WorkflowArtifactStatus {
+  name: string;
+  path: string;
+  exists: boolean;
+}
+
 export interface JobEvent {
   id: string;
   job_id: string;
@@ -178,6 +231,8 @@ export interface JobEvent {
 export interface ShortDramaProjectRequest {
   title: string;
   prompt: string;
+  project_type?: ProjectType;
+  shot_count?: number;
   text_key: string;
   image_key: string;
   video_key: string;
@@ -192,8 +247,15 @@ export interface ShortDramaProjectResponse {
   series_bible: SeriesBible;
   storyboard: Storyboard;
   consistency_report: ConsistencyReport;
+  continuity_plan?: ContinuityPlan | null;
+  workflow_artifacts?: WorkflowArtifactStatus[];
   render_report?: RenderReport | null;
   final_path?: string | null;
+}
+
+export interface DraftProjectRequest {
+  title: string;
+  project_type: ProjectType;
 }
 
 export interface ShotGenerationSummary {
@@ -214,6 +276,7 @@ export interface RegenerateShotResponse {
 
 export interface RenderReportOutput {
   path: string;
+  media_url?: string | null;
   format: string;
   resolution: string;
   duration_seconds: number;
@@ -280,4 +343,29 @@ export interface ShotRegenerateRequest {
   video_key: string;
   base_url: string;
   video_model: string;
+}
+
+export interface ContinuityPlanResponse {
+  project: Project;
+  continuity_plan: ContinuityPlan;
+}
+
+export interface MediaFile {
+  path: string;
+  media_url: string;
+  filename: string;
+  content_type: string;
+}
+
+export interface ReferenceImageUploadRequest {
+  kind: "character" | "scene" | "prop";
+  label: string;
+  description: string;
+  prompt: string;
+  file: File;
+}
+
+export interface ReferenceImageUploadResponse {
+  media: MediaFile;
+  asset: AssetRecord;
 }

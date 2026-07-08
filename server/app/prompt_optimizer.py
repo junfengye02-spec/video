@@ -5,6 +5,7 @@ from typing import Any
 
 import requests
 
+from server.app.model_output_normalization import normalize_shot_language
 from server.app.settings import DEFAULT_SYAPI_BASE_URL
 
 
@@ -65,7 +66,7 @@ def optimize_text_prompt(
         return {
             "optimized_text": optimized_text,
             "shot_intent": parsed.get("shot_intent"),
-            "shot_language": parsed.get("shot_language"),
+            "shot_language": normalize_shot_language(parsed.get("shot_language")),
             "notes": ["rewritten by text model as structured shot JSON"],
         }
 

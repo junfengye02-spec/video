@@ -45,7 +45,7 @@ def test_syapi_image_sync_writes_base64(monkeypatch, tmp_path):
 
     assert result.success
     assert output_path.read_bytes() == b"png-bytes"
-    assert captured["url"] == "https://u.syapi.cn/v1/images/generations"
+    assert captured["url"] == "https://api.0000238.xyz/v1/images/generations"
     assert captured["headers"]["Authorization"] == "Bearer test-key"
     assert captured["json"]["model"] == "image2"
     assert captured["json"]["size"] == "720x1280"
@@ -63,12 +63,12 @@ def test_syapi_image_async_polls_and_downloads_url(monkeypatch, tmp_path):
     calls = {"get": 0}
 
     def fake_post(url, **kwargs):
-        assert url == "https://u.syapi.cn/v1/videos"
+        assert url == "https://api.0000238.xyz/v1/videos"
         assert kwargs["json"]["model"] == "gpt-image-2"
         return FakeResponse(json_data={"id": "task_img", "status": "queued"})
 
     def fake_get(url, **kwargs):
-        if url == "https://u.syapi.cn/v1/videos/task_img":
+        if url == "https://api.0000238.xyz/v1/videos/task_img":
             calls["get"] += 1
             if calls["get"] == 1:
                 return FakeResponse(json_data={"id": "task_img", "status": "in_progress"})
@@ -101,13 +101,13 @@ def test_syapi_video_polls_and_downloads_video(monkeypatch, tmp_path):
     calls = {"get": 0}
 
     def fake_post(url, **kwargs):
-        assert url == "https://u.syapi.cn/v1/videos"
+        assert url == "https://api.0000238.xyz/v1/videos"
         assert kwargs["json"]["model"] == "omni_flash-10s"
         assert kwargs["json"]["size"] == "720x1280"
         return FakeResponse(json_data={"id": "task_vid", "status": "queued"})
 
     def fake_get(url, **kwargs):
-        if url == "https://u.syapi.cn/v1/videos/task_vid":
+        if url == "https://api.0000238.xyz/v1/videos/task_vid":
             calls["get"] += 1
             if calls["get"] == 1:
                 return FakeResponse(json_data={"id": "task_vid", "status": "processing", "progress": 45})
@@ -149,7 +149,7 @@ def test_syapi_video_retries_transient_poll_http_errors(monkeypatch, tmp_path):
         return FakeResponse(json_data={"id": "task_retry", "status": "queued"})
 
     def fake_get(url, **kwargs):
-        if url == "https://u.syapi.cn/v1/videos/task_retry":
+        if url == "https://api.0000238.xyz/v1/videos/task_retry":
             calls["get"] += 1
             if calls["get"] == 1:
                 return FakeResponse(ok=False, status_code=500, text="temporary gateway error")
@@ -180,6 +180,45 @@ def test_syapi_video_retries_transient_poll_http_errors(monkeypatch, tmp_path):
     assert result.success
     assert calls["get"] == 2
     assert output_path.read_bytes() == b"retry-mp4-bytes"
+
+
+def test_syapi_video_uses_configurable_submit_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("SYAPI_API_KEY", "test-key")
+    monkeypatch.setenv("SYAPI_BASE_URL", "https://u.syapi.cn")
+    output_path = tmp_path / "clip.mp4"
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        return FakeResponse(json_data={"id": "task_timeout", "status": "queued"})
+
+    def fake_get(url, **kwargs):
+        if url == "https://u.syapi.cn/v1/videos/task_timeout":
+            return FakeResponse(
+                json_data={
+                    "id": "task_timeout",
+                    "status": "completed",
+                    "video_url": "https://cdn.example/timeout.mp4",
+                }
+            )
+        if url == "https://cdn.example/timeout.mp4":
+            return FakeResponse(content=b"timeout-mp4-bytes")
+        raise AssertionError(url)
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr("requests.get", fake_get)
+
+    result = SyapiVideo().execute(
+        {
+            "prompt": "short comedic family drama clip",
+            "model_variant": "omni_flash-10s",
+            "submit_timeout_seconds": 180,
+            "output_path": str(output_path),
+        }
+    )
+
+    assert result.success
+    assert captured["timeout"] == 180
 
 
 def test_syapi_video_reports_failed_task(monkeypatch, tmp_path):

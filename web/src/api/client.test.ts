@@ -1,17 +1,31 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
+  ContinuityPlan,
   PromptOptimizeRequest,
   ShotRegenerateRequest,
   ShotSaveRequest,
 } from "../domain/types";
 import {
+  createDraftProject,
   createShortDramaProject,
+  loadLatestProject,
+  mediaUrl,
+  saveContinuityPlan,
   optimizePrompt,
   regenerateShot,
   renderProject,
   saveShot,
   subscribeProjectEvents,
+  uploadReferenceImage,
 } from "./client";
+
+describe("mediaUrl", () => {
+  it("builds project media URLs for relative image paths", () => {
+    expect(mediaUrl("assets/images/character/mara.png", "p1")).toBe(
+      "/api/projects/p1/media/assets/images/character/mara.png",
+    );
+  });
+});
 
 describe("createShortDramaProject", () => {
   it("posts prompt, provider keys, and model choices to backend", async () => {
@@ -114,6 +128,117 @@ describe("createShortDramaProject", () => {
     expect(result.storyboard.shots[0].shot_intent).toBe(
       "Start with a tense clue reveal.",
     );
+  });
+});
+
+describe("createDraftProject", () => {
+  it("creates an empty project shell for uploads and resources", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ project: { id: "p1", title: "Draft", project_type: "mini_series" } }),
+    });
+
+    const result = await createDraftProject(
+      { title: "Draft", project_type: "mini_series" },
+      fetchMock as unknown as typeof fetch,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ title: "Draft", project_type: "mini_series" }),
+      }),
+    );
+    expect(result.project.id).toBe("p1");
+  });
+});
+
+describe("loadLatestProject", () => {
+  it("loads the latest project snapshot", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ project: { id: "p1", title: "Latest", project_type: "single_video" } }),
+    });
+
+    const result = await loadLatestProject(fetchMock as unknown as typeof fetch);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/latest",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(result.project.id).toBe("p1");
+  });
+});
+
+describe("saveContinuityPlan", () => {
+  it("patches series continuity settings", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ project: { id: "p1" }, continuity_plan: { project_type: "long_series" } }),
+    });
+    const payload: ContinuityPlan = {
+      project_type: "long_series",
+      active_episode_number: 2,
+      series_bible: {
+        worldview: "Rain city",
+        main_arc: "Expose the relay",
+        style_lock: "Neon noir",
+        visual_rules: "Red coat stays locked",
+        taboos: [],
+        locations: [],
+        props: [],
+        relationship_map: [],
+      },
+      episodes: [],
+      story_state: {
+        character_knowledge: [],
+        relationship_changes: [],
+        active_foreshadowing: [],
+        resolved_foreshadowing: [],
+        prop_state: [],
+        character_status: [],
+        current_locations: [],
+      },
+    };
+
+    const result = await saveContinuityPlan("p1", payload, fetchMock as unknown as typeof fetch);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/p1/continuity",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify(payload) }),
+    );
+    expect(result.continuity_plan.project_type).toBe("long_series");
+  });
+});
+
+describe("uploadReferenceImage", () => {
+  it("uploads a reference image through multipart form data", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        media: { path: "assets/images/character/a.png", media_url: "/api/projects/p1/media/assets/images/character/a.png", filename: "a.png", content_type: "image/png" },
+        asset: { id: "asset-1", kind: "character", label: "Hero", description: "red coat", prompt: "red coat", reference_images: [], shot_ids: [], version: 1 },
+      }),
+    });
+
+    const result = await uploadReferenceImage(
+      "p1",
+      {
+        kind: "character",
+        label: "Hero",
+        description: "red coat",
+        prompt: "red coat",
+        file: new File(["img"], "hero.png", { type: "image/png" }),
+      },
+      fetchMock as unknown as typeof fetch,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/projects/p1/assets/upload",
+      expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
+    );
+    expect(result.asset.id).toBe("asset-1");
   });
 });
 

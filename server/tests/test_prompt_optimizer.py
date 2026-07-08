@@ -109,3 +109,39 @@ def test_optimize_text_prompt_structured_mode_falls_back_to_source_text_when_pro
 
     assert result["optimized_text"] == "Lin opens envelope."
     assert result["shot_intent"].startswith("Push into")
+
+
+def test_optimize_text_prompt_structured_mode_drops_non_object_shot_language(monkeypatch):
+    class StructuredResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": """
+{
+  "prompt": "Lin enters the office and spots the KPI trap.",
+  "shot_intent": "Clarify the character objective.",
+  "shot_language": "ENGLISH"
+}
+"""
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("server.app.prompt_optimizer.requests.post", lambda **kwargs: StructuredResponse())
+
+    result = optimize_text_prompt(
+        source_text="Lin opens envelope.",
+        model="gpt-5.5",
+        base_url="https://api.0000238.xyz",
+        api_key="text-key",
+        context={"target": "shot", "target_id": "s1", "mode": "shot_json"},
+    )
+
+    assert result["optimized_text"].startswith("Lin enters")
+    assert result["shot_language"] is None

@@ -1,9 +1,14 @@
 import type {
+  ContinuityPlan,
+  ContinuityPlanResponse,
+  DraftProjectRequest,
   GatewayKeySession,
   JobEvent,
   PromptOptimizeRequest,
   PromptOptimizeResponse,
   ProviderCredentials,
+  ReferenceImageUploadRequest,
+  ReferenceImageUploadResponse,
   RenderProjectRequest,
   RegenerateShotResponse,
   RenderProjectResponse,
@@ -57,6 +62,51 @@ function postJson<T>(
   );
 }
 
+async function requestForm<T>(
+  path: string,
+  body: FormData,
+  fetcher: typeof fetch = fetch,
+): Promise<T> {
+  const response = await fetcher(path, {
+    method: "POST",
+    body,
+  });
+
+  if (!response.ok) {
+    let message = `Request failed with status ${response.status}`;
+    try {
+      const body = (await response.json()) as { detail?: string };
+      if (body.detail) {
+        message = body.detail;
+      }
+    } catch {
+      // Keep the status-based fallback when the backend returns non-JSON.
+    }
+    throw new Error(message);
+  }
+
+  return (await response.json()) as T;
+}
+
+export function mediaUrl(path: string | null | undefined, projectId?: string | null): string | null {
+  const value = path?.trim();
+  if (!value) {
+    return null;
+  }
+  const mediaPattern =
+    /^\/api\/projects\/[^/]+\/media\/(?:renders\/final\.(?:mp4|mov|webm)|assets\/video\/.+\.(?:mp4|mov|webm)|assets\/images\/.+\.(?:png|jpg|jpeg|webp))$/i;
+  if (mediaPattern.test(value)) {
+    return value;
+  }
+  const relativeMediaPattern =
+    /^(?:renders\/final\.(?:mp4|mov|webm)|assets\/video\/.+\.(?:mp4|mov|webm)|assets\/images\/.+\.(?:png|jpg|jpeg|webp))$/i;
+  if (projectId && relativeMediaPattern.test(value)) {
+    const encodedPath = value.split("/").map(encodeURIComponent).join("/");
+    return `/api/projects/${encodeURIComponent(projectId)}/media/${encodedPath}`;
+  }
+  return null;
+}
+
 export function saveGatewayKey(
   payload: ProviderCredentials,
   fetcher?: typeof fetch,
@@ -69,6 +119,13 @@ export function createShortDramaProject(
   fetcher?: typeof fetch,
 ): Promise<ShortDramaProjectResponse> {
   return postJson<ShortDramaProjectResponse>("/api/projects/short-drama", payload, fetcher);
+}
+
+export function createDraftProject(
+  payload: DraftProjectRequest,
+  fetcher?: typeof fetch,
+): Promise<ShortDramaProjectResponse> {
+  return postJson<ShortDramaProjectResponse>("/api/projects", payload, fetcher);
 }
 
 export function saveShot(
@@ -116,12 +173,55 @@ export function renderProject(
   return postJson<RenderProjectResponse>(`/api/projects/${projectId}/render`, payload, fetcher);
 }
 
+export function saveContinuityPlan(
+  projectId: string,
+  payload: ContinuityPlan,
+  fetcher?: typeof fetch,
+): Promise<ContinuityPlanResponse> {
+  return requestJson<ContinuityPlanResponse>(
+    `/api/projects/${projectId}/continuity`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+    fetcher,
+  );
+}
+
+export function uploadReferenceImage(
+  projectId: string,
+  payload: ReferenceImageUploadRequest,
+  fetcher?: typeof fetch,
+): Promise<ReferenceImageUploadResponse> {
+  const form = new FormData();
+  form.append("kind", payload.kind);
+  form.append("label", payload.label);
+  form.append("description", payload.description);
+  form.append("prompt", payload.prompt);
+  form.append("file", payload.file);
+  return requestForm<ReferenceImageUploadResponse>(
+    `/api/projects/${projectId}/assets/upload`,
+    form,
+    fetcher,
+  );
+}
+
 export function loadProject(
   projectId: string,
   fetcher: typeof fetch = fetch,
 ): Promise<ShortDramaProjectResponse> {
   return requestJson<ShortDramaProjectResponse>(
     `/api/projects/${projectId}`,
+    { method: "GET" },
+    fetcher,
+  );
+}
+
+export function loadLatestProject(
+  fetcher: typeof fetch = fetch,
+): Promise<ShortDramaProjectResponse> {
+  return requestJson<ShortDramaProjectResponse>(
+    "/api/projects/latest",
     { method: "GET" },
     fetcher,
   );

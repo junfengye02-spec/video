@@ -69,6 +69,19 @@ Final render follows the current production path requirements and no longer bloc
 
 Consistency evaluation now extends beyond character and style drift checks to include Workbench-specific production controls such as structured shot language and asset-binding validity, so the reported score reflects the actual contract users rely on in the Production view.
 
+## 2026-07-07 Flow Hardening Follow-Up
+
+Implementation plan: `docs/superpowers/plans/2026-07-07-workbench-flow-hardening.md`
+
+Additional follow-up status:
+- Image-to-video generation now routes bound resource images as `reference_image_paths` and selects the reference-to-video operation when usable reference images exist.
+- Fixed SYAPI gateway routing, default provider URLs, and model defaults remain intentional product constraints for customer binding to the relay service.
+- `continuity_plan` is again accepted as an explicit pipeline artifact input, so Workbench handoff generation can preserve continuity data without positional argument drift.
+- Final render reuses existing completed shot videos, reports reused clips in render outputs, and only regenerates missing shot videos.
+- Final composition now normalizes mixed uploaded/generated clips through FFmpeg scaling, padding, frame-rate conversion, and H.264 encoding instead of concat-copying incompatible inputs.
+- Render reports now prefer probed final output duration and resolution, with the previous `720x1280` and per-shot duration assumptions kept as fallbacks.
+- Reference image upload and continuity save now refresh the project snapshot after backend artifact rewrites, so the Workbench UI reflects regenerated handoff artifacts and media library changes without a manual reload.
+
 ## Summary
 
 The short-drama Workbench now behaves as a production-aligned OpenMontage surface: storyboard creation is model-backed, shot language is structured and preserved, generation prompts use bound reference assets, save and regenerate have separate semantics, workflow artifacts stay current, key validation is real, progress updates stream live, render state survives reload, asset linkages stay synchronized, render key requirements match actual execution, and consistency reporting covers the real operational contract.

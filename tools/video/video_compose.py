@@ -45,6 +45,7 @@ from tools.base_tool import (
     ToolResult,
     ToolStability,
     ToolTier,
+    resolve_command_path,
 )
 
 
@@ -250,10 +251,11 @@ class VideoCompose(BaseTool):
         fallback between runtimes is forbidden.
         """
         info = super().get_info()
+        ffmpeg_ok = resolve_command_path("ffmpeg") is not None
         remotion_ok = self._remotion_available()
         hyperframes_ok = self._hyperframes_available()
         info["render_engines"] = {
-            "ffmpeg": True,
+            "ffmpeg": ffmpeg_ok,
             "remotion": remotion_ok,
             "hyperframes": hyperframes_ok,
         }

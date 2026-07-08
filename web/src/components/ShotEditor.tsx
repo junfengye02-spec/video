@@ -127,26 +127,29 @@ export function ShotEditor({
           <span>{strings.locationLabel}</span>
           <input value={location} disabled={!shot} onChange={(event) => setLocation(event.target.value)} />
         </label>
-        <fieldset disabled={!shot}>
-          <legend>{strings.charactersLabel}</legend>
-          {characters.map((character) => (
-            <label key={character.id}>
-              <input
-                type="checkbox"
-                checked={characterIds.includes(character.id)}
-                onChange={(event) => {
-                  setCharacterIds((current) =>
-                    event.target.checked
-                      ? [...current, character.id]
-                      : current.filter((id) => id !== character.id),
-                  );
-                }}
-              />
-              <span>
-                {character.name} <small>{character.id}</small>
-              </span>
-            </label>
-          ))}
+        <fieldset className="character-binding-group" disabled={!shot}>
+          <legend className="sr-only">{strings.charactersLabel}</legend>
+          <span className="field-label">{strings.charactersLabel}</span>
+          <div className="character-binding-options">
+            {characters.map((character) => (
+              <label key={character.id}>
+                <input
+                  type="checkbox"
+                  checked={characterIds.includes(character.id)}
+                  onChange={(event) => {
+                    setCharacterIds((current) =>
+                      event.target.checked
+                        ? [...current, character.id]
+                        : current.filter((id) => id !== character.id),
+                    );
+                  }}
+                />
+                <span>
+                  {character.name} <small>{character.id}</small>
+                </span>
+              </label>
+            ))}
+          </div>
         </fieldset>
         <label>
           <span>{strings.propsLabel}</span>

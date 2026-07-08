@@ -5,8 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from server.app.artifact_sync import read_workflow_settings, rewrite_workflow_artifacts, sync_asset_shot_ids
@@ -14,8 +14,26 @@ from server.app.consistency import apply_consistency_scores, evaluate_storyboard
 from server.app.events import EventBus
 from server.app.key_validation import validate_gateway_models
 from server.app.keyring import key_environment, mask_key
+from server.app.media_files import (
+    IMAGE_EXTENSIONS,
+    MAX_IMAGE_BYTES,
+    media_content_type,
+    media_download_url,
+    relative_project_path,
+    safe_project_media_destination,
+    safe_project_media_file,
+    save_upload_file,
+    validate_upload_extension,
+)
 from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot, update_mock_shot
-from server.app.models import PromptOptimizeRequest, PromptOptimizeResponse, ShotRegenerateRequest, ShotSaveRequest
+from server.app.models import (
+    ContinuityPlan,
+    ProjectType,
+    PromptOptimizeRequest,
+    PromptOptimizeResponse,
+    ShotRegenerateRequest,
+    ShotSaveRequest,
+)
 from server.app.openmontage_runner import (
     REFERENCE_IMAGE_EXTENSIONS,
     render_short_drama_project,
@@ -98,6 +116,81 @@ def _persist_storyboard_state(
     workbench.write_artifact(project_id, "consistency_report.json", consistency_report)
 
 
+def _default_continuity_plan(project_type: ProjectType | str) -> dict[str, Any]:
+    plan = ContinuityPlan(project_type=project_type).model_dump()
+    if project_type != "single_video":
+        plan["active_episode_number"] = 1
+    return plan
+
+
+def _workflow_artifacts(workbench: WorkbenchStore, project_id: str) -> list[dict[str, Any]]:
+    entries = [
+        ("proposal_packet", "proposal_packet.json"),
+        ("scene_plan", "scene_plan.json"),
+        ("asset_manifest", "asset_manifest.json"),
+        ("edit_decisions", "edit_decisions.json"),
+        ("render_report", "render_report.json"),
+        ("continuity_plan", "continuity_plan.json"),
+    ]
+    artifact_dir = workbench.artifact_dir(project_id)
+    return [
+        {
+            "name": name,
+            "path": filename,
+            "exists": (artifact_dir / filename).exists(),
+        }
+        for name, filename in entries
+    ]
+
+
+def _decorate_asset_media(project_id: str, project_dir: Path, asset: dict[str, Any]) -> dict[str, Any]:
+    decorated = dict(asset)
+    reference_images = []
+    media_urls = []
+    for reference in asset.get("reference_images", []) or []:
+        try:
+            relative = relative_project_path(project_dir, reference)
+        except HTTPException:
+            continue
+        reference_images.append(relative)
+        media_urls.append(media_download_url(project_id, relative))
+    decorated["reference_images"] = reference_images
+    decorated["media_urls"] = media_urls
+    return decorated
+
+
+def _project_snapshot(workbench: WorkbenchStore, project_id: str) -> dict[str, Any]:
+    project = workbench.get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project_dir = workbench.project_dir(project_id)
+    storyboard = workbench.read_artifact(project_id, "episode_storyboard.json") or {"shots": []}
+    series_bible = workbench.read_artifact(project_id, "series_bible.json") or {"characters": [], "assets": []}
+    series_bible = dict(series_bible)
+    series_bible["assets"] = [
+        _decorate_asset_media(project_id, project_dir, asset)
+        for asset in series_bible.get("assets", [])
+    ]
+    render_report = workbench.read_artifact(project_id, "render_report.json")
+    response_storyboard = _sanitize_storyboard_response(project_dir, storyboard)
+    response_render_report = (
+        _sanitize_render_report_response(project_dir, render_report) if render_report else None
+    )
+    final_path = None
+    if response_render_report and response_render_report.get("outputs"):
+        final_path = response_render_report["outputs"][0].get("path")
+    return {
+        "project": project.model_dump(),
+        "series_bible": series_bible,
+        "storyboard": response_storyboard,
+        "consistency_report": workbench.read_artifact(project_id, "consistency_report.json") or {"score": 100, "issues": []},
+        "continuity_plan": workbench.read_artifact(project_id, "continuity_plan.json") or _default_continuity_plan(project.project_type),
+        "workflow_artifacts": _workflow_artifacts(workbench, project_id),
+        "render_report": response_render_report,
+        "final_path": final_path,
+    }
+
+
 class KeySessionRequest(BaseModel):
     text_key: str = Field(min_length=1)
     image_key: str = Field(min_length=1)
@@ -111,6 +204,8 @@ class KeySessionRequest(BaseModel):
 class ShortDramaRequest(BaseModel):
     title: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
+    project_type: ProjectType = "single_video"
+    shot_count: int | None = Field(default=None, ge=1, le=60)
     text_key: str = Field(min_length=1)
     image_key: str = Field(min_length=1)
     video_key: str = Field(min_length=1)
@@ -129,6 +224,11 @@ class RenderProjectRequest(BaseModel):
     image_model: str = DEFAULT_IMAGE_MODEL
     video_model: str = DEFAULT_VIDEO_MODEL
     render_runtime: str = "ffmpeg"
+
+
+class DraftProjectRequest(BaseModel):
+    title: str = Field(min_length=1)
+    project_type: ProjectType = "single_video"
 
 
 def create_app(
@@ -177,6 +277,45 @@ def create_app(
             "valid": True,
         }
 
+    @app.post("/api/projects")
+    def create_draft_project(
+        payload: DraftProjectRequest,
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        project = workbench.create_project(
+            title=payload.title,
+            mode="short_drama",
+            project_type=payload.project_type,
+        )
+        series_bible = {
+            "title": payload.title,
+            "mode": "short_drama",
+            "style_lock": "",
+            "characters": [],
+            "assets": [],
+        }
+        storyboard = {"shots": []}
+        continuity_plan = _default_continuity_plan(payload.project_type)
+        consistency_report = {"score": 100, "issues": []}
+        _persist_storyboard_state(
+            workbench=workbench,
+            project_id=project.id,
+            storyboard=storyboard,
+            series_bible=series_bible,
+            consistency_report=consistency_report,
+        )
+        workbench.write_artifact(project.id, "continuity_plan.json", continuity_plan)
+        rewrite_workflow_artifacts(
+            workbench=workbench,
+            project_id=project.id,
+            series_bible=series_bible,
+            storyboard=storyboard,
+            render_runtime="ffmpeg",
+            video_model=DEFAULT_VIDEO_MODEL,
+            continuity_plan=continuity_plan,
+        )
+        return _project_snapshot(workbench, project.id)
+
     @app.post("/api/projects/short-drama")
     def create_short_drama_project(
         payload: ShortDramaRequest,
@@ -190,6 +329,7 @@ def create_app(
                 model=payload.text_model,
                 base_url=payload.base_url,
                 api_key=payload.text_key,
+                shot_count=payload.shot_count,
             )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"Text model storyboard generation failed: {exc}") from exc
@@ -200,7 +340,12 @@ def create_app(
         )
         apply_consistency_scores(result["storyboard"], result["consistency_report"])
 
-        project = workbench.create_project(title=payload.title, mode="short_drama")
+        project = workbench.create_project(
+            title=payload.title,
+            mode="short_drama",
+            project_type=payload.project_type,
+        )
+        continuity_plan = _default_continuity_plan(payload.project_type)
         _persist_storyboard_state(
             workbench=workbench,
             project_id=project.id,
@@ -208,6 +353,7 @@ def create_app(
             series_bible=result["series_bible"],
             consistency_report=result["consistency_report"],
         )
+        workbench.write_artifact(project.id, "continuity_plan.json", continuity_plan)
         rewrite_workflow_artifacts(
             workbench=workbench,
             project_id=project.id,
@@ -215,36 +361,131 @@ def create_app(
             storyboard=result["storyboard"],
             render_runtime="ffmpeg",
             video_model=payload.video_model,
+            continuity_plan=continuity_plan,
         )
 
-        return {"project": project.model_dump(), **result}
+        return _project_snapshot(workbench, project.id)
+
+    @app.get("/api/projects/latest")
+    def get_latest_project(
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        project = workbench.get_latest_project()
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return _project_snapshot(workbench, project.id)
 
     @app.get("/api/projects/{project_id}")
     def get_project(
         project_id: str,
         workbench: WorkbenchStore = Depends(get_store),
     ) -> dict[str, Any]:
+        return _project_snapshot(workbench, project_id)
+
+    @app.patch("/api/projects/{project_id}/continuity")
+    def save_continuity_plan(
+        project_id: str,
+        payload: ContinuityPlan,
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> dict[str, Any]:
         project = workbench.get_project(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        project_dir = workbench.project_dir(project_id)
+        plan = payload.model_dump()
+        plan["project_type"] = project.project_type
+        if project.project_type == "single_video":
+            plan["active_episode_number"] = None
+        workbench.write_artifact(project_id, "continuity_plan.json", plan)
+        series_bible = workbench.read_artifact(project_id, "series_bible.json")
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
-        render_report = workbench.read_artifact(project_id, "render_report.json")
-        response_storyboard = _sanitize_storyboard_response(project_dir, storyboard) if storyboard else None
-        response_render_report = (
-            _sanitize_render_report_response(project_dir, render_report) if render_report else None
+        if series_bible is not None and storyboard is not None:
+            rewrite_workflow_artifacts(
+                workbench=workbench,
+                project_id=project_id,
+                series_bible=series_bible,
+                storyboard=storyboard,
+                render_runtime="ffmpeg",
+                video_model=DEFAULT_VIDEO_MODEL,
+                continuity_plan=plan,
+            )
+        return {"project": project.model_dump(), "continuity_plan": plan}
+
+    @app.post("/api/projects/{project_id}/assets/upload")
+    async def upload_reference_image(
+        project_id: str,
+        kind: str = Form(...),
+        label: str = Form(...),
+        description: str = Form(""),
+        prompt: str = Form(""),
+        file: UploadFile = File(...),
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> dict[str, Any]:
+        project = workbench.get_project(project_id)
+        series_bible = workbench.read_artifact(project_id, "series_bible.json")
+        if project is None or series_bible is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if kind not in {"character", "scene", "prop"}:
+            raise HTTPException(status_code=422, detail="Unsupported asset kind")
+        suffix = validate_upload_extension(file.filename or "", IMAGE_EXTENSIONS)
+        asset_id = f"asset-{uuid.uuid4().hex}"
+        project_dir = workbench.project_dir(project_id)
+        output_path = safe_project_media_destination(
+            project_dir,
+            Path("assets") / "images" / kind,
+            f"{asset_id}{suffix}",
         )
-        final_path = None
-        if response_render_report and response_render_report.get("outputs"):
-            final_path = response_render_report["outputs"][0].get("path")
-        return {
-            "project": project.model_dump(),
-            "series_bible": workbench.read_artifact(project_id, "series_bible.json"),
-            "storyboard": response_storyboard,
-            "consistency_report": workbench.read_artifact(project_id, "consistency_report.json"),
-            "render_report": response_render_report,
-            "final_path": final_path,
+        await save_upload_file(file, output_path, MAX_IMAGE_BYTES)
+        relative_path = relative_project_path(project_dir, output_path)
+        asset_data = {
+            "id": asset_id,
+            "kind": kind,
+            "label": label,
+            "description": description,
+            "prompt": prompt,
+            "reference_images": [relative_path],
+            "media_urls": [media_download_url(project_id, relative_path)],
+            "shot_ids": [],
+            "version": 1,
         }
+        assets = workbench.read_asset_library(project_id)
+        assets.append(asset_data)
+        workbench.write_asset_library(project_id, assets)
+        series_bible["assets"] = assets
+        workbench.write_artifact(project_id, "series_bible.json", series_bible)
+        storyboard = workbench.read_artifact(project_id, "episode_storyboard.json") or {"shots": []}
+        continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
+        rewrite_workflow_artifacts(
+            workbench=workbench,
+            project_id=project_id,
+            series_bible=series_bible,
+            storyboard=storyboard,
+            render_runtime="ffmpeg",
+            video_model=DEFAULT_VIDEO_MODEL,
+            continuity_plan=continuity_plan,
+        )
+        return {
+            "media": {
+                "path": relative_path,
+                "media_url": media_download_url(project_id, relative_path),
+                "filename": Path(relative_path).name,
+                "content_type": media_content_type(output_path),
+            },
+            "asset": _decorate_asset_media(project_id, project_dir, asset_data),
+        }
+
+    @app.get("/api/projects/{project_id}/media/{relative_path:path}")
+    def project_media(
+        project_id: str,
+        relative_path: str,
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> FileResponse:
+        project = workbench.get_project(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        media_path = safe_project_media_file(workbench.project_dir(project_id), relative_path)
+        if not media_path.exists():
+            raise HTTPException(status_code=404, detail="Media file not found")
+        return FileResponse(media_path, media_type=media_content_type(media_path))
 
     @app.patch("/api/projects/{project_id}/shots/{shot_id}")
     def save_shot(
@@ -257,6 +498,7 @@ def create_app(
         project = workbench.get_project(project_id)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
+        continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
         if project is None or storyboard is None or series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
         job_id = uuid.uuid4().hex
@@ -268,6 +510,7 @@ def create_app(
         apply_consistency_scores(storyboard, report)
         series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
         workflow_settings = read_workflow_settings(workbench, project_id)
+        continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
         _persist_storyboard_state(
             workbench=workbench,
             project_id=project_id,
@@ -282,6 +525,7 @@ def create_app(
             storyboard=storyboard,
             render_runtime=workflow_settings["render_runtime"],
             video_model=workflow_settings["video_model"],
+            continuity_plan=continuity_plan,
         )
         event = bus.emit(project_id, job_id=job_id, stage="save", status="complete", message="Shot saved")
         return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
@@ -321,6 +565,7 @@ def create_app(
         project = workbench.get_project(project_id)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
+        continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
         if project is None or storyboard is None or series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
         job_id = uuid.uuid4().hex
@@ -348,6 +593,7 @@ def create_app(
             apply_consistency_scores(storyboard, report)
             series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
             workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
+            continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
             _persist_storyboard_state(
                 workbench=workbench,
                 project_id=project_id,
@@ -362,6 +608,7 @@ def create_app(
                 storyboard=storyboard,
                 render_runtime=workflow_settings["render_runtime"],
                 video_model=payload.video_model,
+                continuity_plan=continuity_plan,
             )
             bus.emit(project_id, job_id=job_id, stage="regenerate", status="failed", message=str(exc))
             raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -372,6 +619,7 @@ def create_app(
         apply_consistency_scores(storyboard, report)
         series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
         workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
+        continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
         _persist_storyboard_state(
             workbench=workbench,
             project_id=project_id,
@@ -386,6 +634,7 @@ def create_app(
             storyboard=storyboard,
             render_runtime=workflow_settings["render_runtime"],
             video_model=payload.video_model,
+            continuity_plan=continuity_plan,
         )
         event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
         project_dir = workbench.project_dir(project_id)
@@ -410,6 +659,7 @@ def create_app(
         project = workbench.get_project(project_id)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
+        continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
         if project is None or storyboard is None or series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -426,6 +676,7 @@ def create_app(
                 storyboard=storyboard,
                 video_key=payload.video_key,
                 base_url=payload.base_url,
+                continuity_plan=continuity_plan,
                 video_model=payload.video_model,
                 render_runtime="ffmpeg",
                 emit_event=emit,

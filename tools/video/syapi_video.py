@@ -95,6 +95,7 @@ class SyapiVideo(BaseTool):
             "last_frame_url": {"type": "string"},
             "last_frame_path": {"type": "string"},
             "poll_interval_seconds": {"type": "number", "default": 5},
+            "submit_timeout_seconds": {"type": "integer", "default": 180},
             "timeout_seconds": {"type": "integer", "default": 1200},
             "output_path": {"type": "string"},
         },
@@ -335,6 +336,7 @@ class SyapiVideo(BaseTool):
         output_path = Path(inputs.get("output_path", f"syapi_{model}.mp4"))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        submit_timeout = max(30, int(inputs.get("submit_timeout_seconds", 180)))
 
         payload: dict[str, Any] = {
             "model": model,
@@ -354,7 +356,7 @@ class SyapiVideo(BaseTool):
                 submit_url,
                 headers=headers,
                 json=payload,
-                timeout=60,
+                timeout=submit_timeout,
             )
             self._raise_for_status_with_context(
                 response,

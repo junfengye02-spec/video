@@ -77,10 +77,12 @@ def rewrite_workflow_artifacts(
     storyboard: dict[str, Any],
     render_runtime: str,
     video_model: str,
+    continuity_plan: dict[str, Any] | None = None,
 ) -> None:
     pipeline_inputs = build_pipeline_inputs(
         series_bible,
         storyboard,
+        continuity_plan=continuity_plan,
         render_runtime=render_runtime,  # type: ignore[arg-type]
         video_model=video_model,
     )

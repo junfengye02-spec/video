@@ -4,14 +4,26 @@ import App from "./App";
 import { getStrings } from "./i18n";
 
 const apiMocks = vi.hoisted(() => ({
+  createDraftProject: vi.fn(),
   createShortDramaProject: vi.fn(),
+  generateAsset: vi.fn(),
+  loadLatestProject: vi.fn(),
   loadProject: vi.fn(),
+  mediaUrl: vi.fn((path: string | null | undefined, projectId?: string | null) => {
+    if (!path) {
+      return null;
+    }
+    return path.startsWith("/api/") || !projectId ? path : `/api/projects/${projectId}/media/${path}`;
+  }),
   optimizePrompt: vi.fn(),
   regenerateShot: vi.fn(),
   renderProject: vi.fn(),
+  saveContinuityPlan: vi.fn(),
   saveGatewayKey: vi.fn(),
   saveShot: vi.fn(),
   subscribeProjectEvents: vi.fn(),
+  uploadReferenceImage: vi.fn(),
+  uploadShotVideo: vi.fn(),
 }));
 
 vi.mock("./api/client", () => apiMocks);
@@ -122,6 +134,9 @@ function enterKeys(
 
 async function createStoryboard(actionName = "Create storyboard") {
   enterKeys();
+  fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
+    target: { value: "rain-night urban reversal short drama" },
+  });
   fireEvent.click(screen.getByRole("button", { name: actionName }));
   await waitFor(() => expect(screen.getByRole("button", { name: strings.shotEditor.saveAction })).toBeEnabled());
 }
@@ -182,6 +197,111 @@ describe("App", () => {
     expect(screen.getByLabelText("Image Model")).toHaveValue("gpt-image-2");
     expect(screen.getByLabelText("Video Model")).toHaveValue("omni_flash-10s");
     expect(screen.getByRole("button", { name: "Render final video" })).toBeDisabled();
+  });
+
+  it("requires a story prompt before creating a storyboard", async () => {
+    render(<App />);
+    enterKeys();
+
+    fireEvent.click(screen.getByRole("button", { name: strings.chatPanel.createStoryboardAction }));
+
+    expect(await screen.findByText("Enter a story prompt before creating the storyboard.")).toBeInTheDocument();
+    expect(apiMocks.createShortDramaProject).not.toHaveBeenCalled();
+  });
+
+  it("hides series settings for single videos and reveals them for series projects", () => {
+    setNavigatorLanguage("zh-CN");
+    const zh = getStrings("zh");
+
+    render(<App />);
+
+    expect(screen.getByRole("tab", { name: zh.nav.storyboard })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: zh.nav.series })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: zh.nav.episodes })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: zh.nav.resources })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: zh.nav.production })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText(zh.projectType.miniSeries));
+
+    expect(screen.getByRole("tab", { name: zh.nav.series })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: zh.nav.episodes })).toBeInTheDocument();
+  });
+
+  it("locks the project type after a project is created", async () => {
+    render(<App />);
+    enterKeys();
+    fireEvent.click(screen.getByLabelText(strings.projectType.miniSeries));
+    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: strings.chatPanel.createStoryboardAction }));
+
+    await waitFor(() =>
+      expect(apiMocks.createShortDramaProject).toHaveBeenCalledWith(
+        expect.objectContaining({ project_type: "mini_series" }),
+      ),
+    );
+    expect(screen.getByLabelText(strings.projectType.singleVideo)).toBeDisabled();
+    expect(screen.getByLabelText(strings.projectType.miniSeries)).toBeDisabled();
+    expect(screen.getByLabelText(strings.projectType.longSeries)).toBeDisabled();
+    expect(screen.getByText("Project type is locked after creation.")).toBeInTheDocument();
+  });
+
+  it("shows complete continuity fields for series and episode settings", () => {
+    setNavigatorLanguage("zh-CN");
+    const zh = getStrings("zh");
+
+    render(<App />);
+    fireEvent.click(screen.getByLabelText(zh.projectType.miniSeries));
+    fireEvent.click(screen.getByRole("tab", { name: zh.nav.series }));
+
+    expect(screen.getByLabelText(zh.continuity.worldview)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.mainArc)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.styleLock)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.visualRules)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.taboos)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.locations)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.relationshipMap)).toBeInTheDocument();
+    expect(screen.getByText(zh.continuity.storyStateTitle)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.characterKnowledge)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.activeForeshadowing)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: zh.nav.episodes }));
+
+    expect(screen.getByRole("button", { name: zh.continuity.addEpisode })).toBeInTheDocument();
+    expect(screen.getByText(zh.continuity.currentProductionEpisode(1))).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: zh.continuity.addEpisode }));
+
+    expect(screen.getByLabelText(zh.continuity.episodeTitle)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.goal)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.conflict)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.twist)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.cliffhanger)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.inheritedState)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.continuity.locked)).toBeInTheDocument();
+  });
+
+  it("keeps character selection framed while aligning it with regular shot fields", async () => {
+    render(<App />);
+    await createStoryboard();
+
+    const characterGroup = screen.getByRole("group", { name: strings.shotEditor.charactersLabel });
+    expect(characterGroup).toHaveClass("character-binding-group");
+    expect(characterGroup).not.toHaveClass("asset-binding-group");
+    expect(characterGroup.querySelector(".character-binding-options")).not.toBeNull();
+  });
+
+  it("shows resource library images from backend reference image paths", async () => {
+    render(<App />);
+    await createStoryboard();
+
+    fireEvent.click(screen.getByRole("tab", { name: strings.nav.resources }));
+
+    const image = screen.getByRole("img", { name: "Mara reference" });
+    expect(apiMocks.mediaUrl).toHaveBeenCalledWith("assets/images/character/mara.png", "p1");
+    expect(image).toHaveAttribute("src", "/api/projects/p1/media/assets/images/character/mara.png");
   });
 
   it("localizes key gate and storyboard creation controls for zh-CN browser locales", () => {
@@ -513,6 +633,9 @@ describe("App", () => {
   it("requires a video key before regenerating a shot", async () => {
     render(<App />);
     enterKeys();
+    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
 
     await screen.findByRole("button", { name: "Regenerate shot 1" });
@@ -533,6 +656,9 @@ describe("App", () => {
       image: zh.keyGate.imageKeyLabel,
       video: zh.keyGate.videoKeyLabel,
     });
+    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
     fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
 
     await screen.findByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) });
@@ -552,6 +678,9 @@ describe("App", () => {
       text: zh.keyGate.textKeyLabel,
       image: zh.keyGate.imageKeyLabel,
       video: zh.keyGate.videoKeyLabel,
+    });
+    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
     });
     fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
 
@@ -574,6 +703,9 @@ describe("App", () => {
       text: zh.keyGate.textKeyLabel,
       image: zh.keyGate.imageKeyLabel,
       video: zh.keyGate.videoKeyLabel,
+    });
+    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
     });
     fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
     await screen.findByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) });
@@ -616,6 +748,9 @@ describe("App", () => {
 
     render(<App />);
     enterKeys();
+    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
 
     await screen.findByRole("button", { name: "Render final video" });
@@ -670,6 +805,9 @@ describe("App", () => {
 
     render(<App />);
     enterKeys();
+    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
 
     await screen.findByRole("button", { name: "Render final video" });
@@ -720,13 +858,14 @@ describe("App", () => {
     expect(screen.queryByText("reload failed")).not.toBeInTheDocument();
   });
 
-  it("does not auto-load a stored project on mount", async () => {
-    window.localStorage.setItem("openmontage:projectId", "p1");
+  it("auto-loads the latest project on mount", async () => {
+    apiMocks.loadLatestProject.mockResolvedValue(cloneProjectResponse());
 
     render(<App />);
 
-    await waitFor(() => expect(apiMocks.loadProject).not.toHaveBeenCalled());
-    expect(screen.queryByText("projects/p1/renders/final.mp4")).not.toBeInTheDocument();
+    await waitFor(() => expect(apiMocks.loadLatestProject).toHaveBeenCalled());
+    expect(await screen.findByRole("button", { name: strings.shotEditor.saveAction })).toBeEnabled();
+    expect(screen.getByText("Rain Alley")).toBeInTheDocument();
   });
 
   it("localizes storyboard status labels in Chinese while preserving current English labels", async () => {
@@ -744,6 +883,9 @@ describe("App", () => {
 
     render(<App />);
     enterKeys();
+    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
 
     expect(await screen.findAllByText("ready")).toHaveLength(1);
@@ -761,6 +903,9 @@ describe("App", () => {
       image: zh.keyGate.imageKeyLabel,
       video: zh.keyGate.videoKeyLabel,
     });
+    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
     fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
 
     expect(await screen.findAllByText(zh.storyboardWaterfall.statusLabels.ready)).toHaveLength(1);
@@ -773,28 +918,32 @@ describe("App", () => {
     expect(screen.queryByText("failed")).not.toBeInTheDocument();
   });
 
-  it("uses Chinese seeded app flow copy and create-project fallback for zh-CN browser locales", async () => {
+  it("starts Chinese project title and prompt fields blank while preserving title fallback", async () => {
     setNavigatorLanguage("zh-CN");
     const zh = getStrings("zh");
 
     render(<App />);
 
-    expect(screen.getByDisplayValue(zh.appFlow.defaultTitle)).toBeInTheDocument();
-    expect(screen.getByDisplayValue(zh.appFlow.defaultPrompt)).toBeInTheDocument();
+    expect(screen.getByLabelText(zh.chatPanel.projectTitleLabel)).toHaveValue("");
+    expect(screen.getByLabelText(zh.chatPanel.promptLabel)).toHaveValue("");
+    expect(screen.queryByDisplayValue(zh.appFlow.defaultTitle)).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(zh.appFlow.defaultPrompt)).not.toBeInTheDocument();
 
     enterKeys("video-key", {
       text: zh.keyGate.textKeyLabel,
       image: zh.keyGate.imageKeyLabel,
       video: zh.keyGate.videoKeyLabel,
     });
-    fireEvent.change(screen.getByDisplayValue(zh.appFlow.defaultTitle), { target: { value: "   " } });
+    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
     fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
 
     await waitFor(() => expect(apiMocks.createShortDramaProject).toHaveBeenCalled());
     expect(apiMocks.createShortDramaProject).toHaveBeenCalledWith(
       expect.objectContaining({
         title: zh.appFlow.untitledProjectTitle,
-        prompt: zh.appFlow.defaultPrompt,
+        prompt: "rain-night urban reversal short drama",
       }),
     );
   });
@@ -813,21 +962,21 @@ describe("App", () => {
     expect(zh.errors.missingVideoKeyForRender).toBeTruthy();
   });
 
-  it("renders the Chinese project-title placeholder for zh-CN browser locales", () => {
+  it("does not render the Chinese seeded project title as a placeholder", () => {
     setNavigatorLanguage("zh-CN");
     const zh = getStrings("zh");
 
     render(<App />);
 
-    expect(screen.getByLabelText(zh.chatPanel.projectTitleLabel)).toHaveAttribute(
-      "placeholder",
-      zh.appFlow.defaultTitle,
-    );
+    expect(screen.getByLabelText(zh.chatPanel.projectTitleLabel)).not.toHaveAttribute("placeholder");
   });
 
   it("subscribes to project events after storyboard creation and appends only unique events", async () => {
     render(<App />);
     enterKeys();
+    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
+      target: { value: "rain-night urban reversal short drama" },
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
 

@@ -6,11 +6,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from server.app.settings import DEFAULT_SYAPI_BASE_URL
 
+ProjectType = Literal["single_video", "mini_series", "long_series"]
+
 
 class Project(BaseModel):
     id: str
     title: str
     mode: Literal["short_drama", "general_video"]
+    project_type: ProjectType = "single_video"
     created_at: str
     updated_at: str
 
@@ -117,6 +120,46 @@ class ShotRegenerateRequest(BaseModel):
         if not stripped:
             raise ValueError("video_key must not be blank")
         return stripped
+
+
+class ContinuitySeriesBible(BaseModel):
+    worldview: str = ""
+    main_arc: str = ""
+    style_lock: str = ""
+    visual_rules: str = ""
+    taboos: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)
+    props: list[str] = Field(default_factory=list)
+    relationship_map: list[str] = Field(default_factory=list)
+
+
+class EpisodeOutlineItem(BaseModel):
+    episode_number: int = 1
+    title: str = ""
+    goal: str = ""
+    conflict: str = ""
+    twist: str = ""
+    cliffhanger: str = ""
+    inherited_state: list[str] = Field(default_factory=list)
+    locked: bool = False
+
+
+class StoryState(BaseModel):
+    character_knowledge: list[str] = Field(default_factory=list)
+    relationship_changes: list[str] = Field(default_factory=list)
+    active_foreshadowing: list[str] = Field(default_factory=list)
+    resolved_foreshadowing: list[str] = Field(default_factory=list)
+    prop_state: list[str] = Field(default_factory=list)
+    character_status: list[str] = Field(default_factory=list)
+    current_locations: list[str] = Field(default_factory=list)
+
+
+class ContinuityPlan(BaseModel):
+    project_type: ProjectType = "single_video"
+    active_episode_number: int | None = None
+    series_bible: ContinuitySeriesBible = Field(default_factory=ContinuitySeriesBible)
+    episodes: list[EpisodeOutlineItem] = Field(default_factory=list)
+    story_state: StoryState = Field(default_factory=StoryState)
 
 
 class PromptOptimizeRequest(BaseModel):

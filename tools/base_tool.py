@@ -10,7 +10,6 @@ import hashlib
 import inspect
 import json
 import os
-import platform
 import subprocess
 import shutil
 from abc import ABC, abstractmethod
@@ -56,6 +55,49 @@ def _load_dotenv() -> None:
 
 
 _load_dotenv()
+
+
+def remotion_compositor_command_dir() -> Path:
+    """Return the Remotion compositor package directory when installed."""
+    remotion_root = (
+        Path(__file__).resolve().parent.parent
+        / "remotion-composer"
+        / "node_modules"
+        / "@remotion"
+    )
+    exact = remotion_root / "compositor-win32-x64-msvc"
+    if exact.exists():
+        return exact
+
+    matches = sorted(remotion_root.glob("compositor-*"))
+    if matches:
+        return matches[0]
+    return exact
+
+
+def remotion_bundled_command_path(command_name: str) -> Path | None:
+    """Resolve ffmpeg/ffprobe from Remotion's bundled compositor package."""
+    normalized = Path(command_name).name.lower()
+    if normalized.endswith(".exe"):
+        normalized = normalized[:-4]
+    if normalized not in {"ffmpeg", "ffprobe"}:
+        return None
+
+    executable_name = f"{normalized}.exe" if os.name == "nt" else normalized
+    candidate = remotion_compositor_command_dir() / executable_name
+    return candidate if candidate.exists() else None
+
+
+def resolve_command_path(command_name: str) -> str | None:
+    """Resolve a command from PATH, then project-local bundled runtimes."""
+    resolved = shutil.which(command_name)
+    if resolved:
+        return resolved
+
+    bundled = remotion_bundled_command_path(command_name)
+    if bundled:
+        return str(bundled)
+    return None
 
 
 class ToolTier(str, Enum):
@@ -211,7 +253,7 @@ class BaseTool(ABC):
         for dep in self.dependencies:
             if dep.startswith("cmd:"):
                 cmd_name = dep[4:]
-                if shutil.which(cmd_name) is None:
+                if resolve_command_path(cmd_name) is None:
                     raise DependencyError(
                         f"Command {cmd_name!r} not found. {self.install_instructions}"
                     )
@@ -325,8 +367,8 @@ class BaseTool(ABC):
         shutil.which() so subprocess.run() can find them without shell=True.
         """
         resolved_cmd = list(cmd)
-        if platform.system() == "Windows" and resolved_cmd:
-            exe = shutil.which(resolved_cmd[0])
+        if resolved_cmd:
+            exe = resolve_command_path(resolved_cmd[0])
             if exe:
                 resolved_cmd[0] = exe
         return subprocess.run(

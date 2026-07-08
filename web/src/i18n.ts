@@ -25,6 +25,21 @@ export interface UIStrings {
       renderFinalVideoAction: string;
       renderingVideoAction: string;
   };
+  nav: {
+    ariaLabel: string;
+    storyboard: string;
+    series: string;
+    episodes: string;
+    resources: string;
+    production: string;
+  };
+  projectType: {
+    label: string;
+    singleVideo: string;
+    miniSeries: string;
+    longSeries: string;
+    lockedHint: string;
+  };
   keyGate: {
     textKeyLabel: string;
     imageKeyLabel: string;
@@ -56,6 +71,9 @@ export interface UIStrings {
     renderFallback: string;
     saveShotFallback: string;
     optimizeShotFallback: string;
+    createStoryboardRequiresPrompt: string;
+    saveContinuityFallback: string;
+    uploadReferenceFallback: string;
     missingTextKeyForOptimize: string;
     missingVideoKeyForRender: string;
     missingVideoKeyForRegenerate: string;
@@ -107,6 +125,51 @@ export interface UIStrings {
     regenerateShotLabel: (shotIndex: number) => string;
     statusLabels: Record<ShotStatus, string>;
   };
+  continuity: {
+    ariaLabel: string;
+    seriesTitle: string;
+    episodesTitle: string;
+    storyStateTitle: string;
+    worldview: string;
+    mainArc: string;
+    styleLock: string;
+    visualRules: string;
+    taboos: string;
+    locations: string;
+    props: string;
+    relationshipMap: string;
+    save: string;
+    saving: string;
+    addEpisode: string;
+    currentProductionEpisode: (episodeNumber: number | null) => string;
+    setCurrentEpisode: (episodeNumber: number) => string;
+    currentEpisodeBadge: string;
+    episodeTitle: string;
+    goal: string;
+    conflict: string;
+    twist: string;
+    cliffhanger: string;
+    inheritedState: string;
+    locked: string;
+    characterKnowledge: string;
+    relationshipChanges: string;
+    activeForeshadowing: string;
+    resolvedForeshadowing: string;
+    propState: string;
+    characterStatus: string;
+    currentLocations: string;
+  };
+  resources: {
+    title: string;
+    emptyState: string;
+    kindLabel: string;
+    labelLabel: string;
+    descriptionLabel: string;
+    promptLabel: string;
+    fileLabel: string;
+    uploadAction: string;
+    uploadingAction: string;
+  };
 }
 
 const STRINGS: Record<Locale, UIStrings> = {
@@ -133,6 +196,21 @@ const STRINGS: Record<Locale, UIStrings> = {
       finalVideoTitle: "Final Video",
       renderFinalVideoAction: "Render final video",
       renderingVideoAction: "Rendering video",
+    },
+    nav: {
+      ariaLabel: "Studio sections",
+      storyboard: "Storyboard",
+      series: "Series Bible",
+      episodes: "Episodes",
+      resources: "Resources",
+      production: "Production",
+    },
+    projectType: {
+      label: "Project type",
+      singleVideo: "Single video",
+      miniSeries: "Mini series",
+      longSeries: "Long series",
+      lockedHint: "Project type is locked after creation.",
     },
     keyGate: {
       textKeyLabel: "Text API Key",
@@ -165,6 +243,9 @@ const STRINGS: Record<Locale, UIStrings> = {
       renderFallback: "Unable to render final video.",
       saveShotFallback: "Unable to save shot.",
       optimizeShotFallback: "Unable to optimize shot prompt.",
+      createStoryboardRequiresPrompt: "Enter a story prompt before creating the storyboard.",
+      saveContinuityFallback: "Unable to save continuity settings.",
+      uploadReferenceFallback: "Unable to upload reference image.",
       missingTextKeyForOptimize: "Enter a text API key before optimizing a shot prompt.",
       missingVideoKeyForRender: "Enter a video API key before rendering final video.",
       missingVideoKeyForRegenerate: "Enter a video API key before regenerating a shot.",
@@ -261,6 +342,52 @@ const STRINGS: Record<Locale, UIStrings> = {
         failed: "failed",
       },
     },
+    continuity: {
+      ariaLabel: "Continuity workbench",
+      seriesTitle: "Series Bible",
+      episodesTitle: "Episode Settings",
+      storyStateTitle: "Story State",
+      worldview: "Worldview",
+      mainArc: "Main arc",
+      styleLock: "Style lock",
+      visualRules: "Visual rules",
+      taboos: "Taboos",
+      locations: "Locations",
+      props: "Props",
+      relationshipMap: "Relationship map",
+      save: "Save continuity",
+      saving: "Saving continuity",
+      addEpisode: "Add episode",
+      currentProductionEpisode: (episodeNumber) =>
+        episodeNumber ? `Current production episode: ${episodeNumber}` : "No current production episode selected",
+      setCurrentEpisode: (episodeNumber) => `Set episode ${episodeNumber} as current`,
+      currentEpisodeBadge: "Current",
+      episodeTitle: "Episode title",
+      goal: "Goal",
+      conflict: "Conflict",
+      twist: "Twist",
+      cliffhanger: "Cliffhanger",
+      inheritedState: "Inherited state",
+      locked: "Locked",
+      characterKnowledge: "Character knowledge",
+      relationshipChanges: "Relationship changes",
+      activeForeshadowing: "Active foreshadowing",
+      resolvedForeshadowing: "Resolved foreshadowing",
+      propState: "Prop state",
+      characterStatus: "Character status",
+      currentLocations: "Current locations",
+    },
+    resources: {
+      title: "Resource Library",
+      emptyState: "No saved resources yet.",
+      kindLabel: "Resource type",
+      labelLabel: "Name",
+      descriptionLabel: "Description",
+      promptLabel: "Prompt",
+      fileLabel: "Reference image",
+      uploadAction: "Upload reference",
+      uploadingAction: "Uploading reference",
+    },
   },
   zh: {
     appFlow: {
@@ -285,6 +412,21 @@ const STRINGS: Record<Locale, UIStrings> = {
       finalVideoTitle: "\u6700\u7ec8\u89c6\u9891",
       renderFinalVideoAction: "\u6e32\u67d3\u6700\u7ec8\u89c6\u9891",
       renderingVideoAction: "\u6b63\u5728\u6e32\u67d3\u89c6\u9891",
+    },
+    nav: {
+      ariaLabel: "\u5de5\u4f5c\u53f0\u5206\u533a",
+      storyboard: "\u6545\u4e8b\u677f",
+      series: "\u5168\u96c6\u8bbe\u5b9a",
+      episodes: "\u5206\u96c6\u8bbe\u5b9a",
+      resources: "\u8d44\u6e90\u5e93",
+      production: "\u751f\u4ea7",
+    },
+    projectType: {
+      label: "\u9879\u76ee\u7c7b\u578b",
+      singleVideo: "\u5355\u89c6\u9891",
+      miniSeries: "\u77ed\u7cfb\u5217",
+      longSeries: "\u957f\u7cfb\u5217",
+      lockedHint: "\u9879\u76ee\u521b\u5efa\u540e\uff0c\u9879\u76ee\u7c7b\u578b\u4e0d\u53ef\u66f4\u6539\u3002",
     },
     keyGate: {
       textKeyLabel: "Text API \u5bc6\u94a5",
@@ -319,6 +461,9 @@ const STRINGS: Record<Locale, UIStrings> = {
       renderFallback: "\u65e0\u6cd5\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
       saveShotFallback: "\u65e0\u6cd5\u4fdd\u5b58\u955c\u5934\u3002",
       optimizeShotFallback: "\u65e0\u6cd5\u4f18\u5316\u955c\u5934\u63d0\u793a\u8bcd\u3002",
+      createStoryboardRequiresPrompt: "\u8bf7\u5148\u8f93\u5165\u6545\u4e8b\u63d0\u793a\uff0c\u518d\u521b\u5efa\u6545\u4e8b\u677f\u3002",
+      saveContinuityFallback: "\u65e0\u6cd5\u4fdd\u5b58\u8fde\u7eed\u6027\u8bbe\u5b9a\u3002",
+      uploadReferenceFallback: "\u65e0\u6cd5\u4e0a\u4f20\u53c2\u8003\u56fe\u3002",
       missingTextKeyForOptimize:
         "\u8bf7\u5148\u8f93\u5165 text API key\uff0c\u518d\u4f18\u5316\u955c\u5934\u63d0\u793a\u8bcd\u3002",
       missingVideoKeyForRender:
@@ -418,6 +563,52 @@ const STRINGS: Record<Locale, UIStrings> = {
         complete: "\u5df2\u5b8c\u6210",
         failed: "\u5931\u8d25",
       },
+    },
+    continuity: {
+      ariaLabel: "\u8fde\u7eed\u6027\u5de5\u4f5c\u53f0",
+      seriesTitle: "\u5168\u96c6\u8bbe\u5b9a",
+      episodesTitle: "\u5206\u96c6\u8bbe\u5b9a",
+      storyStateTitle: "\u6545\u4e8b\u72b6\u6001",
+      worldview: "\u4e16\u754c\u89c2",
+      mainArc: "\u4e3b\u7ebf",
+      styleLock: "\u98ce\u683c\u9501\u5b9a",
+      visualRules: "\u89c6\u89c9\u89c4\u5219",
+      taboos: "\u7981\u5fcc",
+      locations: "\u573a\u666f",
+      props: "\u9053\u5177",
+      relationshipMap: "\u5173\u7cfb\u56fe",
+      save: "\u4fdd\u5b58\u8fde\u7eed\u6027",
+      saving: "\u6b63\u5728\u4fdd\u5b58\u8fde\u7eed\u6027",
+      addEpisode: "\u6dfb\u52a0\u5206\u96c6",
+      currentProductionEpisode: (episodeNumber) =>
+        episodeNumber ? `\u5f53\u524d\u5236\u4f5c\u96c6\uff1a\u7b2c ${episodeNumber} \u96c6` : "\u5c1a\u672a\u9009\u62e9\u5f53\u524d\u5236\u4f5c\u96c6",
+      setCurrentEpisode: (episodeNumber) => `\u8bbe\u7b2c ${episodeNumber} \u96c6\u4e3a\u5f53\u524d\u5236\u4f5c\u96c6`,
+      currentEpisodeBadge: "\u5f53\u524d\u5236\u4f5c",
+      episodeTitle: "\u5206\u96c6\u6807\u9898",
+      goal: "\u76ee\u6807",
+      conflict: "\u51b2\u7a81",
+      twist: "\u53cd\u8f6c",
+      cliffhanger: "\u60ac\u5ff5",
+      inheritedState: "\u7ee7\u627f\u72b6\u6001",
+      locked: "\u9501\u5b9a",
+      characterKnowledge: "\u89d2\u8272\u8ba4\u77e5",
+      relationshipChanges: "\u5173\u7cfb\u53d8\u5316",
+      activeForeshadowing: "\u8fdb\u884c\u4e2d\u4f0f\u7b14",
+      resolvedForeshadowing: "\u5df2\u56de\u6536\u4f0f\u7b14",
+      propState: "\u9053\u5177\u72b6\u6001",
+      characterStatus: "\u89d2\u8272\u72b6\u6001",
+      currentLocations: "\u5f53\u524d\u4f4d\u7f6e",
+    },
+    resources: {
+      title: "\u8d44\u6e90\u5e93",
+      emptyState: "\u5c1a\u672a\u4fdd\u5b58\u8d44\u6e90\u3002",
+      kindLabel: "\u8d44\u6e90\u7c7b\u578b",
+      labelLabel: "\u540d\u79f0",
+      descriptionLabel: "\u63cf\u8ff0",
+      promptLabel: "\u63d0\u793a\u8bcd",
+      fileLabel: "\u53c2\u8003\u56fe",
+      uploadAction: "\u4e0a\u4f20\u53c2\u8003",
+      uploadingAction: "\u6b63\u5728\u4e0a\u4f20\u53c2\u8003",
     },
   },
 };

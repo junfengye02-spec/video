@@ -3,7 +3,6 @@ import type { UIStrings } from "../i18n";
 
 interface ChatPanelProps {
   creating: boolean;
-  projectTitlePlaceholder: string;
   prompt: string;
   strings: UIStrings["chatPanel"];
   title: string;
@@ -14,7 +13,6 @@ interface ChatPanelProps {
 
 export function ChatPanel({
   creating,
-  projectTitlePlaceholder,
   prompt,
   strings,
   title,
@@ -35,7 +33,6 @@ export function ChatPanel({
             aria-label={strings.projectTitleLabel}
             value={title}
             onChange={(event) => onTitleChange(event.target.value)}
-            placeholder={projectTitlePlaceholder}
           />
         </label>
         <label className="prompt-field">

@@ -36,6 +36,7 @@ from tools.base_tool import (
     ToolStability,
     ToolStatus,
     ToolTier,
+    resolve_command_path,
 )
 
 
@@ -310,8 +311,8 @@ class HyperFramesCompose(BaseTool):
         can genuinely run end-to-end, not just that the local tooling exists.
         """
         node_major = self._node_major_version()
-        ffmpeg_ok = shutil.which("ffmpeg") is not None
-        npx_ok = shutil.which("npx") is not None
+        ffmpeg_ok = resolve_command_path("ffmpeg") is not None
+        npx_ok = resolve_command_path("npx") is not None
 
         reasons: list[str] = []
         if node_major is None:
@@ -1131,10 +1132,16 @@ class HyperFramesCompose(BaseTool):
         cmd = ["npx", "--yes", "hyperframes", *args]
         # On Windows, resolve the .cmd wrapper so subprocess can find it
         # without shell=True.
-        if os.name == "nt":
-            resolved = shutil.which(cmd[0])
-            if resolved:
-                cmd[0] = resolved
+        resolved = resolve_command_path(cmd[0])
+        if resolved:
+            cmd[0] = resolved
+        env = os.environ.copy()
+        ffmpeg = resolve_command_path("ffmpeg")
+        if ffmpeg:
+            ffmpeg_dir = str(Path(ffmpeg).parent)
+            path_parts = env.get("PATH", "").split(os.pathsep)
+            if ffmpeg_dir not in path_parts:
+                env["PATH"] = ffmpeg_dir + os.pathsep + env.get("PATH", "")
         try:
             return subprocess.run(
                 cmd,
@@ -1143,6 +1150,7 @@ class HyperFramesCompose(BaseTool):
                 timeout=timeout,
                 cwd=str(cwd) if cwd else None,
                 check=False,
+                env=env,
             )
         except subprocess.TimeoutExpired as e:
             # Surface timeouts as a failed CompletedProcess so callers get a

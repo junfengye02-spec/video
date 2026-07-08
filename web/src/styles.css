@@ -20,6 +20,18 @@ body {
     #eef3f5;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 button,
 input,
 select,
@@ -54,7 +66,7 @@ button {
 
 .workspace {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -63,7 +75,8 @@ button {
 .rail-section,
 .chat-panel,
 .storyboard-panel,
-.review-section {
+.review-section,
+.project-type-selector {
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid #d8e0e5;
   border-radius: 8px;
@@ -129,8 +142,197 @@ h3 {
 .rail-section,
 .chat-panel,
 .storyboard-panel,
-.review-section {
+.review-section,
+.project-type-selector {
   padding: 14px;
+}
+
+.studio-nav {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.studio-nav-button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #c9d4db;
+  border-radius: 6px;
+  background: #fbfcfd;
+  color: #344653;
+  cursor: pointer;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.studio-nav-button.is-active {
+  border-color: #168a8f;
+  background: #168a8f;
+  color: #fff;
+}
+
+.project-type-selector {
+  display: grid;
+  gap: 10px;
+}
+
+.project-type-selector legend {
+  color: #344653;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.locked-hint {
+  margin: 0;
+  color: #667784;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.segmented-control label {
+  display: grid;
+}
+
+.segmented-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented-control span {
+  display: grid;
+  min-height: 38px;
+  place-items: center;
+  border: 1px solid #c9d4db;
+  border-radius: 6px;
+  background: #fbfcfd;
+  color: #344653;
+}
+
+.segmented-control input:checked + span {
+  border-color: #17202a;
+  background: #17202a;
+  color: #fff;
+}
+
+.continuity-panel,
+.resource-library {
+  display: grid;
+  gap: 14px;
+}
+
+.continuity-grid,
+.resource-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.continuity-grid label,
+.resource-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.continuity-subsection {
+  display: grid;
+  gap: 12px;
+}
+
+.continuity-subsection h3 {
+  margin: 2px 0 0;
+  color: #17202a;
+  font-size: 1rem;
+}
+
+.episode-actions,
+.episode-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.active-episode-summary {
+  margin: 0;
+  color: #344653;
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.episode-list,
+.asset-list,
+.workflow-list {
+  display: grid;
+  gap: 10px;
+}
+
+.episode-row,
+.asset-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d8e0e5;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfd;
+}
+
+.episode-editor {
+  padding: 12px;
+}
+
+.episode-editor strong {
+  color: #17202a;
+  overflow-wrap: anywhere;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-row input {
+  width: auto;
+  min-height: auto;
+}
+
+.asset-card img {
+  width: 100%;
+  max-height: 160px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.workflow-ok,
+.workflow-missing {
+  display: inline-flex;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.workflow-ok {
+  background: #dff5e3;
+  color: #246332;
+}
+
+.workflow-missing {
+  background: #fff0d8;
+  color: #84530f;
 }
 
 .key-gate {
@@ -208,6 +410,7 @@ textarea:focus {
 }
 
 .primary-button,
+.secondary-button,
 .render-button,
 .icon-button {
   display: inline-flex;
@@ -230,13 +433,24 @@ textarea:focus {
   font-weight: 800;
 }
 
+.secondary-button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid #c9d4db;
+  background: #f4faf9;
+  color: #0c6165;
+  font-weight: 800;
+}
+
 .primary-button:hover:not(:disabled),
+.secondary-button:hover:not(:disabled),
 .render-button:hover:not(:disabled),
 .icon-button:hover:not(:disabled) {
   transform: translateY(-1px);
 }
 
 .primary-button:disabled,
+.secondary-button:disabled,
 .render-button:disabled,
 .icon-button:disabled {
   cursor: not-allowed;
@@ -317,6 +531,49 @@ textarea:focus {
 
 .prompt-field {
   min-width: 0;
+}
+
+.character-binding-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.field-label {
+  color: #344653;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.character-binding-options {
+  display: flex;
+  min-height: 38px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 8px 10px;
+  border: 1px solid #c9d4db;
+  border-radius: 6px;
+  background: #fbfcfd;
+}
+
+.character-binding-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #344653;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.character-binding-options input {
+  width: auto;
+  min-height: auto;
+  flex: 0 0 auto;
 }
 
 .chat-actions {

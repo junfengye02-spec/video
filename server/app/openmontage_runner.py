@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from lib.shot_prompt_builder import build_shot_prompt
 from server.app.keyring import key_environment
+from tools.video._shared import probe_output
 
 RenderRuntime = Literal["remotion", "hyperframes", "ffmpeg"]
 DEFAULT_VIDEO_MODEL = "omni_flash-10s"
@@ -169,6 +170,7 @@ def build_video_selector_inputs(
 def build_pipeline_inputs(
     series_bible: dict[str, Any],
     storyboard: dict[str, Any],
+    continuity_plan: dict[str, Any] | None = None,
     render_runtime: RenderRuntime = "remotion",
     video_model: str = DEFAULT_VIDEO_MODEL,
 ) -> dict[str, dict[str, Any]]:
@@ -267,12 +269,15 @@ def build_pipeline_inputs(
         },
     }
 
-    return {
+    inputs = {
         "proposal_packet": proposal_packet,
         "scene_plan": scene_plan,
         "asset_manifest": asset_manifest,
         "edit_decisions": edit_decisions,
     }
+    if continuity_plan is not None:
+        inputs["continuity_plan"] = continuity_plan
+    return inputs
 
 
 def write_pipeline_artifacts(
@@ -368,13 +373,20 @@ def run_pipeline_handoff(
     storyboard: dict[str, Any],
     gateway_key: str,
     base_url: str,
+    continuity_plan: dict[str, Any] | None = None,
     render_runtime: RenderRuntime = "remotion",
     video_model: str = DEFAULT_VIDEO_MODEL,
     emit_event: Callable[[str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Prepare artifacts and generate storyboard shots through existing selectors."""
 
-    pipeline_inputs = build_pipeline_inputs(series_bible, storyboard, render_runtime, video_model)
+    pipeline_inputs = build_pipeline_inputs(
+        series_bible,
+        storyboard,
+        continuity_plan=continuity_plan,
+        render_runtime=render_runtime,
+        video_model=video_model,
+    )
     written = write_pipeline_artifacts(project_dir, pipeline_inputs)
 
     outputs = []
@@ -411,12 +423,19 @@ def render_short_drama_project(
     storyboard: dict[str, Any],
     video_key: str,
     base_url: str,
+    continuity_plan: dict[str, Any] | None = None,
     video_model: str = DEFAULT_VIDEO_MODEL,
     render_runtime: RenderRuntime = "ffmpeg",
     emit_event: Callable[[str, str, str], None] | None = None,
 ) -> dict[str, Any]:
     project_path = Path(project_dir)
-    pipeline_inputs = build_pipeline_inputs(series_bible, storyboard, render_runtime, video_model)
+    pipeline_inputs = build_pipeline_inputs(
+        series_bible,
+        storyboard,
+        continuity_plan=continuity_plan,
+        render_runtime=render_runtime,
+        video_model=video_model,
+    )
     written = write_pipeline_artifacts(project_path, pipeline_inputs)
     outputs: list[dict[str, Any]] = []
 
@@ -426,6 +445,21 @@ def render_short_drama_project(
 
     shots = sorted(storyboard.get("shots", []), key=lambda shot: int(shot.get("index", 0)))
     for shot in shots:
+        existing_output = _project_media_path(project_path, shot.get("output_path"))
+        if existing_output and existing_output.exists():
+            shot["status"] = "complete"
+            outputs.append(
+                {
+                    "shot_id": shot.get("id"),
+                    "output_path": str(existing_output),
+                    "tool_result": {"url": shot.get("output_url"), "reused": True},
+                    "cost_usd": 0.0,
+                }
+            )
+            if emit_event:
+                emit_event("assets", "complete", f"Reused existing shot {shot.get('id')}")
+            continue
+
         shot["status"] = "generating"
         if emit_event:
             emit_event("assets", "running", f"Generating shot {shot.get('id')}")
@@ -449,20 +483,12 @@ def render_short_drama_project(
     if emit_event:
         emit_event("compose", "complete", "Final video rendered")
 
-    duration = 5 * len(shots)
     render_report = {
         "version": "1.0",
-        "outputs": [
-            {
-                "path": str(final_path),
-                "format": "mp4",
-                "resolution": "720x1280",
-                "duration_seconds": duration,
-            }
-        ],
+        "outputs": [_render_report_output(final_path, fallback_duration_seconds=5 * len(shots))],
         "warnings": [],
         "verification_notes": [
-            "Rendered from generated storyboard shot videos with FFmpeg concat.",
+            "Rendered from generated storyboard shot videos with FFmpeg normalized concat.",
         ],
         "render_grammar": "cinematic-trailer",
     }
@@ -486,9 +512,9 @@ def compose_final_video(project_dir: str | Path, storyboard: dict[str, Any]) -> 
     output_path = project_path / "renders" / "final.mp4"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shot_paths = [
-        Path(str(shot.get("output_path")))
+        resolved_path
         for shot in sorted(storyboard.get("shots", []), key=lambda item: int(item.get("index", 0)))
-        if shot.get("output_path")
+        if (resolved_path := _project_media_path(project_path, shot.get("output_path"))) is not None
     ]
     if not shot_paths:
         raise RuntimeError("No generated shot videos found to compose.")
@@ -496,24 +522,7 @@ def compose_final_video(project_dir: str | Path, storyboard: dict[str, Any]) -> 
     if missing:
         raise RuntimeError(f"Generated shot video missing: {missing[0]}")
 
-    concat_file = output_path.parent / "concat.txt"
-    concat_file.write_text(
-        "\n".join(f"file '{_ffmpeg_concat_path(path)}'" for path in shot_paths),
-        encoding="utf-8",
-    )
-    cmd = [
-        _resolve_ffmpeg_executable(),
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_file),
-        "-c",
-        "copy",
-        str(output_path),
-    ]
+    cmd = _build_ffmpeg_compose_command(shot_paths, output_path)
     subprocess.run(
         cmd,
         capture_output=True,
@@ -524,6 +533,86 @@ def compose_final_video(project_dir: str | Path, storyboard: dict[str, Any]) -> 
         check=True,
     )
     return output_path
+
+
+def _render_report_output(final_path: Path, *, fallback_duration_seconds: int) -> dict[str, Any]:
+    metadata = probe_output(final_path)
+    width = metadata.get("video_width")
+    height = metadata.get("video_height")
+    duration = metadata.get("duration_seconds", fallback_duration_seconds)
+    return {
+        "path": str(final_path),
+        "format": "mp4",
+        "resolution": f"{width}x{height}" if width and height else "720x1280",
+        "duration_seconds": duration,
+    }
+
+
+def _build_ffmpeg_compose_command(shot_paths: list[Path], output_path: Path) -> list[str]:
+    ffmpeg = _resolve_ffmpeg_executable()
+    remotion_bundled = _is_remotion_bundled_ffmpeg(ffmpeg)
+    cmd = [ffmpeg, "-y"]
+    for path in shot_paths:
+        cmd.extend(["-i", str(path)])
+
+    labels: list[str] = []
+    filters: list[str] = []
+    for index, _path in enumerate(shot_paths):
+        label = f"v{index}"
+        labels.append(f"[{label}]")
+        filters.append(_build_video_normalize_filter(index, label, remotion_bundled))
+    filters.append(f"{''.join(labels)}concat=n={len(shot_paths)}:v=1:a=0[outv]")
+
+    cmd.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+    return cmd
+
+
+def _build_video_normalize_filter(index: int, label: str, remotion_bundled: bool) -> str:
+    if remotion_bundled:
+        return f"[{index}:v]scale=720:1280,format=yuv420p[{label}]"
+    return (
+        f"[{index}:v]"
+        "scale=720:1280:force_original_aspect_ratio=decrease,"
+        "pad=720:1280:(ow-iw)/2:(oh-ih)/2,"
+        "setsar=1,fps=30,format=yuv420p"
+        f"[{label}]"
+    )
+
+
+def _is_remotion_bundled_ffmpeg(ffmpeg: str) -> bool:
+    parts = {part.lower() for part in Path(ffmpeg).parts}
+    return "remotion-composer" in parts and "@remotion" in parts
+
+
+def _project_media_path(project_dir: Path, file_path: str | Path | None) -> Path | None:
+    if not file_path:
+        return None
+    project_path = project_dir.resolve()
+    candidate = Path(str(file_path))
+    if not candidate.is_absolute():
+        candidate = project_path / candidate
+    resolved = candidate.resolve()
+    if resolved == project_path or project_path in resolved.parents:
+        return resolved
+    return None
 
 
 def _build_proposal_packet(
