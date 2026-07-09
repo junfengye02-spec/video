@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenMontage Frontend Concepts</title>
+  <style>
+    :root {
+      --bg: #f5f8f9;
+      --panel: #ffffff;
+      --panel-soft: #f9fbfb;
+      --line: #dce6e8;
+      --text: #18252d;
+      --muted: #667983;
+      --teal: #168a8f;
+      --teal-soft: #e5f4f4;
+      --warm: #f4a947;
+      --warm-soft: #fff5df;
+      --green: #2f8f5f;
+      --red: #c65c45;
+      --shadow: 0 18px 46px rgba(34, 53, 61, 0.08);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: #dfe8eb;
+      color: var(--text);
+    }
+
+    .screen {
+      width: 2048px;
+      height: 1152px;
+      overflow: hidden;
+      background: var(--bg);
+      position: relative;
+    }
+
+    .topbar {
+      height: 76px;
+      display: flex;
+      align-items: center;
+      gap: 28px;
+      padding: 0 40px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.94);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 260px;
+      font-weight: 900;
+      font-size: 22px;
+      color: #132029;
+    }
+
+    .mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: #132029;
+      color: #fff;
+      font-size: 16px;
+      font-weight: 900;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1;
+    }
+
+    .nav span,
+    .side-nav span {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      border-radius: 8px;
+      padding: 0 14px;
+      color: #40535d;
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    .nav .active,
+    .side-nav .active {
+      background: var(--teal-soft);
+      color: #0f686c;
+    }
+
+    .balance {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 38px;
+      padding: 0 13px;
+      border: 1px solid #cfe0e4;
+      border-radius: 8px;
+      background: #fbfdfd;
+      color: #274650;
+      font-size: 15px;
+      font-weight: 900;
+    }
+
+    .primary,
+    .secondary,
+    .ghost {
+      height: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border-radius: 8px;
+      border: 0;
+      padding: 0 18px;
+      font-weight: 900;
+      font-size: 15px;
+      white-space: nowrap;
+    }
+
+    .primary { background: var(--teal); color: #fff; }
+    .secondary { border: 1px solid #c9d8dc; background: #f7fbfb; color: #0f686c; }
+    .ghost { background: transparent; color: #40535d; }
+
+    .avatar {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: #e9eff1;
+      color: #304650;
+      font-weight: 900;
+    }
+
+    .app-layout {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      height: calc(100% - 76px);
+    }
+
+    .sidebar {
+      padding: 24px 18px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.8);
+    }
+
+    .side-nav {
+      display: grid;
+      gap: 8px;
+    }
+
+    .main {
+      padding: 28px;
+      min-width: 0;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      margin-bottom: 12px;
+      font-size: 34px;
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin-bottom: 14px;
+      font-size: 24px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin-bottom: 8px;
+      font-size: 18px;
+      line-height: 1.25;
+      letter-spacing: 0;
+    }
+
+    p {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.5;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: var(--shadow);
+    }
+
+    .panel.pad { padding: 24px; }
+    .soft { background: var(--panel-soft); }
+
+    .label {
+      color: #314650;
+      font-size: 14px;
+      font-weight: 900;
+      margin-bottom: 8px;
+    }
+
+    .field,
+    .textarea,
+    .select-like {
+      width: 100%;
+      border: 1px solid #c9d8dc;
+      border-radius: 8px;
+      background: #fbfdfd;
+      color: #21333c;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .field { height: 46px; padding: 0 14px; }
+    .textarea { min-height: 210px; padding: 16px; line-height: 1.6; }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      height: 28px;
+      border-radius: 999px;
+      padding: 0 10px;
+      background: #eef4f5;
+      color: #506873;
+      font-size: 13px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .tag.teal { background: var(--teal-soft); color: #0f686c; }
+    .tag.warm { background: var(--warm-soft); color: #8d5b08; }
+    .tag.green { background: #e7f4ec; color: #256b44; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+    .stack { display: grid; gap: 16px; }
+    .row { display: flex; align-items: center; gap: 12px; }
+    .between { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+
+    .login-screen {
+      display: grid;
+      grid-template-columns: 760px 1fr;
+      gap: 48px;
+      padding: 64px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.82), rgba(245,248,249,0.96)),
+        #f5f8f9;
+    }
+
+    .login-card {
+      align-self: center;
+      padding: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .login-card h1 { font-size: 40px; }
+
+    .tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin: 30px 0 22px;
+      padding: 6px;
+      border-radius: 8px;
+      background: #eef4f5;
+    }
+
+    .tabs span {
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      color: #526873;
+      font-weight: 900;
+    }
+
+    .tabs .active { background: #fff; color: #0f686c; box-shadow: 0 4px 12px rgba(20, 44, 54, 0.08); }
+
+    .preview-board {
+      align-self: center;
+      padding: 28px;
+      min-height: 760px;
+    }
+
+    .mini-dashboard {
+      display: grid;
+      gap: 18px;
+      margin-top: 24px;
+    }
+
+    .mini-card {
+      display: grid;
+      grid-template-columns: 54px 1fr auto;
+      gap: 14px;
+      align-items: center;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfdfd;
+    }
+
+    .iconbox {
+      width: 54px;
+      height: 54px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--teal-soft);
+      color: #0f686c;
+      font-size: 22px;
+      font-weight: 900;
+    }
+
+    .plans-layout {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 22px;
+    }
+
+    .plan-card {
+      padding: 24px;
+      min-height: 220px;
+      display: grid;
+      align-content: space-between;
+      gap: 20px;
+    }
+
+    .price {
+      font-size: 36px;
+      font-weight: 950;
+      color: #12232c;
+    }
+
+    .table {
+      display: grid;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .table-row {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr 0.7fr;
+      gap: 12px;
+      align-items: center;
+      min-height: 56px;
+      padding: 0 18px;
+      border-bottom: 1px solid #edf2f3;
+      color: #334852;
+      font-size: 15px;
+      font-weight: 800;
+    }
+
+    .table-row:last-child { border-bottom: 0; }
+    .table-head { background: #f6f9fa; color: #6a7f88; font-size: 13px; text-transform: uppercase; }
+
+    .create-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 22px;
+      height: 100%;
+    }
+
+    .choice-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .choice {
+      height: 40px;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 14px;
+      border: 1px solid #c9d8dc;
+      border-radius: 8px;
+      background: #fbfdfd;
+      color: #40535d;
+      font-weight: 900;
+    }
+
+    .choice.active { background: #132029; border-color: #132029; color: #fff; }
+
+    .steps {
+      display: grid;
+      gap: 14px;
+      margin-top: 20px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 36px 1fr;
+      gap: 12px;
+      align-items: center;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfdfd;
+      font-weight: 900;
+    }
+
+    .step-number {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--teal-soft);
+      color: #0f686c;
+    }
+
+    .workbench {
+      display: grid;
+      grid-template-columns: 330px minmax(0, 1fr) 330px;
+      gap: 18px;
+      height: calc(100vh - 132px);
+      max-height: 1020px;
+    }
+
+    .shot-card {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfdfd;
+    }
+
+    .shot-card.active { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(22, 138, 143, 0.12); }
+
+    .preview-video {
+      width: 320px;
+      aspect-ratio: 9 / 16;
+      margin: 0 auto;
+      border-radius: 8px;
+      background:
+        linear-gradient(160deg, rgba(22,138,143,0.22), rgba(19,32,41,0.94)),
+        #14212a;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 900;
+    }
+
+    .editor-grid {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 22px;
+      align-items: start;
+    }
+
+    .collapsed {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7fafb;
+      color: #40535d;
+      font-weight: 900;
+    }
+
+    .progress-line {
+      display: grid;
+      gap: 12px;
+    }
+
+    .progress-item {
+      display: grid;
+      grid-template-columns: 24px 1fr;
+      gap: 10px;
+      align-items: center;
+      color: #40535d;
+      font-weight: 800;
+    }
+
+    .dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 5px solid #d7e3e6;
+      background: #fff;
+    }
+
+    .dot.done { border-color: var(--teal); }
+    .dot.active { border-color: var(--warm); }
+
+    .asset-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 22px;
+    }
+
+    .upload {
+      display: grid;
+      place-items: center;
+      min-height: 150px;
+      border: 1px dashed #afc3c9;
+      border-radius: 8px;
+      background: #f9fcfc;
+      color: #506873;
+      font-weight: 900;
+    }
+
+    .asset-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+
+    .thumb {
+      height: 140px;
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(22,138,143,0.18), rgba(244,169,71,0.2)),
+        #eef4f5;
+    }
+
+    .render-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 22px;
+    }
+
+    .render-preview {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 24px;
+      align-items: center;
+    }
+
+    .video-shell {
+      width: 320px;
+      aspect-ratio: 9 / 16;
+      border-radius: 8px;
+      background:
+        linear-gradient(160deg, rgba(244,169,71,0.22), rgba(22,138,143,0.28)),
+        #14212a;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 900;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.16);
+    }
+
+    .big-stat {
+      font-size: 42px;
+      font-weight: 950;
+      color: #12232c;
+      margin: 4px 0;
+    }
+
+    .screen-note {
+      position: absolute;
+      left: 40px;
+      bottom: 28px;
+      color: #8ca0a8;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    html.capture,
+    html.capture body {
+      width: 1280px;
+      height: 720px;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    html.capture .screen {
+      display: none;
+      transform: scale(0.625);
+      transform-origin: top left;
+    }
+
+    html.capture .screen.active-capture {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <section class="screen login-screen" id="login-register">
+    <div class="login-card">
+      <div class="brand"><div class="mark">OM</div>OpenMontage</div>
+      <h1>登录后开始生成短剧</h1>
+      <p>一个想法，生成分镜、角色一致性和最终视频。适合新手直接上手。</p>
+      <div class="tabs"><span class="active">登录</span><span>注册</span></div>
+      <div class="stack">
+        <div><div class="label">手机号或邮箱</div><div class="field">creator@example.com</div></div>
+        <div><div class="label">验证码</div><div class="row"><div class="field">输入 6 位验证码</div><button class="secondary">获取验证码</button></div></div>
+        <button class="primary">登录 / 注册</button>
+        <button class="secondary">微信登录</button>
+        <p>作品自动保存，余额安全管理</p>
+      </div>
+    </div>
+    <div class="panel pad preview-board">
+      <div class="between">
+        <div><h2>短剧生成预览</h2><p>登录后直接进入创作，不需要配置任何技术参数。</p></div>
+        <span class="tag teal">新手模式</span>
+      </div>
+      <div class="mini-dashboard">
+        <div class="mini-card"><div class="iconbox">1</div><div><h3>写故事</h3><p>输入一句想法或完整剧情。</p></div><span class="tag">2 分钟</span></div>
+        <div class="mini-card"><div class="iconbox">2</div><div><h3>生成分镜</h3><p>自动拆成镜头，保留角色和场景。</p></div><span class="tag warm">20 点</span></div>
+        <div class="mini-card"><div class="iconbox">3</div><div><h3>渲染下载</h3><p>生成竖屏短剧，完成后直接下载。</p></div><span class="tag green">完成</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen" id="wallet-plans">
+    <div class="topbar"><div class="brand"><div class="mark">OM</div>OpenMontage</div><div class="nav"><span>创作</span><span>项目</span><span>资源库</span><span class="active">充值</span><span>设置</span></div><div class="balance">余额 3280 点</div><button class="primary">立即充值</button><div class="avatar">周</div></div>
+    <div class="app-layout"><aside class="sidebar"><div class="side-nav"><span>创作</span><span>我的项目</span><span>资源库</span><span class="active">充值</span><span>设置</span></div></aside>
+      <main class="main"><div class="between"><div><h1>充值与套餐</h1><p>点数用于生成分镜、重生镜头和最终渲染，消费前会清楚提示。</p></div><span class="tag teal">余额 3280 点</span></div>
+      <div class="plans-layout">
+        <div class="stack">
+          <div class="grid-3">
+            <div class="panel pad plan-card"><div><h2>入门包</h2><p>适合试做几条视频</p></div><div><div class="price">99 元</div><p>约 20 条短视频</p></div><button class="secondary">选择套餐</button></div>
+            <div class="panel pad plan-card" style="border-color:var(--teal);"><div class="between"><h2>创作者包</h2><span class="tag teal">推荐</span></div><div><div class="price">299 元</div><p>约 75 条短视频</p></div><button class="primary">选择套餐</button></div>
+            <div class="panel pad plan-card"><div><h2>团队包</h2><p>多人项目更划算</p></div><div><div class="price">899 元</div><p>约 260 条短视频</p></div><button class="secondary">选择套餐</button></div>
+          </div>
+          <div class="panel pad"><h2>充值记录</h2><div class="table"><div class="table-row table-head"><span>时间</span><span>套餐</span><span>金额</span><span>状态</span></div><div class="table-row"><span>07-09 14:20</span><span>创作者包</span><span>299 元</span><span class="tag green">已完成</span></div><div class="table-row"><span>07-08 18:04</span><span>入门包</span><span>99 元</span><span class="tag green">已完成</span></div></div></div>
+        </div>
+        <aside class="panel pad stack"><h2>预计消耗</h2><div class="between"><span>生成分镜</span><strong>20 点</strong></div><div class="between"><span>单镜头重生</span><strong>80 点</strong></div><div class="between"><span>最终渲染</span><strong>300 点</strong></div><hr style="width:100%;border:0;border-top:1px solid var(--line);"><div><div class="label">本次预计</div><div class="big-stat">400 点</div><p>余额充足，可以生成完整视频。</p></div></aside>
+      </div></main></div>
+  </section>
+
+  <section class="screen" id="create-home">
+    <div class="topbar"><div class="brand"><div class="mark">OM</div>OpenMontage</div><div class="nav"><span class="active">创作</span><span>项目</span><span>资源库</span><span>充值</span><span>设置</span></div><div class="balance">余额 3280 点</div><button class="secondary">充值</button><div class="avatar">周</div></div>
+    <div class="app-layout"><aside class="sidebar"><div class="side-nav"><span class="active">创作</span><span>我的项目</span><span>资源库</span><span>充值</span><span>设置</span></div></aside>
+      <main class="main create-layout">
+        <section class="panel pad stack"><div><h1>把一个想法变成短剧</h1><p>先写故事，不用懂分镜和模型。高级参数会在需要时再展开。</p></div><div><div class="label">故事想法</div><div class="textarea">例如：雨夜里，女主发现老板隐藏多年的秘密，却发现自己才是整件事的关键。</div></div><div class="grid-3"><div><div class="label">项目类型</div><div class="choice-grid"><span class="choice active">单条视频</span><span class="choice">短系列</span><span class="choice">长系列</span></div></div><div><div class="label">视频时长</div><div class="choice-grid"><span class="choice">30 秒</span><span class="choice active">60 秒</span><span class="choice">90 秒</span></div></div><div><div class="label">视频风格</div><div class="choice-grid"><span class="choice active">都市反转</span><span class="choice">亲情治愈</span><span class="choice">悬疑</span><span class="choice">爽文</span></div></div></div><div class="between"><span class="tag warm">预计消耗 20 点</span><button class="primary">生成分镜</button></div></section>
+        <aside class="panel pad"><h2>新手流程</h2><p>跟着三步走，先出完整版本，再微调镜头。</p><div class="steps"><div class="step"><div class="step-number">1</div><span>写想法</span></div><div class="step"><div class="step-number">2</div><span>看分镜</span></div><div class="step"><div class="step-number">3</div><span>生成视频</span></div></div></aside>
+      </main></div>
+  </section>
+
+  <section class="screen" id="storyboard-workbench">
+    <div class="topbar"><div class="brand"><div class="mark">OM</div>雨夜反转</div><div class="nav"><span class="active">分镜</span><span>资源</span><span>渲染</span><span>记录</span></div><div class="balance">余额 2860 点</div><button class="secondary">充值</button><div class="avatar">周</div></div>
+    <main class="main workbench">
+      <aside class="panel pad stack"><h2>分镜列表</h2><div class="shot-card"><div class="between"><h3>01 雨夜相遇</h3><span class="tag green">已生成</span></div><p>女主在雨夜街口接到陌生电话。</p></div><div class="shot-card active"><div class="between"><h3>02 电梯停电</h3><span class="tag warm">待重生</span></div><p>电梯灯闪烁，老板说出关键线索。</p></div><div class="shot-card"><div class="between"><h3>03 真相出现</h3><span class="tag green">已生成</span></div><p>旧照片揭开人物关系反转。</p></div></aside>
+      <section class="panel pad stack"><div class="between"><div><h1>02 电梯停电</h1><p>编辑当前镜头，满意后再生成最终视频。</p></div><span class="tag warm">预计消耗 80 点</span></div><div class="editor-grid"><div class="preview-video">竖屏预览</div><div class="stack"><div><div class="label">镜头提示词</div><div class="textarea" style="min-height:250px;">狭窄电梯突然停电，冷白应急灯亮起。女主握紧手机，老板低声说：你看到的档案不是全部。</div></div><div class="collapsed"><span>高级镜头设置</span><span>展开</span></div><div class="row"><button class="primary">优化提示词</button><button class="primary">重生当前镜头</button><button class="secondary">保存</button></div></div></div></section>
+      <aside class="panel pad stack"><h2>角色一致性</h2><div class="row"><span class="tag teal">女主 林晚</span><span class="tag teal">老板 顾沉</span></div><p>角色参考图已锁定，生成时尽量保持同一张脸和服装。</p><h2>生成进度</h2><div class="progress-line"><div class="progress-item"><span class="dot done"></span><span>分镜已完成</span></div><div class="progress-item"><span class="dot active"></span><span>当前镜头待重生</span></div><div class="progress-item"><span class="dot"></span><span>最终视频未渲染</span></div></div></aside>
+    </main>
+  </section>
+
+  <section class="screen" id="asset-library">
+    <div class="topbar"><div class="brand"><div class="mark">OM</div>OpenMontage</div><div class="nav"><span>创作</span><span>项目</span><span class="active">资源库</span><span>充值</span><span>设置</span></div><div class="balance">余额 2860 点</div><button class="secondary">充值</button><div class="avatar">周</div></div>
+    <div class="app-layout"><aside class="sidebar"><div class="side-nav"><span>创作</span><span>我的项目</span><span class="active">资源库</span><span>充值</span><span>设置</span></div></aside>
+      <main class="main asset-layout"><section class="stack"><div class="between"><div><h1>资源库</h1><p>上传角色、场景、道具参考图，让视频保持统一。</p></div><button class="primary">新建角色</button></div><div class="upload">上传参考图</div><div class="choice-grid"><span class="choice active">角色</span><span class="choice">场景</span><span class="choice">道具</span></div><div class="asset-grid"><div class="panel pad stack"><div class="thumb"></div><h3>女主 林晚</h3><span class="tag teal">角色</span><p>用于 3 个镜头</p></div><div class="panel pad stack"><div class="thumb"></div><h3>老板 顾沉</h3><span class="tag teal">角色</span><p>用于 3 个镜头</p></div><div class="panel pad stack"><div class="thumb"></div><h3>雨夜街道</h3><span class="tag">场景</span><p>用于 2 个镜头</p></div><div class="panel pad stack"><div class="thumb"></div><h3>旧办公室</h3><span class="tag">场景</span><p>用于 1 个镜头</p></div></div></section><aside class="panel pad stack"><h2>角色锁定</h2><p>选择角色图后，生成镜头时会尽量保持同一张脸和服装。</p><div class="mini-card" style="grid-template-columns:54px 1fr;"><div class="iconbox">脸</div><div><h3>人脸一致</h3><p>适合连续短剧。</p></div></div><div class="mini-card" style="grid-template-columns:54px 1fr;"><div class="iconbox">衣</div><div><h3>服装一致</h3><p>减少穿帮。</p></div></div></aside></main></div>
+  </section>
+
+  <section class="screen" id="render-download">
+    <div class="topbar"><div class="brand"><div class="mark">OM</div>雨夜反转</div><div class="nav"><span>分镜</span><span>资源</span><span class="active">渲染</span><span>记录</span></div><div class="balance">余额 2860 点</div><button class="secondary">充值</button><div class="avatar">周</div></div>
+    <main class="main render-layout"><section class="stack"><div class="between"><div><h1>最终视频</h1><p>渲染完成后可以直接下载，也可以回到分镜继续修改。</p></div><span class="tag warm">合成视频中</span></div><div class="panel pad render-preview"><div class="video-shell">视频预览</div><div class="stack"><h2>雨夜反转 60 秒</h2><div class="progress-line"><div class="progress-item"><span class="dot done"></span><span>排队中</span></div><div class="progress-item"><span class="dot done"></span><span>生成镜头</span></div><div class="progress-item"><span class="dot active"></span><span>合成视频</span></div><div class="progress-item"><span class="dot"></span><span>完成</span></div></div><p>预计还需 2 分钟</p><div class="row"><button class="primary">下载视频</button><button class="secondary">继续修改分镜</button><button class="secondary">复制分享链接</button></div></div></div><div class="panel pad"><h2>生成记录</h2><div class="table"><div class="table-row table-head"><span>版本</span><span>时间</span><span>消耗</span><span>状态</span></div><div class="table-row"><span>v3 完整版</span><span>07-09 15:30</span><span>420 点</span><span class="tag warm">生成中</span></div><div class="table-row"><span>v2 草稿</span><span>07-09 14:12</span><span>360 点</span><span class="tag green">完成</span></div></div></div></section><aside class="panel pad stack"><h2>本次消耗</h2><div><div class="label">已用</div><div class="big-stat">420 点</div></div><div><div class="label">余额</div><div class="big-stat">2860 点</div></div><p>余额充足，生成完成后不会重复扣点。</p><button class="secondary">查看消耗明细</button></aside></main>
+  </section>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const captureTarget = params.get("screen");
+    if (params.get("capture") === "1" && captureTarget) {
+      document.documentElement.classList.add("capture");
+      document.querySelectorAll(".screen").forEach((screen) => {
+        screen.classList.toggle("active-capture", screen.id === captureTarget);
+      });
+    }
+  </script>
+</body>
+</html>
