@@ -173,6 +173,21 @@ export interface UIStrings {
     regeneratingAction: string;
     saveBeforeRegenerateHint: string;
   };
+  storyboardPage: {
+    shotListLabel: string;
+    previewLabel: string;
+    orderLabel: string;
+    inspectorLabel: string;
+    emptyShots: string;
+    noSelectedShot: string;
+    noPreviewMedia: string;
+    shotTitle: (shotIndex: number) => string;
+    selectShotLabel: (shotIndex: number) => string;
+    selectOrderedShotLabel: (shotIndex: number) => string;
+    previewMediaLabel: (shotIndex: number) => string;
+    plannedShotCount: (count: number) => string;
+    discardChangesConfirm: string;
+  };
   storyboardWaterfall: {
     regionLabel: string;
     title: string;
@@ -460,6 +475,21 @@ const STRINGS: Record<Locale, UIStrings> = {
       regenerateAction: "Regenerate",
       regeneratingAction: "Regenerating",
       saveBeforeRegenerateHint: "Save changes first",
+    },
+    storyboardPage: {
+      shotListLabel: "Shot list",
+      previewLabel: "Shot preview",
+      orderLabel: "Shot order",
+      inspectorLabel: "Shot inspector",
+      emptyShots: "No shots generated.",
+      noSelectedShot: "Select or create a shot to preview it.",
+      noPreviewMedia: "No preview media is available for this shot yet.",
+      shotTitle: (shotIndex: number) => `Shot ${shotIndex}`,
+      selectShotLabel: (shotIndex: number) => `Select shot ${shotIndex}`,
+      selectOrderedShotLabel: (shotIndex: number) => `Select shot ${shotIndex} in order`,
+      previewMediaLabel: (shotIndex: number) => `Shot ${shotIndex} preview media`,
+      plannedShotCount: (count: number) => `AI planned ${count} shots for you`,
+      discardChangesConfirm: "This shot has unsaved changes. Discard them?",
     },
     storyboardWaterfall: {
       regionLabel: "Storyboard waterfall",
@@ -760,6 +790,21 @@ const STRINGS: Record<Locale, UIStrings> = {
       regenerateAction: "\u91cd\u65b0\u751f\u6210",
       regeneratingAction: "\u6b63\u5728\u91cd\u65b0\u751f\u6210",
       saveBeforeRegenerateHint: "\u8bf7\u5148\u4fdd\u5b58\u4fee\u6539",
+    },
+    storyboardPage: {
+      shotListLabel: "\u5206\u955c\u5217\u8868",
+      previewLabel: "\u5206\u955c\u9884\u89c8",
+      orderLabel: "\u5206\u955c\u987a\u5e8f",
+      inspectorLabel: "\u5206\u955c\u68c0\u67e5\u5668",
+      emptyShots: "\u5c1a\u672a\u751f\u6210\u5206\u955c\u3002",
+      noSelectedShot: "\u8bf7\u9009\u62e9\u6216\u521b\u5efa\u5206\u955c\u4ee5\u8fdb\u884c\u9884\u89c8\u3002",
+      noPreviewMedia: "\u5f53\u524d\u5206\u955c\u5c1a\u65e0\u9884\u89c8\u5a92\u4f53",
+      shotTitle: (shotIndex: number) => `\u5206\u955c ${shotIndex}`,
+      selectShotLabel: (shotIndex: number) => `\u9009\u62e9\u5206\u955c ${shotIndex}`,
+      selectOrderedShotLabel: (shotIndex: number) => `\u5728\u987a\u5e8f\u4e2d\u9009\u62e9\u5206\u955c ${shotIndex}`,
+      previewMediaLabel: (shotIndex: number) => `\u5206\u955c ${shotIndex} \u9884\u89c8\u5a92\u4f53`,
+      plannedShotCount: (count: number) => `AI \u5df2\u4e3a\u4f60\u89c4\u5212 ${count} \u4e2a\u5206\u955c`,
+      discardChangesConfirm: "\u5f53\u524d\u5206\u955c\u6709\u672a\u4fdd\u5b58\u4fee\u6539\uff0c\u786e\u5b9a\u653e\u5f03\u5417\uff1f",
     },
     storyboardWaterfall: {
       regionLabel: "\u5206\u955c\u7011\u5e03",
