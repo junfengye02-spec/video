@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 import sys
@@ -27,7 +28,7 @@ def _prompt_credentials(monkeypatch, *, password: str, confirmation: str) -> Non
 
 
 def test_create_admin_prompts_twice_and_writes_non_secret_audit(
-    monkeypatch, auth_db, capsys
+    monkeypatch, auth_db, session_store, capsys
 ):
     prompts: list[str] = []
     passwords = iter([PASSWORD, PASSWORD])
@@ -37,7 +38,11 @@ def test_create_admin_prompts_twice_and_writes_non_secret_audit(
         lambda prompt: prompts.append(prompt) or next(passwords),
     )
 
-    code = run_manage(["create-admin"], db_session=auth_db)
+    code = run_manage(
+        ["create-admin"],
+        db_session=auth_db,
+        session_store=session_store,
+    )
 
     captured = capsys.readouterr()
     assert code == 0
@@ -63,8 +68,43 @@ def test_create_admin_prompts_twice_and_writes_non_secret_audit(
     assert user.password_hash not in rendered_audit
 
 
+def test_create_admin_new_user_does_not_depend_on_session_revocation(
+    monkeypatch, auth_db, session_store
+):
+    _prompt_credentials(monkeypatch, password=PASSWORD, confirmation=PASSWORD)
+
+    def fail_revocation(user_id):
+        raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(session_store, "revoke_all", fail_revocation)
+
+    code = run_manage(
+        ["create-admin"],
+        db_session=auth_db,
+        session_store=session_store,
+    )
+
+    assert code == 0
+    assert auth_db.scalar(select(func.count()).select_from(User)) == 1
+    assert auth_db.scalar(select(func.count()).select_from(AdminAuditLog)) == 1
+
+
+def test_create_admin_rejects_partial_dependency_injection_before_prompt(
+    monkeypatch, auth_db, session_store
+):
+    monkeypatch.setattr(
+        "server.manage.input",
+        lambda prompt: pytest.fail("incomplete dependencies must fail before prompting"),
+    )
+
+    with pytest.raises(ValueError, match="must be supplied together"):
+        run_manage(["create-admin"], db_session=auth_db)
+    with pytest.raises(ValueError, match="must be supplied together"):
+        run_manage(["create-admin"], session_store=session_store)
+
+
 def test_create_admin_rejects_password_mismatch_without_db_mutation(
-    monkeypatch, auth_db, capsys
+    monkeypatch, auth_db, session_store, capsys
 ):
     confirmation = "different password"
     _prompt_credentials(
@@ -73,7 +113,11 @@ def test_create_admin_rejects_password_mismatch_without_db_mutation(
         confirmation=confirmation,
     )
 
-    code = run_manage(["create-admin"], db_session=auth_db)
+    code = run_manage(
+        ["create-admin"],
+        db_session=auth_db,
+        session_store=session_store,
+    )
 
     rendered = capsys.readouterr()
     assert code == 2
@@ -85,11 +129,15 @@ def test_create_admin_rejects_password_mismatch_without_db_mutation(
 
 @pytest.mark.parametrize("password", ["short7", "x" * 65])
 def test_create_admin_rejects_password_outside_8_to_64_characters(
-    monkeypatch, auth_db, capsys, password
+    monkeypatch, auth_db, session_store, capsys, password
 ):
     _prompt_credentials(monkeypatch, password=password, confirmation=password)
 
-    code = run_manage(["create-admin"], db_session=auth_db)
+    code = run_manage(
+        ["create-admin"],
+        db_session=auth_db,
+        session_store=session_store,
+    )
 
     rendered = capsys.readouterr()
     assert code == 2
@@ -107,7 +155,7 @@ def test_create_admin_rejects_password_outside_8_to_64_characters(
     ],
 )
 def test_create_admin_rejects_password_argv_without_prompt_or_secret_echo(
-    monkeypatch, auth_db, capsys, argv
+    monkeypatch, auth_db, session_store, capsys, argv
 ):
     monkeypatch.setattr(
         "server.manage.input",
@@ -119,7 +167,7 @@ def test_create_admin_rejects_password_argv_without_prompt_or_secret_echo(
     )
 
     with pytest.raises(SystemExit) as exc_info:
-        run_manage(argv, db_session=auth_db)
+        run_manage(argv, db_session=auth_db, session_store=session_store)
 
     rendered = capsys.readouterr()
     assert exc_info.value.code == 2
@@ -128,7 +176,9 @@ def test_create_admin_rejects_password_argv_without_prompt_or_secret_echo(
     assert auth_db.scalar(select(func.count()).select_from(AdminAuditLog)) == 0
 
 
-def test_create_admin_promotes_existing_user_in_place(monkeypatch, auth_db, capsys):
+def test_create_admin_promotes_existing_user_in_place(
+    monkeypatch, auth_db, session_store, capsys
+):
     old_password = "old password"
     user = User(
         id="existing000000000000000000000001",
@@ -139,10 +189,29 @@ def test_create_admin_promotes_existing_user_in_place(monkeypatch, auth_db, caps
     )
     auth_db.add(user)
     auth_db.commit()
+    old_session_id, _ = session_store.create(user.id)
+    events = []
+    real_commit = auth_db.commit
+    real_revoke_all = session_store.revoke_all
+
+    def record_commit():
+        events.append("commit")
+        return real_commit()
+
+    def record_revoke_all(user_id):
+        events.append(("revoke_all", user_id))
+        return real_revoke_all(user_id)
+
+    monkeypatch.setattr(auth_db, "commit", record_commit)
+    monkeypatch.setattr(session_store, "revoke_all", record_revoke_all)
     _prompt_credentials(monkeypatch, password=PASSWORD, confirmation=PASSWORD)
     monkeypatch.setattr("server.manage.input", lambda prompt: " Admin@Example.COM ")
 
-    code = run_manage(["create-admin"], db_session=auth_db)
+    code = run_manage(
+        ["create-admin"],
+        db_session=auth_db,
+        session_store=session_store,
+    )
 
     captured = capsys.readouterr()
     auth_db.expire_all()
@@ -152,6 +221,8 @@ def test_create_admin_promotes_existing_user_in_place(monkeypatch, auth_db, caps
     assert persisted.id == user.id
     assert persisted.role == "admin"
     assert persisted.status == "active"
+    assert events == [("revoke_all", user.id), "commit"]
+    assert session_store.get(old_session_id) is None
     assert verify_password(persisted.password_hash, PASSWORD)
     assert not verify_password(persisted.password_hash, old_password)
     assert auth_db.scalar(select(func.count()).select_from(User)) == 1
@@ -167,7 +238,7 @@ def test_create_admin_promotes_existing_user_in_place(monkeypatch, auth_db, caps
 
 
 def test_create_admin_rolls_back_user_and_audit_on_commit_failure(
-    monkeypatch, auth_db, capsys
+    monkeypatch, auth_db, session_store, capsys
 ):
     old_password = "old password"
     original_hash = hash_password(old_password)
@@ -180,6 +251,7 @@ def test_create_admin_rolls_back_user_and_audit_on_commit_failure(
     )
     auth_db.add(user)
     auth_db.commit()
+    old_session_id, _ = session_store.create(user.id)
     _prompt_credentials(monkeypatch, password=PASSWORD, confirmation=PASSWORD)
 
     def fail_commit():
@@ -187,7 +259,11 @@ def test_create_admin_rolls_back_user_and_audit_on_commit_failure(
 
     monkeypatch.setattr(auth_db, "commit", fail_commit)
 
-    code = run_manage(["create-admin"], db_session=auth_db)
+    code = run_manage(
+        ["create-admin"],
+        db_session=auth_db,
+        session_store=session_store,
+    )
 
     rendered = capsys.readouterr()
     auth_db.expire_all()
@@ -197,6 +273,7 @@ def test_create_admin_rolls_back_user_and_audit_on_commit_failure(
     assert persisted.status == "disabled"
     assert persisted.password_hash == original_hash
     assert auth_db.scalar(select(func.count()).select_from(AdminAuditLog)) == 0
+    assert session_store.get(old_session_id) is None
     assert PASSWORD not in rendered.out + rendered.err
     assert "database-password-leak" not in rendered.out + rendered.err
 
@@ -207,16 +284,18 @@ class _NoUserResult:
 
 
 def test_create_admin_recovers_from_concurrent_duplicate_by_rereading_locked_row(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, session_store
 ):
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'bootstrap.db'}")
     Base.metadata.create_all(engine)
     competitor_id = "competitor0000000000000000000001"
+    competitor_session_id = None
     statements = []
     with Session(engine, expire_on_commit=False) as db:
         real_execute = db.execute
 
         def insert_competitor_after_missing_read(statement, *args, **kwargs):
+            nonlocal competitor_session_id
             statements.append(statement)
             if len(statements) == 1:
                 with Session(engine) as competitor_db:
@@ -230,6 +309,7 @@ def test_create_admin_recovers_from_concurrent_duplicate_by_rereading_locked_row
                         )
                     )
                     competitor_db.commit()
+                competitor_session_id, _ = session_store.create(competitor_id)
                 return _NoUserResult()
             return real_execute(statement, *args, **kwargs)
 
@@ -237,6 +317,7 @@ def test_create_admin_recovers_from_concurrent_duplicate_by_rereading_locked_row
 
         user = bootstrap_admin(
             db=db,
+            session_store=session_store,
             email=" Admin@Example.COM ",
             password=PASSWORD,
         )
@@ -250,12 +331,125 @@ def test_create_admin_recovers_from_concurrent_duplicate_by_rereading_locked_row
         assert len(users) == 1
         assert users[0].id == competitor_id
         assert verify_password(users[0].password_hash, PASSWORD)
+        assert session_store.get(competitor_session_id) is None
         assert len(audits) == 1
         assert audits[0].admin_user_id == competitor_id
         assert audits[0].object_id == competitor_id
         assert json.loads(audits[0].before_json) == {"role": "admin"}
         assert json.loads(audits[0].after_json) == {"role": "admin"}
     engine.dispose()
+
+
+def test_create_admin_revocation_failure_rolls_back_promotion_and_audit(
+    monkeypatch, auth_db, session_store, capsys
+):
+    old_password = "old password"
+    original_hash = hash_password(old_password)
+    user = User(
+        id="revoke0000000000000000000000001",
+        email="admin@example.com",
+        password_hash=original_hash,
+        role="user",
+        status="disabled",
+    )
+    auth_db.add(user)
+    auth_db.commit()
+    old_session_id, _ = session_store.create(user.id)
+    _prompt_credentials(monkeypatch, password=PASSWORD, confirmation=PASSWORD)
+
+    def fail_revocation(user_id):
+        raise RuntimeError("redis-password-leak")
+
+    monkeypatch.setattr(session_store, "revoke_all", fail_revocation)
+
+    code = run_manage(
+        ["create-admin"],
+        db_session=auth_db,
+        session_store=session_store,
+    )
+
+    rendered = capsys.readouterr()
+    auth_db.expire_all()
+    persisted = auth_db.get(User, user.id)
+    assert code == 1
+    assert persisted.role == "user"
+    assert persisted.status == "disabled"
+    assert persisted.password_hash == original_hash
+    assert auth_db.scalar(select(func.count()).select_from(AdminAuditLog)) == 0
+    assert session_store.get(old_session_id) is not None
+    assert "redis-password-leak" not in rendered.out + rendered.err
+    assert PASSWORD not in rendered.out + rendered.err
+
+
+def test_create_admin_rollback_failure_preserves_generic_service_error(
+    monkeypatch, auth_db, session_store
+):
+    from server.app.auth.service import AdminBootstrapFailed
+
+    user = User(
+        id="cleanup000000000000000000000000",
+        email="admin@example.com",
+        password_hash=hash_password("old password"),
+        role="user",
+        status="active",
+    )
+    auth_db.add(user)
+    auth_db.commit()
+
+    def fail_commit():
+        raise RuntimeError("database-password-leak")
+
+    def fail_rollback():
+        raise RuntimeError("rollback-password-leak")
+
+    monkeypatch.setattr(auth_db, "commit", fail_commit)
+    monkeypatch.setattr(auth_db, "rollback", fail_rollback)
+
+    with pytest.raises(AdminBootstrapFailed) as exc_info:
+        bootstrap_admin(
+            db=auth_db,
+            session_store=session_store,
+            email=user.email,
+            password=PASSWORD,
+        )
+
+    assert str(exc_info.value) == "administrator bootstrap could not be completed"
+    assert str(exc_info.value.__cause__) == "database-password-leak"
+    assert "rollback-password-leak" not in str(exc_info.value)
+
+
+def test_module_command_uses_canonical_session_store_for_promotion(
+    monkeypatch,
+    auth_db,
+    auth_redis,
+    auth_settings,
+    session_store,
+):
+    user = User(
+        id="canonical00000000000000000000001",
+        email="admin@example.com",
+        password_hash=hash_password("old password"),
+        role="user",
+        status="active",
+    )
+    auth_db.add(user)
+    auth_db.commit()
+    old_session_id, _ = session_store.create(user.id)
+    _prompt_credentials(monkeypatch, password=PASSWORD, confirmation=PASSWORD)
+    monkeypatch.setattr(
+        "server.app.db.session.SessionLocal",
+        lambda: nullcontext(auth_db),
+    )
+    monkeypatch.setattr(
+        "server.app.core.config.get_settings",
+        lambda: auth_settings,
+    )
+    monkeypatch.setattr("server.app.redis.get_redis", lambda: auth_redis)
+
+    code = run_manage(["create-admin"])
+
+    assert code == 0
+    assert session_store.get(old_session_id) is None
 
 
 def test_set_role_locks_and_audits_before_revoking_target_sessions(
@@ -556,6 +750,37 @@ def test_set_role_database_failure_is_generic_and_does_not_revoke(
     assert session_store.get(target_session_id) is not None
 
 
+def test_set_role_rollback_failure_preserves_generic_service_error(
+    monkeypatch, auth_db, session_store
+):
+    from server.app.auth.dependencies import CurrentUser
+    from server.app.auth.service import RoleChangeFailed, set_role
+
+    actor, target = _insert_role_change_users(auth_db)
+
+    def fail_query(statement):
+        raise RuntimeError("database-password-leak")
+
+    def fail_rollback():
+        raise RuntimeError("rollback-password-leak")
+
+    monkeypatch.setattr(auth_db, "execute", fail_query)
+    monkeypatch.setattr(auth_db, "rollback", fail_rollback)
+
+    with pytest.raises(RoleChangeFailed) as exc_info:
+        set_role(
+            db=auth_db,
+            session_store=session_store,
+            current_user=CurrentUser(id=actor.id, email=actor.email, role="admin"),
+            target_user_id=target.id,
+            role="admin",
+        )
+
+    assert str(exc_info.value) == "role change could not be completed"
+    assert str(exc_info.value.__cause__) == "database-password-leak"
+    assert "rollback-password-leak" not in str(exc_info.value)
+
+
 def test_module_cli_rejects_password_argv_with_nonzero_secret_safe_output():
     secret = "subprocess-password-secret"
 
@@ -580,11 +805,13 @@ def test_audit_ids_are_unique_across_bootstrap_and_role_changes(
 
     first_admin = bootstrap_admin(
         db=auth_db,
+        session_store=session_store,
         email="first-admin@example.com",
         password=PASSWORD,
     )
     second_admin = bootstrap_admin(
         db=auth_db,
+        session_store=session_store,
         email="second-admin@example.com",
         password=PASSWORD,
     )

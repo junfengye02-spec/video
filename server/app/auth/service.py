@@ -163,7 +163,21 @@ def _admin_audit_log(
     )
 
 
-def bootstrap_admin(*, db: Session, email: str, password: str) -> User:
+def _rollback_quietly(db: Session) -> bool:
+    try:
+        db.rollback()
+    except Exception:
+        return False
+    return True
+
+
+def bootstrap_admin(
+    *,
+    db: Session,
+    session_store: SessionStore,
+    email: str,
+    password: str,
+) -> User:
     normalized_email = normalize_email(email)
     password_hash = hash_password(password)
     for attempt in range(2):
@@ -173,6 +187,7 @@ def bootstrap_admin(*, db: Session, email: str, password: str) -> User:
                 .where(User.email == normalized_email)
                 .with_for_update()
             ).scalar_one_or_none()
+            existing_user = user is not None
             before_role = user.role if user is not None else None
             if user is None:
                 user = User(
@@ -196,14 +211,16 @@ def bootstrap_admin(*, db: Session, email: str, password: str) -> User:
                     after_role="admin",
                 )
             )
+            if existing_user:
+                session_store.revoke_all(user.id)
             db.commit()
             return user
         except IntegrityError as exc:
-            db.rollback()
-            if attempt == 1:
+            rollback_succeeded = _rollback_quietly(db)
+            if attempt == 1 or not rollback_succeeded:
                 raise AdminBootstrapFailed from exc
         except Exception as exc:
-            db.rollback()
+            _rollback_quietly(db)
             raise AdminBootstrapFailed from exc
     raise AdminBootstrapFailed
 
@@ -233,10 +250,12 @@ def set_role(
             select(User).where(User.id == target_user_id).with_for_update()
         ).scalar_one_or_none()
         if target is None:
-            db.rollback()
+            if not _rollback_quietly(db):
+                raise RoleChangeFailed from None
             raise RoleChangeRejected
         if target.role == role:
-            db.rollback()
+            if not _rollback_quietly(db):
+                raise RoleChangeFailed from None
         else:
             before_role = target.role
             target.role = role
@@ -250,10 +269,10 @@ def set_role(
                 )
             )
             db.commit()
-    except RoleChangeRejected:
+    except (RoleChangeRejected, RoleChangeFailed):
         raise
     except Exception as exc:
-        db.rollback()
+        _rollback_quietly(db)
         raise RoleChangeFailed from exc
 
     try:

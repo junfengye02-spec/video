@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from server.app.auth.security import normalize_email
 from server.app.auth.service import bootstrap_admin
+from server.app.auth.sessions import SessionStore
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -24,7 +25,11 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_command(args: argparse.Namespace, db: Session) -> int:
+def _run_command(
+    args: argparse.Namespace,
+    db: Session,
+    session_store: SessionStore,
+) -> int:
     if args.command == "create-admin":
         email = normalize_email(input("Admin email: "))
         password = getpass("Password: ")
@@ -36,7 +41,12 @@ def _run_command(args: argparse.Namespace, db: Session) -> int:
             print("Password must be 8-64 characters.", file=sys.stderr)
             return 2
         try:
-            bootstrap_admin(db=db, email=email, password=password)
+            bootstrap_admin(
+                db=db,
+                session_store=session_store,
+                email=email,
+                password=password,
+            )
         except Exception:
             print("Administrator bootstrap could not be completed.", file=sys.stderr)
             return 1
@@ -49,15 +59,22 @@ def run_manage(
     argv: list[str] | None = None,
     *,
     db_session: Session | None = None,
+    session_store: SessionStore | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
-    if db_session is not None:
-        return _run_command(args, db_session)
+    if db_session is not None or session_store is not None:
+        if db_session is None or session_store is None:
+            raise ValueError("database session and session store must be supplied together")
+        return _run_command(args, db_session, session_store)
 
+    from server.app.core.config import get_settings
     from server.app.db.session import SessionLocal
+    from server.app.redis import get_redis
 
+    settings = get_settings()
+    session_store = SessionStore.from_settings(get_redis(), settings)
     with SessionLocal() as db:
-        return _run_command(args, db)
+        return _run_command(args, db, session_store)
 
 
 def main(argv: list[str] | None = None) -> int:
