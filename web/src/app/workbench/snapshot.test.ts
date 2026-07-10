@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { emptyContinuityPlan } from "./snapshot";
+import { createProjectResponse, createShot } from "../../test/fixtures";
+import { emptyContinuityPlan, replaceShotInSnapshot } from "./snapshot";
+
+const snapshot = createProjectResponse();
+const sampleShot = createShot();
+
+describe("replaceShotInSnapshot", () => {
+  it("replaces one shot while preserving project render metadata", () => {
+    const next = replaceShotInSnapshot(snapshot, { ...sampleShot, prompt: "\u65b0\u63d0\u793a\u8bcd" });
+
+    expect(next.storyboard.shots[0].prompt).toBe("\u65b0\u63d0\u793a\u8bcd");
+    expect(next.final_path).toBe(snapshot.final_path);
+    expect(next.render_report).toBe(snapshot.render_report);
+  });
+});
 
 describe("emptyContinuityPlan", () => {
   it("creates the complete single-video continuity shape without an active episode", () => {
@@ -38,4 +52,10 @@ describe("emptyContinuityPlan", () => {
       });
     },
   );
+
+  it("builds a complete empty continuity plan for each project type", () => {
+    expect(emptyContinuityPlan("single_video").active_episode_number).toBeNull();
+    expect(emptyContinuityPlan("mini_series").active_episode_number).toBe(1);
+    expect(emptyContinuityPlan("long_series").series_bible.relationship_map).toEqual([]);
+  });
 });

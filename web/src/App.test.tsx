@@ -1,19 +1,28 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import type {
+  ContinuityPlan,
+  JobEvent,
+  ShortDramaProjectResponse,
+  Shot,
+} from "./domain/types";
 import { getStrings } from "./i18n";
+import { WorkbenchProvider } from "./app/workbench/WorkbenchProvider";
+import { useWorkbench } from "./app/workbench/useWorkbench";
+import { createProjectResponse } from "./test/fixtures";
 
 const apiMocks = vi.hoisted(() => ({
   createDraftProject: vi.fn(),
   createShortDramaProject: vi.fn(),
-  generateAsset: vi.fn(),
   loadLatestProject: vi.fn(),
   loadProject: vi.fn(),
   mediaUrl: vi.fn((path: string | null | undefined, projectId?: string | null) => {
-    if (!path) {
-      return null;
-    }
-    return path.startsWith("/api/") || !projectId ? path : `/api/projects/${projectId}/media/${path}`;
+    if (!path) return null;
+    return path.startsWith("/api/") || !projectId
+      ? path
+      : `/api/projects/${projectId}/media/${path}`;
   }),
   optimizePrompt: vi.fn(),
   regenerateShot: vi.fn(),
@@ -23,1021 +32,557 @@ const apiMocks = vi.hoisted(() => ({
   saveShot: vi.fn(),
   subscribeProjectEvents: vi.fn(),
   uploadReferenceImage: vi.fn(),
-  uploadShotVideo: vi.fn(),
+}));
+
+const localProjectStoreMocks = vi.hoisted(() => ({
+  deleteProject: vi.fn(),
+  listProjectSummaries: vi.fn(),
+  loadProjectSnapshot: vi.fn(),
+  loadRecentProjectSnapshot: vi.fn(),
+  saveProjectSnapshot: vi.fn(),
+  setRecentProjectId: vi.fn(),
+}));
+
+const localMediaStoreMocks = vi.hoisted(() => ({
+  cacheRemoteMedia: vi.fn(),
+  loadMediaBlob: vi.fn(),
+  saveMediaBlob: vi.fn(),
+}));
+
+const localExportMocks = vi.hoisted(() => ({
+  exportProjectBackup: vi.fn(),
+  importProjectBackup: vi.fn(),
+}));
+
+const localStorageEstimateMocks = vi.hoisted(() => ({
+  formatBytes: vi.fn((bytes: number | null) => (bytes === null ? "Unknown" : `${bytes} B`)),
+  getStorageEstimate: vi.fn(),
+}));
+
+const localMediaUrlMocks = vi.hoisted(() => ({
+  resolveLocalMediaUrl: vi.fn(),
+  revokeLocalMediaUrls: vi.fn(),
 }));
 
 vi.mock("./api/client", () => apiMocks);
+vi.mock("./localdb/projectStore", () => localProjectStoreMocks);
+vi.mock("./localdb/mediaStore", () => localMediaStoreMocks);
+vi.mock("./localdb/mediaUrls", () => localMediaUrlMocks);
+vi.mock("./localdb/exportProject", () => localExportMocks);
+vi.mock("./localdb/storageEstimate", () => localStorageEstimateMocks);
 
-const sampleShot = {
-  id: "shot-1",
-  scene_id: "scene-1",
-  index: 1,
-  beat: "Hook",
-  prompt: "Mara in red coat finds the envelope.",
-  characters: ["char-1"],
-  location: "rainy alley",
-  props: ["envelope"],
-  shot_intent: "Reveal the clue.",
-  shot_language: {
-    shot_size: "medium_close",
-    camera_movement: "dolly_in",
-    lighting_key: "neon",
-    depth_of_field: "shallow",
-    color_temperature: "cool",
-  },
-  status: "ready",
-  consistency_score: 100,
-  output_url: null,
-  output_path: null,
-  asset_ids: [],
-  version: 1,
-  history: [],
-};
+const zh = getStrings("zh");
 
-const sampleShot2 = {
-  ...sampleShot,
-  id: "shot-2",
-  index: 2,
-  beat: "Turn",
-  prompt: "Mara spots her boss across the alley.",
-};
-
-const sampleProjectResponse = {
-  project: { id: "p1", title: "Rain Alley", mode: "short_drama" },
-  series_bible: {
+function projectResponse(): ShortDramaProjectResponse {
+  const snapshot = createProjectResponse();
+  snapshot.project = {
+    ...snapshot.project,
+    id: "p1",
     title: "Rain Alley",
-    mode: "short_drama",
-    style_lock: "rainy neon suspense",
-    characters: [
-      {
-        id: "char-1",
-        name: "Mara",
-        role: "lead investigator",
-        visual_lock: "red coat, short hair",
-        voice: null,
-        reference_images: [],
-        locked: true,
-      },
-      {
-        id: "char-2",
-        name: "Jin",
-        role: "boss",
-        visual_lock: "dark trench coat",
-        voice: null,
-        reference_images: [],
-        locked: true,
-      },
-    ],
-    assets: [
-      {
-        id: "asset-char-1",
-        kind: "character",
-        label: "Mara reference",
-        description: "Red coat hero reference",
-        prompt: "Mara red coat hero reference",
-        reference_images: ["assets/images/character/mara.png"],
-        shot_ids: [],
-        version: 1,
-      },
-    ],
-  },
-  storyboard: { shots: [sampleShot, sampleShot2] },
-  consistency_report: { score: 100, issues: [] },
-};
-
-const strings = getStrings("en");
-const originalNavigatorLanguage = navigator.language;
-
-function cloneProjectResponse() {
-  return structuredClone(sampleProjectResponse);
+    project_type: "single_video",
+  };
+  snapshot.storyboard.shots = snapshot.storyboard.shots.map((shot, index) => ({
+    ...shot,
+    id: `shot-${index + 1}`,
+    index: index + 1,
+    prompt: index === 0
+      ? "Mara in a red coat finds the envelope."
+      : "Mara spots her boss across the alley.",
+  }));
+  return snapshot;
 }
 
-function setNavigatorLanguage(language: string) {
-  Object.defineProperty(window.navigator, "language", {
-    configurable: true,
-    value: language,
+function cloneProjectResponse(value = projectResponse()): ShortDramaProjectResponse {
+  return structuredClone(value);
+}
+
+function event(overrides: Partial<JobEvent> = {}): JobEvent {
+  return {
+    id: "event-1",
+    job_id: "job-1",
+    project_id: "p1",
+    stage: "save",
+    status: "complete",
+    message: "Operation complete",
+    created_at: "2026-07-10T08:00:00Z",
+    ...overrides,
+  };
+}
+
+function ProviderHarness() {
+  const workbench = useWorkbench();
+  const [outcome, setOutcome] = useState("idle");
+
+  function run(operation: () => Promise<unknown>) {
+    setOutcome("pending");
+    void operation().then(
+      () => setOutcome("resolved"),
+      () => setOutcome("rejected"),
+    );
+  }
+
+  const firstShot = workbench.snapshot?.storyboard.shots[0] ?? null;
+  const continuityPlan = workbench.snapshot?.continuity_plan ?? null;
+
+  return (
+    <div>
+      <label>
+        Text credential
+        <input
+          value={workbench.providerCredentials.text_key}
+          onChange={(input) => workbench.updateProviderField("text_key", input.target.value)}
+        />
+      </label>
+      <label>
+        Image credential
+        <input
+          value={workbench.providerCredentials.image_key}
+          onChange={(input) => workbench.updateProviderField("image_key", input.target.value)}
+        />
+      </label>
+      <label>
+        Video credential
+        <input
+          value={workbench.providerCredentials.video_key}
+          onChange={(input) => workbench.updateProviderField("video_key", input.target.value)}
+        />
+      </label>
+      <label>
+        Base URL credential
+        <input
+          value={workbench.providerCredentials.base_url}
+          onChange={(input) => workbench.updateProviderField("base_url", input.target.value)}
+        />
+      </label>
+      <button type="button" onClick={() => run(() => workbench.openLocalProject("p1"))}>Open project</button>
+      <button type="button" onClick={() => run(workbench.saveProvider)}>Save provider</button>
+      <button
+        type="button"
+        onClick={() => run(() => workbench.createProject({
+          title: "Rain Alley",
+          prompt: "A letter changes two lives",
+          project_type: "single_video",
+        }))}
+      >Create project</button>
+      <button
+        type="button"
+        disabled={!firstShot}
+        onClick={() => firstShot && run(() => workbench.saveShotChanges(firstShot.id, {
+          prompt: "Mara opens the rain-soaked envelope.",
+        }))}
+      >Save shot</button>
+      <button
+        type="button"
+        disabled={!firstShot}
+        onClick={() => firstShot && run(() => workbench.optimizeShotPrompt(firstShot, firstShot.prompt))}
+      >Optimize shot</button>
+      <button
+        type="button"
+        disabled={!firstShot}
+        onClick={() => firstShot && run(() => workbench.regenerateSelectedShot(firstShot))}
+      >Regenerate shot</button>
+      <button
+        type="button"
+        disabled={!continuityPlan}
+        onClick={() => continuityPlan && run(() => workbench.saveContinuity(continuityPlan))}
+      >Save continuity</button>
+      <button
+        type="button"
+        disabled={!workbench.snapshot}
+        onClick={() => run(() => workbench.uploadReference({
+          kind: "character",
+          label: "Mara reference",
+          description: "Red coat",
+          prompt: "Mara in a red coat",
+          file: new File(["image"], "mara.png", { type: "image/png" }),
+        }))}
+      >Upload reference</button>
+      <button type="button" disabled={!workbench.snapshot} onClick={() => run(workbench.renderFinal)}>Render final</button>
+      <button type="button" disabled={!workbench.snapshot?.final_path} onClick={() => run(workbench.downloadFinal)}>Download final</button>
+      <output data-testid="outcome">{outcome}</output>
+      <output data-testid="project-id">{workbench.snapshot?.project.id ?? ""}</output>
+      <output data-testid="snapshot">{JSON.stringify(workbench.snapshot)}</output>
+      <output data-testid="events">{JSON.stringify(workbench.events)}</output>
+      <output data-testid="error">{workbench.error ?? ""}</output>
+      <output data-testid="final-url">{workbench.finalRenderUrl ?? ""}</output>
+    </div>
+  );
+}
+
+function renderProvider() {
+  return render(
+    <WorkbenchProvider>
+      <ProviderHarness />
+    </WorkbenchProvider>,
+  );
+}
+
+function setCredentials(values: { text?: string; image?: string; video?: string; baseUrl?: string } = {}) {
+  fireEvent.change(screen.getByLabelText("Text credential"), {
+    target: { value: values.text ?? "text-key" },
   });
-}
-
-function enterKeys(
-  videoKey = "video-key",
-  labels = {
-    text: "Text API Key",
-    image: "Image API Key",
-    video: "Video API Key",
-  },
-) {
-  fireEvent.change(screen.getByLabelText(labels.text), { target: { value: "text-key" } });
-  fireEvent.change(screen.getByLabelText(labels.image), { target: { value: "image-key" } });
-  fireEvent.change(screen.getByLabelText(labels.video), { target: { value: videoKey } });
-}
-
-async function createStoryboard(actionName = "Create storyboard") {
-  enterKeys();
-  fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
-    target: { value: "rain-night urban reversal short drama" },
+  fireEvent.change(screen.getByLabelText("Image credential"), {
+    target: { value: values.image ?? "image-key" },
   });
-  fireEvent.click(screen.getByRole("button", { name: actionName }));
-  await waitFor(() => expect(screen.getByRole("button", { name: strings.shotEditor.saveAction })).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Video credential"), {
+    target: { value: values.video ?? "video-key" },
+  });
+  if (values.baseUrl !== undefined) {
+    fireEvent.change(screen.getByLabelText("Base URL credential"), {
+      target: { value: values.baseUrl },
+    });
+  }
 }
 
-describe("App", () => {
-  afterEach(() => {
-    cleanup();
+async function openProject(snapshot = projectResponse()) {
+  localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+    id: snapshot.project.id,
+    title: snapshot.project.title,
+    updatedAt: "2026-07-10T08:00:00Z",
+    snapshot: cloneProjectResponse(snapshot),
   });
+  fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+  await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent(snapshot.project.id));
+}
 
+describe("App workbench integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    window.localStorage.clear();
-    setNavigatorLanguage("en-US");
-    apiMocks.createShortDramaProject.mockResolvedValue(cloneProjectResponse());
-    apiMocks.loadProject.mockResolvedValue(cloneProjectResponse());
-    apiMocks.optimizePrompt.mockResolvedValue({
-      project_id: "p1",
-      model: "gpt-5.5",
-      optimized_text: "Lin in red coat opens the soaked envelope under neon rain.",
-      notes: ["rewritten by text model as structured shot JSON"],
-      shot_intent: "Push into the clue as Lin realizes the betrayal.",
-      shot_language: {
-        shot_size: "close_up",
-        camera_movement: "dolly_in",
-        lens_mm: 85,
-        depth_of_field: "shallow",
-      },
+    window.history.replaceState({}, "", "/projects");
+    Object.defineProperty(window.navigator, "language", {
+      configurable: true,
+      value: "zh-CN",
+    });
+    localProjectStoreMocks.listProjectSummaries.mockResolvedValue([]);
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue(null);
+    localProjectStoreMocks.saveProjectSnapshot.mockResolvedValue(undefined);
+    localProjectStoreMocks.setRecentProjectId.mockResolvedValue(undefined);
+    localStorageEstimateMocks.getStorageEstimate.mockResolvedValue({
+      usageBytes: 2048,
+      quotaBytes: 4096,
+      persisted: false,
+    });
+    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue(null);
+    localMediaUrlMocks.resolveLocalMediaUrl.mockImplementation(
+      (ref: string) => Promise.resolve(`blob:${ref}`),
+    );
+    apiMocks.createShortDramaProject.mockResolvedValue(projectResponse());
+    apiMocks.loadProject.mockResolvedValue(projectResponse());
+    apiMocks.saveGatewayKey.mockResolvedValue({
+      masked_keys: { text: "***text", image: "***image", video: "***video" },
+      provider: "syapi",
+      base_url: "https://example.invalid",
+      models: { text: "text-model", image: "image-model", video: "video-model" },
+      valid: true,
     });
     apiMocks.subscribeProjectEvents.mockReturnValue(vi.fn());
-    apiMocks.saveShot.mockResolvedValue({
-      job_id: "j-save",
-      event: {
-        id: "e-save",
-        job_id: "j-save",
-        project_id: "p1",
-        stage: "save",
-        status: "complete",
-        message: "Shot saved",
-        created_at: "now",
-      },
-      shot: { ...sampleShot, prompt: "Lin pauses under the neon sign.", version: 2 },
-      storyboard: { shots: [{ ...sampleShot, prompt: "Lin pauses under the neon sign.", version: 2 }] },
-      consistency_report: { score: 100, issues: [] },
-    });
   });
 
   afterEach(() => {
-    setNavigatorLanguage(originalNavigatorLanguage);
+    cleanup();
+    vi.restoreAllMocks();
   });
 
-  it("renders the key gate and workbench shell", () => {
-    render(<App />);
-    expect(screen.getByText("OpenMontage Short Drama Workbench")).toBeInTheDocument();
-    expect(screen.getByLabelText("Text API Key")).toBeInTheDocument();
-    expect(screen.getByLabelText("Image API Key")).toBeInTheDocument();
-    expect(screen.getByLabelText("Video API Key")).toBeInTheDocument();
-    expect(screen.getByLabelText("Text Model")).toHaveValue("gpt-5.5");
-    expect(screen.getByLabelText("Image Model")).toHaveValue("gpt-image-2");
-    expect(screen.getByLabelText("Video Model")).toHaveValue("omni_flash-10s");
-    expect(screen.getByRole("button", { name: "Render final video" })).toBeDisabled();
-  });
-
-  it("requires a story prompt before creating a storyboard", async () => {
-    render(<App />);
-    enterKeys();
-
-    fireEvent.click(screen.getByRole("button", { name: strings.chatPanel.createStoryboardAction }));
-
-    expect(await screen.findByText("Enter a story prompt before creating the storyboard.")).toBeInTheDocument();
-    expect(apiMocks.createShortDramaProject).not.toHaveBeenCalled();
-  });
-
-  it("hides series settings for single videos and reveals them for series projects", () => {
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
+  it("uses the routed application entry and opens the provider drawer", async () => {
     render(<App />);
 
-    expect(screen.getByRole("tab", { name: zh.nav.storyboard })).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: zh.nav.series })).not.toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: zh.nav.episodes })).not.toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: zh.nav.resources })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: zh.nav.production })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByLabelText(zh.projectType.miniSeries));
-
-    expect(screen.getByRole("tab", { name: zh.nav.series })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: zh.nav.episodes })).toBeInTheDocument();
-  });
-
-  it("locks the project type after a project is created", async () => {
-    render(<App />);
-    enterKeys();
-    fireEvent.click(screen.getByLabelText(strings.projectType.miniSeries));
-    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: strings.chatPanel.createStoryboardAction }));
-
-    await waitFor(() =>
-      expect(apiMocks.createShortDramaProject).toHaveBeenCalledWith(
-        expect.objectContaining({ project_type: "mini_series" }),
-      ),
-    );
-    expect(screen.getByLabelText(strings.projectType.singleVideo)).toBeDisabled();
-    expect(screen.getByLabelText(strings.projectType.miniSeries)).toBeDisabled();
-    expect(screen.getByLabelText(strings.projectType.longSeries)).toBeDisabled();
-    expect(screen.getByText("Project type is locked after creation.")).toBeInTheDocument();
-  });
-
-  it("shows complete continuity fields for series and episode settings", () => {
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
-    render(<App />);
-    fireEvent.click(screen.getByLabelText(zh.projectType.miniSeries));
-    fireEvent.click(screen.getByRole("tab", { name: zh.nav.series }));
-
-    expect(screen.getByLabelText(zh.continuity.worldview)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.mainArc)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.styleLock)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.visualRules)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.taboos)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.locations)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.relationshipMap)).toBeInTheDocument();
-    expect(screen.getByText(zh.continuity.storyStateTitle)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.characterKnowledge)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.activeForeshadowing)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("tab", { name: zh.nav.episodes }));
-
-    expect(screen.getByRole("button", { name: zh.continuity.addEpisode })).toBeInTheDocument();
-    expect(screen.getByText(zh.continuity.currentProductionEpisode(1))).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: zh.continuity.addEpisode }));
-
-    expect(screen.getByLabelText(zh.continuity.episodeTitle)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.goal)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.conflict)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.twist)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.cliffhanger)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.inheritedState)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.continuity.locked)).toBeInTheDocument();
-  });
-
-  it("keeps character selection framed while aligning it with regular shot fields", async () => {
-    render(<App />);
-    await createStoryboard();
-
-    const characterGroup = screen.getByRole("group", { name: strings.shotEditor.charactersLabel });
-    expect(characterGroup).toHaveClass("character-binding-group");
-    expect(characterGroup).not.toHaveClass("asset-binding-group");
-    expect(characterGroup.querySelector(".character-binding-options")).not.toBeNull();
-  });
-
-  it("shows resource library images from backend reference image paths", async () => {
-    render(<App />);
-    await createStoryboard();
-
-    fireEvent.click(screen.getByRole("tab", { name: strings.nav.resources }));
-
-    const image = screen.getByRole("img", { name: "Mara reference" });
-    expect(apiMocks.mediaUrl).toHaveBeenCalledWith("assets/images/character/mara.png", "p1");
-    expect(image).toHaveAttribute("src", "/api/projects/p1/media/assets/images/character/mara.png");
-  });
-
-  it("localizes key gate and storyboard creation controls for zh-CN browser locales", () => {
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
-    render(<App />);
-
+    expect(await screen.findByRole("heading", { name: zh.projectsPage.title })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "接口配置" }));
     expect(screen.getByLabelText(zh.keyGate.textKeyLabel)).toBeInTheDocument();
     expect(screen.getByLabelText(zh.keyGate.imageKeyLabel)).toBeInTheDocument();
     expect(screen.getByLabelText(zh.keyGate.videoKeyLabel)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.keyGate.textModelLabel)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.keyGate.imageModelLabel)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.keyGate.videoModelLabel)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.keyGate.baseUrlLabel)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: zh.chatPanel.title })).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.chatPanel.projectTitleLabel)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.chatPanel.promptLabel)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: zh.keyGate.useKeysAction })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction })).toBeInTheDocument();
-    expect(screen.getByText(zh.keyGate.keysNotSet)).toBeInTheDocument();
   });
 
-  it("saves shot metadata without provider fields", async () => {
-    render(<App />);
-    await createStoryboard();
-    fireEvent.change(screen.getByLabelText(strings.shotEditor.promptLabel), {
-      target: { value: "Lin pauses under the neon sign." },
+  it("opens only the requested browser-local project and marks it recent", async () => {
+    renderProvider();
+    await openProject();
+
+    expect(localProjectStoreMocks.loadProjectSnapshot).toHaveBeenCalledWith("p1");
+    expect(localProjectStoreMocks.setRecentProjectId).toHaveBeenCalledWith("p1");
+    expect(apiMocks.loadLatestProject).not.toHaveBeenCalled();
+  });
+
+  it("creates and persists a project without sending a shot count", async () => {
+    renderProvider();
+    setCredentials();
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(apiMocks.createShortDramaProject).toHaveBeenCalledWith({
+      title: "Rain Alley",
+      prompt: "A letter changes two lives",
+      project_type: "single_video",
+      text_key: "text-key",
+      image_key: "image-key",
+      video_key: "video-key",
+      base_url: "https://api.0000238.xyz",
+      text_model: "gpt-5.5",
+      image_model: "gpt-image-2",
+      video_model: "omni_flash-10s",
     });
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
-
-    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalled());
-    expect(apiMocks.saveShot).toHaveBeenCalledWith(
-      "p1",
-      sampleShot.id,
-      expect.objectContaining({ prompt: "Lin pauses under the neon sign." }),
+    expect(apiMocks.createShortDramaProject.mock.calls[0]?.[0]).not.toHaveProperty("shot_count");
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ project: expect.objectContaining({ id: "p1" }), final_path: null }),
     );
-    expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty("video_key");
-    expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty("base_url");
-    expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty("video_model");
-    expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
   });
 
-  it("requires an explicit asset save before image-to-video regeneration", async () => {
-    apiMocks.saveShot.mockResolvedValue({
+  it("saves shot metadata, clears render metadata, and propagates rejection", async () => {
+    const updated = projectResponse();
+    updated.storyboard.shots[0] = {
+      ...updated.storyboard.shots[0],
+      prompt: "Mara opens the rain-soaked envelope.",
+      version: 2,
+    };
+    apiMocks.saveShot.mockResolvedValueOnce({
       job_id: "save-job",
-      event: {
-        id: "save-event",
-        job_id: "save-job",
-        project_id: "p1",
-        stage: "save",
-        status: "complete",
-        message: "Shot saved",
-        created_at: "now",
-      },
-      shot: { ...sampleShot, asset_ids: ["asset-char-1"] },
-      storyboard: {
-        shots: [
-          { ...sampleShot, asset_ids: ["asset-char-1"] },
-          sampleShot2,
-        ],
-      },
-      consistency_report: { score: 100, issues: [] },
+      event: event({ id: "save-event" }),
+      shot: updated.storyboard.shots[0],
+      storyboard: updated.storyboard,
+      consistency_report: updated.consistency_report,
     });
+    renderProvider();
+    await openProject();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(apiMocks.saveShot).toHaveBeenCalledWith("p1", "shot-1", {
+      prompt: "Mara opens the rain-soaked envelope.",
+    });
+    expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty("video_key");
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
+      expect.objectContaining({ storyboard: updated.storyboard, render_report: null, final_path: null }),
+    );
+
+    apiMocks.saveShot.mockRejectedValueOnce(new Error("save failed"));
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
+    expect(screen.getByTestId("error")).toHaveTextContent("save failed");
+  });
+
+  it("optimizes with the exact shot payload and the default base URL", async () => {
+    apiMocks.optimizePrompt.mockResolvedValue({
+      project_id: "p1",
+      model: "gpt-5.5",
+      optimized_text: "Optimized shot",
+      notes: [],
+    });
+    renderProvider();
+    await openProject();
+    setCredentials({ baseUrl: "" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Optimize shot" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(apiMocks.optimizePrompt).toHaveBeenCalledWith("p1", {
+      target: "shot",
+      target_id: "shot-1",
+      source_text: "Mara in a red coat finds the envelope.",
+      text_key: "text-key",
+      base_url: "https://api.0000238.xyz",
+      text_model: "gpt-5.5",
+      mode: "shot_json",
+    });
+  });
+
+  it("caches regenerated shot media locally and persists the updated snapshot", async () => {
+    const current = projectResponse();
+    const regeneratedShot: Shot = {
+      ...current.storyboard.shots[0],
+      output_path: "assets/video/shot-1.mp4",
+      output_url: null,
+    };
     apiMocks.regenerateShot.mockResolvedValue({
-      job_id: "regen-job",
-      event: {
-        id: "regen-event",
-        job_id: "regen-job",
-        project_id: "p1",
-        stage: "regenerate",
-        status: "complete",
-        message: "Shot regenerated",
-        created_at: "now",
-      },
-      shot: { ...sampleShot, status: "complete", asset_ids: ["asset-char-1"] },
-      storyboard: { shots: [{ ...sampleShot, status: "complete", asset_ids: ["asset-char-1"] }, sampleShot2] },
-      consistency_report: { score: 100, issues: [] },
-      generation: {
-        operation: "reference_to_video",
-        reference_image_paths: ["assets/images/character/mara.png"],
-        output_path: "assets/video/shot-1.mp4",
-        cost_usd: 0.2,
-      },
-    });
-
-    render(<App />);
-    await createStoryboard();
-
-    expect(screen.getByText("Text-to-video: no saved reference image selected")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("checkbox", { name: /Mara reference/i }));
-    expect(screen.getByText("Image-to-video: 1 reference image selected")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: strings.shotEditor.regenerateAction })).toBeDisabled();
-    expect(screen.getByText(strings.shotEditor.saveBeforeRegenerateHint)).toBeInTheDocument();
-    expect(apiMocks.saveShot).not.toHaveBeenCalled();
-    expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
-
-    await waitFor(() =>
-      expect(apiMocks.saveShot).toHaveBeenCalledWith(
-        "p1",
-        sampleShot.id,
-        expect.objectContaining({ asset_ids: ["asset-char-1"] }),
-      ),
-    );
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: strings.shotEditor.regenerateAction })).toBeEnabled(),
-    );
-    expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.regenerateAction }));
-
-    await waitFor(() => expect(apiMocks.regenerateShot).toHaveBeenCalledTimes(1));
-    expect(apiMocks.saveShot).toHaveBeenCalledTimes(1);
-    expect(apiMocks.saveShot.mock.invocationCallOrder[0]).toBeLessThan(
-      apiMocks.regenerateShot.mock.invocationCallOrder[0],
-    );
-  });
-
-  it("caps the displayed image-to-video reference count at three", async () => {
-    const projectWithManyReferences = cloneProjectResponse();
-    projectWithManyReferences.series_bible.assets[0].reference_images = [
-      "assets/images/character/mara-1.png",
-      "assets/images/character/mara-2.png",
-      "assets/images/character/mara-3.png",
-      "assets/images/character/mara-4.png",
-    ];
-    apiMocks.createShortDramaProject.mockResolvedValue(projectWithManyReferences);
-    apiMocks.loadProject.mockResolvedValue(projectWithManyReferences);
-
-    render(<App />);
-    await createStoryboard();
-
-    fireEvent.click(screen.getByRole("checkbox", { name: /Mara reference/i }));
-
-    expect(screen.getByText("Image-to-video: 3 reference images selected")).toBeInTheDocument();
-  });
-
-  it("keeps regeneration disabled when an explicit save fails", async () => {
-    apiMocks.saveShot.mockRejectedValueOnce(new Error("save exploded"));
-
-    render(<App />);
-    await createStoryboard();
-    fireEvent.change(screen.getByLabelText(strings.shotEditor.promptLabel), {
-      target: { value: "Unsaved prompt" },
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
-
-    expect(await screen.findByText("save exploded")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: strings.shotEditor.regenerateAction })).toBeDisabled();
-    expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
-  });
-
-  it("edits shot language and character bindings with structured controls", async () => {
-    render(<App />);
-    await createStoryboard();
-
-    expect(screen.getByLabelText("Shot size")).toBeInTheDocument();
-    expect(screen.getByLabelText("Camera movement")).toBeInTheDocument();
-    expect(screen.getByLabelText("Shot intent")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getAllByRole("checkbox", { name: /Mara/i })[0]).toBeChecked());
-
-    fireEvent.change(screen.getByLabelText("Shot size"), { target: { value: "close_up" } });
-    fireEvent.change(screen.getByLabelText("Camera movement"), { target: { value: "dolly_in" } });
-    fireEvent.change(screen.getByLabelText("Shot intent"), { target: { value: "Push into Mara's realization." } });
-    fireEvent.click(screen.getByRole("checkbox", { name: /Jin/i }));
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
-
-    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalled());
-    expect(apiMocks.saveShot).toHaveBeenCalledWith(
-      "p1",
-      "shot-1",
-      expect.objectContaining({
-        characters: ["char-1", "char-2"],
-        shot_intent: "Push into Mara's realization.",
-        shot_language: expect.objectContaining({
-          shot_size: "close_up",
-          camera_movement: "dolly_in",
-        }),
-      }),
-    );
-  });
-
-  it("optimizes a shot prompt into prompt, intent, and shot language before save", async () => {
-    render(<App />);
-    await createStoryboard();
-
-    fireEvent.change(screen.getByLabelText(strings.shotEditor.promptLabel), {
-      target: { value: "Lin opens envelope." },
-    });
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.optimizeAction }));
-
-    await waitFor(() => expect(apiMocks.optimizePrompt).toHaveBeenCalledWith(
-      "p1",
-      expect.objectContaining({
-        target: "shot",
-        target_id: "shot-1",
-        source_text: "Lin opens envelope.",
-        mode: "shot_json",
-      }),
-    ));
-    expect(screen.getByLabelText(strings.shotEditor.promptLabel)).toHaveValue(
-      "Lin in red coat opens the soaked envelope under neon rain.",
-    );
-    expect(screen.getByLabelText(strings.shotEditor.intentLabel)).toHaveValue(
-      "Push into the clue as Lin realizes the betrayal.",
-    );
-    expect(screen.getByLabelText(strings.shotEditor.shotSizeLabel)).toHaveValue("close_up");
-    expect(screen.getByLabelText(strings.shotEditor.cameraMovementLabel)).toHaveValue("dolly_in");
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
-
-    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalledWith(
-      "p1",
-      "shot-1",
-      expect.objectContaining({
-        prompt: "Lin in red coat opens the soaked envelope under neon rain.",
-        shot_intent: "Push into the clue as Lin realizes the betrayal.",
-        shot_language: expect.objectContaining({
-          shot_size: "close_up",
-          camera_movement: "dolly_in",
-        }),
-      }),
-    ));
-  });
-
-  it("preserves existing shot language fields when optimize returns only a subset", async () => {
-    apiMocks.optimizePrompt.mockResolvedValueOnce({
-      project_id: "p1",
-      model: "gpt-5.5",
-      optimized_text: "Lin in red coat opens the soaked envelope under neon rain.",
-      notes: ["rewritten by text model as structured shot JSON"],
-      shot_intent: "Push into the clue as Lin realizes the betrayal.",
-      shot_language: {
-        shot_size: "close_up",
-        camera_movement: "dolly_in",
-      },
-    });
-
-    render(<App />);
-    await createStoryboard();
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.optimizeAction }));
-
-    await waitFor(() =>
-      expect(apiMocks.saveShot).not.toHaveBeenCalled(),
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
-
-    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalledWith(
-      "p1",
-      "shot-1",
-      expect.objectContaining({
-        shot_language: expect.objectContaining({
-          shot_size: "close_up",
-          camera_movement: "dolly_in",
-          lighting_key: "neon",
-          depth_of_field: "shallow",
-          color_temperature: "cool",
-        }),
-      }),
-    ));
-  });
-
-  it("preserves newer user-entered shot intent when optimize resolves without shot_intent", async () => {
-    let resolveOptimize: ((value: {
-      project_id: string;
-      model: string;
-      optimized_text: string;
-      notes: string[];
-      shot_language?: { shot_size: "close_up" };
-    }) => void) | undefined;
-
-    apiMocks.optimizePrompt.mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveOptimize = resolve;
-      }),
-    );
-
-    render(<App />);
-    await createStoryboard();
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.optimizeAction }));
-    await waitFor(() => expect(apiMocks.optimizePrompt).toHaveBeenCalled());
-
-    fireEvent.change(screen.getByLabelText(strings.shotEditor.intentLabel), {
-      target: { value: "Hold on Mara as she rethinks the clue." },
-    });
-
-    resolveOptimize?.({
-      project_id: "p1",
-      model: "gpt-5.5",
-      optimized_text: "Lin in red coat opens the soaked envelope under neon rain.",
-      notes: ["rewritten by text model as structured shot JSON"],
-      shot_language: { shot_size: "close_up" },
-    });
-
-    await waitFor(() =>
-      expect(screen.getByLabelText(strings.shotEditor.promptLabel)).toHaveValue(
-        "Lin in red coat opens the soaked envelope under neon rain.",
-      ),
-    );
-    expect(screen.getByLabelText(strings.shotEditor.intentLabel)).toHaveValue(
-      "Hold on Mara as she rethinks the clue.",
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
-
-    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalledWith(
-      "p1",
-      "shot-1",
-      expect.objectContaining({
-        shot_intent: "Hold on Mara as she rethinks the clue.",
-      }),
-    ));
-  });
-
-  it("falls back to the default base URL when shot optimization is triggered with a blank base URL input", async () => {
-    render(<App />);
-    await createStoryboard();
-
-    fireEvent.change(screen.getByLabelText(strings.keyGate.baseUrlLabel), {
-      target: { value: "   " },
-    });
-    fireEvent.change(screen.getByLabelText(strings.shotEditor.promptLabel), {
-      target: { value: "Lin opens envelope." },
-    });
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.optimizeAction }));
-
-    await waitFor(() =>
-      expect(apiMocks.optimizePrompt).toHaveBeenCalledWith(
-        "p1",
-        expect.objectContaining({
-          base_url: "https://api.0000238.xyz",
-          mode: "shot_json",
-        }),
-      ),
-    );
-  });
-
-  it("requires a video key before regenerating a shot", async () => {
-    render(<App />);
-    enterKeys();
-    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
-
-    await screen.findByRole("button", { name: "Regenerate shot 1" });
-    fireEvent.change(screen.getByLabelText("Video API Key"), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate shot 1" }));
-
-    expect(await screen.findByText(strings.errors.missingVideoKeyForRegenerate)).toBeInTheDocument();
-    expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
-  });
-
-  it("renders the regenerate-key error in Chinese for zh-CN browser locales", async () => {
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
-    render(<App />);
-    enterKeys("video-key", {
-      text: zh.keyGate.textKeyLabel,
-      image: zh.keyGate.imageKeyLabel,
-      video: zh.keyGate.videoKeyLabel,
-    });
-    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
-
-    await screen.findByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) });
-    fireEvent.change(screen.getByLabelText(zh.keyGate.videoKeyLabel), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) }));
-
-    expect(await screen.findByText(zh.errors.missingVideoKeyForRegenerate)).toBeInTheDocument();
-    expect(apiMocks.regenerateShot).not.toHaveBeenCalled();
-  });
-
-  it("renders StoryboardWaterfall copy from Chinese i18n for zh-CN browser locales", async () => {
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
-    render(<App />);
-    enterKeys("video-key", {
-      text: zh.keyGate.textKeyLabel,
-      image: zh.keyGate.imageKeyLabel,
-      video: zh.keyGate.videoKeyLabel,
-    });
-    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
-
-    expect(await screen.findByRole("heading", { name: zh.storyboardWaterfall.title })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: zh.storyboardWaterfall.regionLabel })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) })).toBeInTheDocument();
-  });
-
-  it("renders missing required key errors in Chinese for create-storyboard and render flows", async () => {
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
-    render(<App />);
-
-    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
-    expect(await screen.findByText(zh.errors.createStoryboardRequiresKeys)).toBeInTheDocument();
-    expect(apiMocks.createShortDramaProject).not.toHaveBeenCalled();
-
-    enterKeys("video-key", {
-      text: zh.keyGate.textKeyLabel,
-      image: zh.keyGate.imageKeyLabel,
-      video: zh.keyGate.videoKeyLabel,
-    });
-    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
-    await screen.findByRole("button", { name: zh.storyboardWaterfall.regenerateShotLabel(1) });
-
-    fireEvent.change(screen.getByLabelText(zh.keyGate.videoKeyLabel), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: zh.appShell.renderFinalVideoAction }));
-
-    expect(await screen.findByText(zh.errors.missingVideoKeyForRender)).toBeInTheDocument();
-    expect(apiMocks.renderProject).not.toHaveBeenCalled();
-  });
-
-  it("allows render with only a video key after a storyboard exists", async () => {
-    apiMocks.renderProject.mockResolvedValue({
-      job_id: "render-1",
-      event: {
-        id: "event-render-1",
-        job_id: "render-1",
-        project_id: "p1",
-        stage: "render",
-        status: "complete",
-        message: "Rendered",
-        created_at: "now",
-      },
-      project: sampleProjectResponse.project,
-      storyboard: sampleProjectResponse.storyboard,
-      consistency_report: sampleProjectResponse.consistency_report,
-      render_report: {
-        version: "1.0",
-        outputs: [
-          {
-            path: "projects/p1/renders/final.mp4",
-            format: "mp4",
-            resolution: "720x1280",
-            duration_seconds: 25,
-          },
-        ],
-      },
-      final_path: "projects/p1/renders/final.mp4",
-    });
-
-    render(<App />);
-    enterKeys();
-    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
-
-    await screen.findByRole("button", { name: "Render final video" });
-    fireEvent.change(screen.getByLabelText("Text API Key"), { target: { value: "" } });
-    fireEvent.change(screen.getByLabelText("Image API Key"), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: "Render final video" }));
-
-    await waitFor(() =>
-      expect(apiMocks.renderProject).toHaveBeenCalledWith(
-        "p1",
-        expect.objectContaining({ video_key: "video-key" }),
-      ),
-    );
-  });
-
-  it("refreshes project state after render and restores final_path from the loaded snapshot", async () => {
-    apiMocks.renderProject.mockResolvedValue({
-      job_id: "render-1",
-      event: {
-        id: "event-render-1",
-        job_id: "render-1",
-        project_id: "p1",
-        stage: "render",
-        status: "complete",
-        message: "Rendered",
-        created_at: "now",
-      },
-      project: sampleProjectResponse.project,
-      storyboard: sampleProjectResponse.storyboard,
-      consistency_report: sampleProjectResponse.consistency_report,
-      render_report: {
-        version: "1.0",
-        outputs: [],
-      },
-      final_path: "",
-    });
-    apiMocks.loadProject.mockResolvedValue({
-      ...sampleProjectResponse,
-      render_report: {
-        version: "1.0",
-        outputs: [
-          {
-            path: "projects/p1/renders/final.mp4",
-            format: "mp4",
-            resolution: "720x1280",
-            duration_seconds: 25,
-          },
-        ],
-      },
-      final_path: "projects/p1/renders/final.mp4",
-    });
-
-    render(<App />);
-    enterKeys();
-    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
-
-    await screen.findByRole("button", { name: "Render final video" });
-    fireEvent.click(screen.getByRole("button", { name: "Render final video" }));
-
-    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledWith("p1"));
-    expect(await screen.findByText("projects/p1/renders/final.mp4")).toBeInTheDocument();
-  });
-
-  it("keeps successful render results when the follow-up project refresh fails", async () => {
-    apiMocks.renderProject.mockResolvedValue({
-      job_id: "render-1",
-      event: {
-        id: "event-render-1",
-        job_id: "render-1",
-        project_id: "p1",
-        stage: "render",
-        status: "complete",
-        message: "Rendered",
-        created_at: "now",
-      },
-      project: sampleProjectResponse.project,
-      storyboard: sampleProjectResponse.storyboard,
-      consistency_report: sampleProjectResponse.consistency_report,
-      render_report: {
-        version: "1.0",
-        outputs: [
-          {
-            path: "projects/p1/renders/final.mp4",
-            format: "mp4",
-            resolution: "720x1280",
-            duration_seconds: 25,
-          },
-        ],
-      },
-      final_path: "projects/p1/renders/final.mp4",
-    });
-    apiMocks.loadProject.mockRejectedValue(new Error("reload failed"));
-
-    render(<App />);
-    await createStoryboard();
-
-    fireEvent.click(screen.getByRole("button", { name: "Render final video" }));
-
-    expect(await screen.findByText("projects/p1/renders/final.mp4")).toBeInTheDocument();
-    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledWith("p1"));
-    expect(screen.queryByText(strings.errors.renderFallback)).not.toBeInTheDocument();
-    expect(screen.queryByText("reload failed")).not.toBeInTheDocument();
-  });
-
-  it("auto-loads the latest project on mount", async () => {
-    apiMocks.loadLatestProject.mockResolvedValue(cloneProjectResponse());
-
-    render(<App />);
-
-    await waitFor(() => expect(apiMocks.loadLatestProject).toHaveBeenCalled());
-    expect(await screen.findByRole("button", { name: strings.shotEditor.saveAction })).toBeEnabled();
-    expect(screen.getByText("Rain Alley")).toBeInTheDocument();
-  });
-
-  it("localizes storyboard status labels in Chinese while preserving current English labels", async () => {
-    apiMocks.createShortDramaProject.mockResolvedValue({
-      ...sampleProjectResponse,
+      job_id: "regenerate-job",
+      event: event({ id: "regenerate-event", stage: "regenerate" }),
+      shot: regeneratedShot,
       storyboard: {
-        shots: [
-          sampleShot,
-          { ...sampleShot2, status: "generating" },
-          { ...sampleShot2, id: "s3", index: 3, status: "complete" },
-          { ...sampleShot2, id: "s4", index: 4, status: "failed" },
-        ],
+        shots: [regeneratedShot, current.storyboard.shots[1]],
       },
+      consistency_report: current.consistency_report,
     });
+    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/shot-1");
+    renderProvider();
+    await openProject(current);
+    setCredentials();
 
-    render(<App />);
-    enterKeys();
-    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate shot" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(apiMocks.regenerateShot).toHaveBeenCalledWith("p1", "shot-1", {
+      video_key: "video-key",
+      base_url: "https://api.0000238.xyz",
+      video_model: "omni_flash-10s",
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
-
-    expect(await screen.findAllByText("ready")).toHaveLength(1);
-    expect(screen.getAllByText("generating")).toHaveLength(1);
-    expect(screen.getAllByText("complete")).toHaveLength(1);
-    expect(screen.getAllByText("failed")).toHaveLength(1);
-
-    cleanup();
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
-    render(<App />);
-    enterKeys("video-key", {
-      text: zh.keyGate.textKeyLabel,
-      image: zh.keyGate.imageKeyLabel,
-      video: zh.keyGate.videoKeyLabel,
-    });
-    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
-
-    expect(await screen.findAllByText(zh.storyboardWaterfall.statusLabels.ready)).toHaveLength(1);
-    expect(screen.getAllByText(zh.storyboardWaterfall.statusLabels.generating)).toHaveLength(1);
-    expect(screen.getAllByText(zh.storyboardWaterfall.statusLabels.complete)).toHaveLength(1);
-    expect(screen.getAllByText(zh.storyboardWaterfall.statusLabels.failed)).toHaveLength(1);
-    expect(screen.queryByText("ready")).not.toBeInTheDocument();
-    expect(screen.queryByText("generating")).not.toBeInTheDocument();
-    expect(screen.queryByText("complete")).not.toBeInTheDocument();
-    expect(screen.queryByText("failed")).not.toBeInTheDocument();
-  });
-
-  it("starts Chinese project title and prompt fields blank while preserving title fallback", async () => {
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
-    render(<App />);
-
-    expect(screen.getByLabelText(zh.chatPanel.projectTitleLabel)).toHaveValue("");
-    expect(screen.getByLabelText(zh.chatPanel.promptLabel)).toHaveValue("");
-    expect(screen.queryByDisplayValue(zh.appFlow.defaultTitle)).not.toBeInTheDocument();
-    expect(screen.queryByDisplayValue(zh.appFlow.defaultPrompt)).not.toBeInTheDocument();
-
-    enterKeys("video-key", {
-      text: zh.keyGate.textKeyLabel,
-      image: zh.keyGate.imageKeyLabel,
-      video: zh.keyGate.videoKeyLabel,
-    });
-    fireEvent.change(screen.getByLabelText(zh.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: zh.chatPanel.createStoryboardAction }));
-
-    await waitFor(() => expect(apiMocks.createShortDramaProject).toHaveBeenCalled());
-    expect(apiMocks.createShortDramaProject).toHaveBeenCalledWith(
+    expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith(
+      "/api/projects/p1/media/assets/video/shot-1.mp4",
+      { projectId: "p1", sourcePath: "assets/video/shot-1.mp4" },
+    );
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        title: zh.appFlow.untitledProjectTitle,
-        prompt: "rain-night urban reversal short drama",
+        storyboard: expect.objectContaining({
+          shots: expect.arrayContaining([
+            expect.objectContaining({ id: "shot-1", output_path: "local://media/shot-1" }),
+          ]),
+        }),
       }),
     );
   });
 
-  it("provides bilingual shot draft workflow strings", () => {
-    const zh = getStrings("zh");
+  it("saves continuity with the exact plan and persists the refreshed project", async () => {
+    const current = projectResponse();
+    const plan = current.continuity_plan as ContinuityPlan;
+    const refreshed = cloneProjectResponse(current);
+    refreshed.continuity_plan = { ...plan, series_bible: { ...plan.series_bible, worldview: "Updated" } };
+    apiMocks.saveContinuityPlan.mockResolvedValue({
+      project: current.project,
+      continuity_plan: refreshed.continuity_plan,
+    });
+    apiMocks.loadProject.mockResolvedValue(refreshed);
+    renderProvider();
+    await openProject(current);
 
-    expect(strings.shotEditor.promptLabel).toBe("Shot prompt");
-    expect(strings.shotEditor.optimizeAction).toBe("AI optimize prompt");
-    expect(strings.shotEditor.undoOptimizationAction).toBe("Undo optimization");
-    expect(strings.shotEditor.saveAction).toBe("Save changes");
-    expect(strings.shotEditor.regenerateAction).toBe("Regenerate");
-    expect(strings.shotEditor.saveBeforeRegenerateHint).toBe("Save changes first");
-    expect(strings.errors.missingVideoKeyForRegenerate).toBe("Enter a video API key before regenerating a shot.");
-    expect(strings.errors.missingVideoKeyForRender).toBe("Enter a video API key before rendering final video.");
+    fireEvent.click(screen.getByRole("button", { name: "Save continuity" }));
 
-    expect(zh.shotEditor.promptLabel).toBeTruthy();
-    expect(zh.shotEditor.optimizeAction).toBeTruthy();
-    expect(zh.shotEditor.undoOptimizationAction).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(apiMocks.saveContinuityPlan).toHaveBeenCalledWith("p1", plan);
+    expect(apiMocks.loadProject).toHaveBeenCalledWith("p1");
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(refreshed);
+  });
+
+  it("uploads the exact reference payload and persists the refreshed project", async () => {
+    const current = projectResponse();
+    const refreshed = cloneProjectResponse(current);
+    refreshed.series_bible.assets = [
+      ...(refreshed.series_bible.assets ?? []),
+      {
+        id: "asset-uploaded",
+        kind: "character",
+        label: "Mara reference",
+        reference_images: ["assets/images/mara.png"],
+      },
+    ];
+    apiMocks.uploadReferenceImage.mockResolvedValue({
+      media: {
+        path: "assets/images/mara.png",
+        media_url: "/api/projects/p1/media/assets/images/mara.png",
+        filename: "mara.png",
+        content_type: "image/png",
+      },
+      asset: refreshed.series_bible.assets[refreshed.series_bible.assets.length - 1],
+    });
+    apiMocks.loadProject.mockResolvedValue(refreshed);
+    renderProvider();
+    await openProject(current);
+
+    fireEvent.click(screen.getByRole("button", { name: "Upload reference" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(apiMocks.uploadReferenceImage).toHaveBeenCalledWith("p1", expect.objectContaining({
+      kind: "character",
+      label: "Mara reference",
+      description: "Red coat",
+      prompt: "Mara in a red coat",
+      file: expect.any(File),
+    }));
+    expect(apiMocks.loadProject).toHaveBeenCalledWith("p1");
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(refreshed);
+  });
+
+  it("caches final render media locally and keeps the render response without reloading", async () => {
+    const current = projectResponse();
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-job",
+      event: event({ id: "render-event", stage: "render" }),
+      project: current.project,
+      storyboard: current.storyboard,
+      consistency_report: current.consistency_report,
+      render_report: {
+        version: "1.0",
+        outputs: [{
+          path: "renders/final.mp4",
+          format: "mp4",
+          resolution: "720x1280",
+          duration_seconds: 25,
+        }],
+      },
+      final_path: "renders/final.mp4",
+    });
+    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/final-1");
+    renderProvider();
+    await openProject(current);
+    setCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: "Render final" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(apiMocks.renderProject).toHaveBeenCalledWith("p1", {
+      video_key: "video-key",
+      base_url: "https://api.0000238.xyz",
+      video_model: "omni_flash-10s",
+      render_runtime: "ffmpeg",
+    });
+    expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith(
+      "/api/projects/p1/media/renders/final.mp4",
+      { projectId: "p1", sourcePath: "renders/final.mp4" },
+    );
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
+      expect.objectContaining({ final_path: "local://media/final-1" }),
+    );
+    expect(apiMocks.loadProject).not.toHaveBeenCalled();
+  });
+
+  it("resolves and downloads a browser-local final video", async () => {
+    const current = projectResponse();
+    current.final_path = "local://media/final-1";
+    localMediaStoreMocks.loadMediaBlob.mockResolvedValue(
+      new Blob(["final-video"], { type: "video/mp4" }),
+    );
+    const createObjectUrl = vi.fn(() => "blob:download-final");
+    const revokeObjectUrl = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectUrl });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectUrl });
+    const click = vi.fn();
+    const originalCreateElement = document.createElement.bind(document);
+    const createElement = vi.spyOn(document, "createElement").mockImplementation((tagName, options) => {
+      const element = originalCreateElement(tagName, options);
+      if (tagName.toLowerCase() === "a") element.click = click;
+      return element;
+    });
+    renderProvider();
+    await openProject(current);
+
+    await waitFor(() => expect(localMediaUrlMocks.resolveLocalMediaUrl).toHaveBeenCalledWith("local://media/final-1"));
+    expect(screen.getByTestId("final-url")).toHaveTextContent("blob:local://media/final-1");
+    fireEvent.click(screen.getByRole("button", { name: "Download final" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(localMediaStoreMocks.loadMediaBlob).toHaveBeenCalledWith("local://media/final-1");
+    const link = createElement.mock.results.find((result) => result.value instanceof HTMLAnchorElement)
+      ?.value as HTMLAnchorElement;
+    expect(link.download).toBe("Rain Alley-final.mp4");
+    expect(click).toHaveBeenCalled();
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:download-final");
+  });
+
+  it("deduplicates subscribed project events", async () => {
+    renderProvider();
+    await openProject();
+    await waitFor(() => expect(apiMocks.subscribeProjectEvents).toHaveBeenCalledWith("p1", expect.any(Function)));
+    const onEvent = apiMocks.subscribeProjectEvents.mock.calls[0]?.[1] as (next: JobEvent) => void;
+    const next = event({ id: "duplicate-event", message: "Rendering final video" });
+
+    onEvent(next);
+    onEvent({ ...next, created_at: "2026-07-10T08:00:01Z" });
+
+    await waitFor(() => expect(JSON.parse(screen.getByTestId("events").textContent ?? "[]")).toHaveLength(1));
+    expect(screen.getByTestId("events")).toHaveTextContent("Rendering final video");
+  });
+
+  it("keeps bilingual shot workflow strings available", () => {
+    const en = getStrings("en");
+    expect(en.shotEditor.saveAction).toBe("Save changes");
+    expect(en.shotEditor.regenerateAction).toBe("Regenerate");
     expect(zh.shotEditor.saveAction).toBeTruthy();
     expect(zh.shotEditor.regenerateAction).toBeTruthy();
-    expect(zh.shotEditor.saveBeforeRegenerateHint).toBeTruthy();
-    expect(zh.errors.missingVideoKeyForRegenerate).toBeTruthy();
-    expect(zh.errors.missingVideoKeyForRender).toBeTruthy();
-  });
-
-  it("does not render the Chinese seeded project title as a placeholder", () => {
-    setNavigatorLanguage("zh-CN");
-    const zh = getStrings("zh");
-
-    render(<App />);
-
-    expect(screen.getByLabelText(zh.chatPanel.projectTitleLabel)).not.toHaveAttribute("placeholder");
-  });
-
-  it("subscribes to project events after storyboard creation and appends only unique events", async () => {
-    render(<App />);
-    enterKeys();
-    fireEvent.change(screen.getByLabelText(strings.chatPanel.promptLabel), {
-      target: { value: "rain-night urban reversal short drama" },
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Create storyboard" }));
-
-    await waitFor(() =>
-      expect(apiMocks.subscribeProjectEvents).toHaveBeenCalledWith("p1", expect.any(Function)),
-    );
-
-    const onEvent = apiMocks.subscribeProjectEvents.mock.calls[0]?.[1] as (event: {
-      id: string;
-      job_id: string;
-      project_id: string;
-      stage: string;
-      status: string;
-      message: string;
-      created_at: string;
-    }) => void;
-
-    onEvent({
-      id: "event-1",
-      job_id: "job-1",
-      project_id: "p1",
-      stage: "render",
-      status: "running",
-      message: "Rendering final video",
-      created_at: "2026-07-03T00:00:00Z",
-    });
-    onEvent({
-      id: "event-1",
-      job_id: "job-1",
-      project_id: "p1",
-      stage: "render",
-      status: "running",
-      message: "Rendering final video",
-      created_at: "2026-07-03T00:00:01Z",
-    });
-
-    expect(await screen.findByText("Rendering final video")).toBeInTheDocument();
-    expect(screen.getAllByText("Rendering final video")).toHaveLength(1);
   });
 });

@@ -1,4 +1,22 @@
-import type { ContinuityPlan, ProjectType } from "../../domain/types";
+import type {
+  ContinuityPlan,
+  ProjectType,
+  ShortDramaProjectResponse,
+  Shot,
+} from "../../domain/types";
+
+export function replaceShotInSnapshot(
+  snapshot: ShortDramaProjectResponse,
+  shot: Shot,
+): ShortDramaProjectResponse {
+  return {
+    ...snapshot,
+    storyboard: {
+      ...snapshot.storyboard,
+      shots: snapshot.storyboard.shots.map((item) => (item.id === shot.id ? shot : item)),
+    },
+  };
+}
 
 export function emptyContinuityPlan(projectType: ProjectType): ContinuityPlan {
   return {
