@@ -1,10 +1,21 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getStrings } from "../i18n";
 import { createContinuityPlan } from "../test/fixtures";
 import { GlobalSettingsPage } from "./GlobalSettingsPage";
 
 const singleVideoPlan = createContinuityPlan("single_video");
 const seriesPlan = createContinuityPlan("mini_series");
+
+function createDeferred() {
+  let resolve!: () => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = () => resolvePromise();
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
 
 afterEach(() => {
   cleanup();
@@ -19,6 +30,71 @@ describe("GlobalSettingsPage", () => {
     expect(screen.getByRole("heading", { name: "角色与关系" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "分集规划" })).not.toBeInTheDocument();
     expect(screen.getByText("只影响后续优化和生成，不会修改已完成分镜")).toBeInTheDocument();
+  });
+
+  it("uses injected locale strings for both the page and continuity editor", () => {
+    const strings = getStrings("en");
+    render(
+      <GlobalSettingsPage
+        plan={createContinuityPlan("single_video")}
+        saving={false}
+        strings={strings}
+        onSave={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Global Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Story Core" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Characters and Relationships" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Worldview")).toBeInTheDocument();
+    expect(screen.getByText(strings.globalSettings.notice)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save global settings" })).toBeInTheDocument();
+  });
+
+  it("preserves raw line-list typing while focused and saves normalized lines", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <GlobalSettingsPage
+        plan={createContinuityPlan("single_video")}
+        saving={false}
+        onSave={onSave}
+      />,
+    );
+    const taboos = screen.getByLabelText("禁忌");
+
+    fireEvent.focus(taboos);
+    fireEvent.change(taboos, { target: { value: "第一条" } });
+    fireEvent.change(taboos, { target: { value: "第一条\n" } });
+    expect(taboos).toHaveValue("第一条\n");
+
+    fireEvent.change(taboos, { target: { value: "第一条\n  第二条  " } });
+    expect(taboos).toHaveValue("第一条\n  第二条  ");
+    fireEvent.blur(taboos);
+    expect(taboos).toHaveValue("第一条\n第二条");
+
+    fireEvent.click(screen.getByRole("button", { name: "保存全局设定" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].series_bible.taboos).toEqual(["第一条", "第二条"]);
+  });
+
+  it("resets focused line-list text when a different plan prop arrives", async () => {
+    const firstPlan = createContinuityPlan("single_video");
+    const nextPlan = createContinuityPlan("single_video");
+    firstPlan.series_bible.taboos = ["旧设定"];
+    nextPlan.series_bible.taboos = ["新设定一", "新设定二"];
+    const { rerender } = render(
+      <GlobalSettingsPage plan={firstPlan} saving={false} onSave={vi.fn()} />,
+    );
+    const taboos = screen.getByLabelText("禁忌");
+
+    fireEvent.focus(taboos);
+    fireEvent.change(taboos, { target: { value: "未完成草稿\n" } });
+    expect(taboos).toHaveValue("未完成草稿\n");
+
+    rerender(<GlobalSettingsPage plan={nextPlan} saving={false} onSave={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByLabelText("禁忌")).toHaveValue("新设定一\n新设定二"));
+    expect(screen.getByRole("button", { name: "保存全局设定" })).toBeDisabled();
   });
 
   it("shows and saves episode planning for a series", async () => {
@@ -120,6 +196,60 @@ describe("GlobalSettingsPage", () => {
 
     await waitFor(() => expect(screen.getByLabelText("世界观")).toHaveValue("新项目世界观"));
     expect(screen.getByRole("heading", { name: "分集规划" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存全局设定" })).toBeDisabled();
+  });
+
+  it("ignores an older save success after a different plan prop arrives", async () => {
+    const deferred = createDeferred();
+    const onSave = vi.fn().mockReturnValue(deferred.promise);
+    const firstPlan = createContinuityPlan("single_video");
+    const nextPlan = createContinuityPlan("single_video");
+    nextPlan.series_bible.worldview = "新项目世界观";
+    const { rerender } = render(
+      <GlobalSettingsPage plan={firstPlan} saving={false} onSave={onSave} />,
+    );
+
+    fireEvent.change(screen.getByLabelText("世界观"), { target: { value: "旧项目待保存草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存全局设定" }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+
+    rerender(<GlobalSettingsPage plan={nextPlan} saving={false} onSave={onSave} />);
+    await waitFor(() => expect(screen.getByLabelText("世界观")).toHaveValue("新项目世界观"));
+
+    await act(async () => {
+      deferred.resolve();
+      await deferred.promise;
+    });
+
+    expect(screen.getByLabelText("世界观")).toHaveValue("新项目世界观");
+    expect(screen.getByRole("button", { name: "保存全局设定" })).toBeDisabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("ignores an older save rejection after a different plan prop arrives", async () => {
+    const deferred = createDeferred();
+    const onSave = vi.fn().mockReturnValue(deferred.promise);
+    const firstPlan = createContinuityPlan("single_video");
+    const nextPlan = createContinuityPlan("long_series");
+    nextPlan.series_bible.main_arc = "新项目主线";
+    const { rerender } = render(
+      <GlobalSettingsPage plan={firstPlan} saving={false} onSave={onSave} />,
+    );
+
+    fireEvent.change(screen.getByLabelText("主线"), { target: { value: "旧项目待保存主线" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存全局设定" }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+
+    rerender(<GlobalSettingsPage plan={nextPlan} saving={false} onSave={onSave} />);
+    await waitFor(() => expect(screen.getByLabelText("主线")).toHaveValue("新项目主线"));
+
+    await act(async () => {
+      deferred.reject(new Error("旧项目保存失败"));
+      await deferred.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByLabelText("主线")).toHaveValue("新项目主线");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存全局设定" })).toBeDisabled();
   });
 

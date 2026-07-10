@@ -1,8 +1,13 @@
+import { useEffect, useRef, useState } from "react";
 import type { ContinuityPlan, EpisodeOutlineItem } from "../../domain/types";
-import { getStrings } from "../../i18n";
+import type { UIStrings } from "../../i18n";
+
+export type ContinuityEditorStrings = Pick<UIStrings, "continuity" | "globalSettings">;
 
 export interface ContinuityEditorProps {
   plan: ContinuityPlan;
+  resetVersion: number;
+  strings: ContinuityEditorStrings;
   onChange: (plan: ContinuityPlan) => void;
 }
 
@@ -15,6 +20,50 @@ function splitLines(value: string): string[] {
 
 function joinLines(value: string[]): string {
   return value.join("\n");
+}
+
+function LineListTextarea({
+  resetVersion,
+  value,
+  onChange,
+}: {
+  resetVersion: number;
+  value: string[];
+  onChange: (value: string[]) => void;
+}) {
+  const joinedValue = joinLines(value);
+  const [rawValue, setRawValue] = useState(joinedValue);
+  const focusedRef = useRef(false);
+  const joinedValueRef = useRef(joinedValue);
+  joinedValueRef.current = joinedValue;
+
+  useEffect(() => {
+    if (!focusedRef.current) {
+      setRawValue(joinedValue);
+    }
+  }, [joinedValue]);
+
+  useEffect(() => {
+    setRawValue(joinedValueRef.current);
+  }, [resetVersion]);
+
+  return (
+    <textarea
+      rows={3}
+      value={rawValue}
+      onFocus={() => {
+        focusedRef.current = true;
+      }}
+      onChange={(event) => {
+        setRawValue(event.target.value);
+        onChange(splitLines(event.target.value));
+      }}
+      onBlur={() => {
+        focusedRef.current = false;
+        setRawValue(joinedValue);
+      }}
+    />
+  );
 }
 
 function createEpisode(index: number): EpisodeOutlineItem {
@@ -30,8 +79,7 @@ function createEpisode(index: number): EpisodeOutlineItem {
   };
 }
 
-export function ContinuityEditor({ plan, onChange }: ContinuityEditorProps) {
-  const strings = getStrings("zh");
+export function ContinuityEditor({ plan, resetVersion, strings, onChange }: ContinuityEditorProps) {
   const labels = strings.continuity;
   const groups = strings.globalSettings;
   const isSeries = plan.project_type !== "single_video";
@@ -122,10 +170,10 @@ export function ContinuityEditor({ plan, onChange }: ContinuityEditorProps) {
           </label>
           <label>
             <span>{labels.taboos}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.series_bible.taboos)}
-              onChange={(event) => updateSeriesBible("taboos", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.series_bible.taboos}
+              onChange={(value) => updateSeriesBible("taboos", value)}
             />
           </label>
         </div>
@@ -136,34 +184,34 @@ export function ContinuityEditor({ plan, onChange }: ContinuityEditorProps) {
         <div className="continuity-grid">
           <label>
             <span>{labels.relationshipMap}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.series_bible.relationship_map)}
-              onChange={(event) => updateSeriesBible("relationship_map", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.series_bible.relationship_map}
+              onChange={(value) => updateSeriesBible("relationship_map", value)}
             />
           </label>
           <label>
             <span>{labels.characterKnowledge}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.story_state.character_knowledge)}
-              onChange={(event) => updateStoryState("character_knowledge", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.story_state.character_knowledge}
+              onChange={(value) => updateStoryState("character_knowledge", value)}
             />
           </label>
           <label>
             <span>{labels.characterStatus}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.story_state.character_status)}
-              onChange={(event) => updateStoryState("character_status", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.story_state.character_status}
+              onChange={(value) => updateStoryState("character_status", value)}
             />
           </label>
           <label>
             <span>{labels.relationshipChanges}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.story_state.relationship_changes)}
-              onChange={(event) => updateStoryState("relationship_changes", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.story_state.relationship_changes}
+              onChange={(value) => updateStoryState("relationship_changes", value)}
             />
           </label>
         </div>
@@ -174,50 +222,50 @@ export function ContinuityEditor({ plan, onChange }: ContinuityEditorProps) {
         <div className="continuity-grid">
           <label>
             <span>{labels.activeForeshadowing}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.story_state.active_foreshadowing)}
-              onChange={(event) => updateStoryState("active_foreshadowing", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.story_state.active_foreshadowing}
+              onChange={(value) => updateStoryState("active_foreshadowing", value)}
             />
           </label>
           <label>
             <span>{labels.resolvedForeshadowing}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.story_state.resolved_foreshadowing)}
-              onChange={(event) => updateStoryState("resolved_foreshadowing", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.story_state.resolved_foreshadowing}
+              onChange={(value) => updateStoryState("resolved_foreshadowing", value)}
             />
           </label>
           <label>
             <span>{labels.propState}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.story_state.prop_state)}
-              onChange={(event) => updateStoryState("prop_state", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.story_state.prop_state}
+              onChange={(value) => updateStoryState("prop_state", value)}
             />
           </label>
           <label>
             <span>{labels.currentLocations}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.story_state.current_locations)}
-              onChange={(event) => updateStoryState("current_locations", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.story_state.current_locations}
+              onChange={(value) => updateStoryState("current_locations", value)}
             />
           </label>
           <label>
             <span>{labels.locations}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.series_bible.locations)}
-              onChange={(event) => updateSeriesBible("locations", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.series_bible.locations}
+              onChange={(value) => updateSeriesBible("locations", value)}
             />
           </label>
           <label>
             <span>{labels.props}</span>
-            <textarea
-              rows={3}
-              value={joinLines(plan.series_bible.props)}
-              onChange={(event) => updateSeriesBible("props", splitLines(event.target.value))}
+            <LineListTextarea
+              resetVersion={resetVersion}
+              value={plan.series_bible.props}
+              onChange={(value) => updateSeriesBible("props", value)}
             />
           </label>
         </div>
@@ -293,12 +341,10 @@ export function ContinuityEditor({ plan, onChange }: ContinuityEditorProps) {
                   </label>
                   <label>
                     <span>{episodeLabel(episode.episode_number, labels.inheritedState)}</span>
-                    <textarea
-                      rows={3}
-                      value={joinLines(episode.inherited_state)}
-                      onChange={(event) => updateEpisode(episode.episode_number, {
-                        inherited_state: splitLines(event.target.value),
-                      })}
+                    <LineListTextarea
+                      resetVersion={resetVersion}
+                      value={episode.inherited_state}
+                      onChange={(value) => updateEpisode(episode.episode_number, { inherited_state: value })}
                     />
                   </label>
                   <label className="checkbox-row">
