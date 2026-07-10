@@ -17,7 +17,7 @@ pytest_plugins = ["server.tests.conftest_auth"]
 from server.app.auth.models import User
 from server.app.auth.security import hash_password, verify_password
 from server.app.auth.sessions import SessionStore
-from server.app.auth.verification import VerificationStore
+from server.app.auth.verification import InvalidCode, VerificationStore
 
 
 AUTH_ORIGIN = "https://studio.example.com"
@@ -438,6 +438,53 @@ def test_password_reset_request_is_neutral_and_enumeration_resistant(
     assert mailer.messages == [("reset", EMAIL, mailer.messages[0][2])]
 
 
+def test_reset_request_cannot_create_a_verification_route_account_oracle(
+    auth_client,
+    auth_db,
+    auth_redis,
+    auth_settings,
+    mailer,
+):
+    _insert_user(auth_db)
+    _bootstrap(auth_client)
+    emails = (EMAIL, "missing@example.com")
+
+    reset_requests = [
+        auth_client.post("/api/auth/password-reset/request", json={"email": email})
+        for email in emails
+    ]
+    verification_requests = [
+        auth_client.post("/api/auth/email-verifications", json={"email": email})
+        for email in emails
+    ]
+
+    neutral = {"detail": "If the account can be reset, a code has been sent"}
+    limited = {"detail": "Verification request rate limited"}
+    assert [response.status_code for response in reset_requests] == [202, 202]
+    assert [response.json() for response in reset_requests] == [neutral, neutral]
+    assert [response.status_code for response in verification_requests] == [429, 429]
+    assert [response.json() for response in verification_requests] == [limited, limited]
+    for email in emails:
+        assert auth_redis.exists(
+            f"{auth_settings.redis_prefix}verification:reset:{email}"
+        )
+        assert auth_redis.get(
+            f"{auth_settings.redis_prefix}verification:resend:{email}"
+        ) == "1"
+        email_rate_keys = list(
+            auth_redis.scan_iter(
+                match=(
+                    f"{auth_settings.redis_prefix}verification:rate:email:{email}:*"
+                )
+            )
+        )
+        assert len(email_rate_keys) == 1
+        assert auth_redis.get(email_rate_keys[0]) == "1"
+    assert [(purpose, email) for purpose, email, _ in mailer.messages] == [
+        ("reset", EMAIL)
+    ]
+
+
 def test_password_reset_schedules_same_background_shape_without_capturing_db(
     auth_db, verification_store, mailer
 ):
@@ -507,6 +554,51 @@ def test_password_reset_delivery_failure_cannot_change_neutral_response(
     expected = {"detail": "If the account can be reset, a code has been sent"}
     assert existing.status_code == missing.status_code == 202
     assert existing.json() == missing.json() == expected
+
+
+def test_password_reset_revocation_failure_rolls_back_hash_and_returns_generic_error(
+    auth_client,
+    auth_app,
+    auth_db,
+    verification_store,
+    session_store,
+):
+    from server.app.auth.router import get_session_store
+
+    class FailingRevocationStore:
+        def revoke_all(self, user_id: str) -> None:
+            raise RuntimeError("redis unavailable")
+
+    user = _insert_user(auth_db)
+    original_hash = user.password_hash
+    _bootstrap(auth_client)
+    login = auth_client.post(
+        "/api/auth/login", json={"email": EMAIL, "password": PASSWORD}
+    )
+    assert login.status_code == 200
+    auth_client.headers.update({"X-CSRF-Token": login.json()["csrf_token"]})
+    session_id = auth_client.cookies.get("om_session")
+    code = verification_store.issue(EMAIL, purpose="reset", source_ip="reset-ip")
+    auth_app.dependency_overrides[get_session_store] = FailingRevocationStore
+
+    response = auth_client.post(
+        "/api/auth/password-reset/confirm",
+        json={"email": EMAIL, "code": code, "new_password": NEW_PASSWORD},
+    )
+
+    auth_db.expire_all()
+    persisted = auth_db.get(User, user.id)
+    assert persisted.password_hash == original_hash
+    assert verify_password(persisted.password_hash, PASSWORD)
+    assert not verify_password(persisted.password_hash, NEW_PASSWORD)
+    assert session_store.get(session_id) is not None
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Password reset could not be completed"}
+    assert code not in response.text
+    assert EMAIL not in response.text
+    assert NEW_PASSWORD not in response.text
+    with pytest.raises(InvalidCode):
+        verification_store.consume(EMAIL, code, purpose="reset")
 
 
 def test_password_reset_is_one_time_changes_hash_and_revokes_all_sessions(
@@ -696,10 +788,17 @@ class _LockingSession:
 
 
 class _LockAwareSessionStore:
-    def __init__(self, delegate: SessionStore, shared: _SharedRow, login_db: _LockingSession):
+    def __init__(
+        self,
+        delegate: SessionStore,
+        shared: _SharedRow,
+        login_db: _LockingSession,
+        reset_db: _LockingSession,
+    ):
         self.delegate = delegate
         self.shared = shared
         self.login_db = login_db
+        self.reset_db = reset_db
         self.session_issued = Event()
 
     def rotate(self, session_id: str, user_id: str):
@@ -713,7 +812,8 @@ class _LockAwareSessionStore:
         self.delegate.revoke(session_id)
 
     def revoke_all(self, user_id: str) -> None:
-        assert not self.shared.lock.locked()
+        assert self.reset_db.holds_lock
+        assert self.shared.lock.locked()
         self.shared.events.append("reset:revoke_all")
         self.delegate.revoke_all(user_id)
 
@@ -745,7 +845,6 @@ def test_old_credential_login_cannot_survive_concurrent_password_reset(
     release_login = Event()
     reset_done = Event()
     login_db = _LockingSession(shared, "login")
-    tracked_sessions = _LockAwareSessionStore(sessions, shared, login_db)
 
     def reset_acquired_lock():
         assert tracked_sessions.session_issued.is_set()
@@ -755,6 +854,12 @@ def test_old_credential_login_cannot_survive_concurrent_password_reset(
         "reset",
         before_lock=reset_attempted_lock.set,
         after_lock=reset_acquired_lock,
+    )
+    tracked_sessions = _LockAwareSessionStore(
+        sessions,
+        shared,
+        login_db,
+        reset_db,
     )
     real_verify = service.verify_password
 
@@ -807,8 +912,8 @@ def test_old_credential_login_cannot_survive_concurrent_password_reset(
     assert shared.events == [
         "login:rotate",
         "login:commit",
-        "reset:commit",
         "reset:revoke_all",
+        "reset:commit",
     ]
     assert sessions.get(login_result.session_id) is None
     assert verify_password(user.password_hash, NEW_PASSWORD)

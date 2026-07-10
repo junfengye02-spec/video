@@ -66,6 +66,10 @@ class InvalidResetCode(AuthServiceError):
     pass
 
 
+class PasswordResetFailed(AuthServiceError):
+    pass
+
+
 class SessionIssuanceFailed(AuthServiceError):
     pass
 
@@ -212,15 +216,14 @@ def request_password_reset(
     source_ip: str,
     account_exists: bool,
 ) -> None:
-    if not account_exists:
-        return
     try:
         code = verification_store.issue(
             email,
             purpose="reset",
             source_ip=source_ip,
         )
-        mailer.send_password_reset(email, code)
+        if account_exists:
+            mailer.send_password_reset(email, code)
     except Exception:
         return
 
@@ -249,8 +252,8 @@ def reset_password(
 
     user.password_hash = hash_password(new_password)
     try:
+        session_store.revoke_all(user.id)
         db.commit()
-    except Exception:
+    except Exception as exc:
         db.rollback()
-        raise
-    session_store.revoke_all(user.id)
+        raise PasswordResetFailed from exc

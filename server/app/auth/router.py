@@ -29,6 +29,7 @@ from server.app.auth.service import (
     InvalidResetCode,
     LoginRateLimited,
     LoginRateLimiter,
+    PasswordResetFailed,
     RegistrationConflict,
     SessionIssuanceFailed,
     authenticate_user,
@@ -345,5 +346,10 @@ def confirm_password_reset(
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired reset code",
+        ) from exc
+    except PasswordResetFailed as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Password reset could not be completed",
         ) from exc
     _clear_session_cookie(response, settings)
