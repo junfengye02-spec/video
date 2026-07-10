@@ -93,7 +93,8 @@ FastAPI 仍是唯一面向 OpenMontage 前端的业务 API。后台执行器与 
 
 - 在模型调用前冻结用户额度。
 - 保存任务使用的全局倍率快照。
-- 保存 NewAPI `request_id` 或 `task_id`。
+- 每次 NewAPI 上游调用创建一个独立可计费子任务，并保存自己的 `request_id` 或 `task_id`。
+- 用非计费父任务聚合一次多分镜渲染，不把多个上游调用压成一个 provider reference。
 - 获取最终成本回执并执行成功扣款或失败释放。
 - 对超时、退款失败和回执缺失建立后台对账项。
 
@@ -289,6 +290,14 @@ user_charge_units   = ceil(provider_cost_micro * multiplier_bps / 10_000)
 -> 等待最终回执
 ```
 
+`generation_job` 的粒度必须严格等于一次 NewAPI 上游调用。一次最终渲染可能遍历多个缺少视频的分镜并调用多次 `run_single_shot_generation()`，因此采用父子任务：
+
+- 最终渲染创建一个不计费的父任务，只跟踪批次进度、合成状态和最终成片。
+- 每个文本、图片或单分镜视频调用创建一个可计费子任务，拥有独立的倍率快照、`wallet_hold`、Token 类型和 provider reference。
+- 已有视频且未触发上游调用的分镜不创建计费子任务；本地 FFmpeg 合成不产生 NewAPI 成本。
+- 成功子任务按自己的最终回执结算并保留成果；失败子任务扣费为 0 并只释放自己的冻结。
+- 父任务的成功、部分失败或失败状态由子任务和合成结果聚合，不作为钱包扣费依据。
+
 可用余额定义为账面余额减活动冻结。冻结金额来自受控的模型/参数成本上限，并包含倍率快照；前端显示“预计最多消耗”，不把冻结显示为已消费。
 
 冻结上限必须可解释且不可为零：
@@ -334,7 +343,8 @@ NewAPI 任务失败
 
 ### 8.6 幂等性
 
-- `generation_jobs` 对 provider reference 建唯一约束。
+- `generation_jobs` 使用可空 `parent_job_id` 建立父子关系；只有可计费子任务能关联 `wallet_hold` 和 provider reference。
+- `generation_jobs` 对 `(provider_reference_type, provider_reference_id)` 建部分唯一约束，父任务不填 provider reference。
 - 钱包流水对 `idempotency_key` 建唯一约束。
 - 同一任务重复轮询、重复回执和后台重试只能结算一次。
 - 支付订单对商户订单号建唯一约束。
@@ -380,10 +390,10 @@ NewAPI 任务失败
 | `projects` | 分阶段增加 `owner_user_id` 外键和索引，历史无归属项目不可公开访问 |
 | `wallet_accounts` | `user_id` 唯一、余额缓存、版本号 |
 | `wallet_entries` | 有符号金额、余额快照、来源、唯一幂等键、不可修改 |
-| `wallet_holds` | `job_id` 唯一、冻结额、状态、过期时间 |
+| `wallet_holds` | 可计费 `job_id` 唯一、冻结额、状态、过期时间 |
 | `topup_products` | 人民币分、入账额度、启用状态、排序 |
 | `payment_orders` | 用户、产品快照、商户单号唯一、金额、状态、支付方式、完成时间 |
-| `generation_jobs` | 用户、项目、能力、Token 类型、provider reference、冻结和结算状态 |
+| `generation_jobs` | 用户、项目、可空父任务、任务类型、能力、Token 类型、provider reference、倍率快照、冻结和结算状态；一次上游调用一个可计费子任务 |
 | `cost_receipts` | reference 唯一、状态、quota、单位快照、原始回执哈希 |
 | `billing_settings` | 单例全局倍率、版本、更新时间 |
 | `billing_reconciliations` | 回执缺失、上游退款失败、估算超限等人工处理项 |
@@ -551,4 +561,5 @@ POST /api/admin/billing-reconciliations/{id}/retry
 7. 管理员修改全局倍率只影响新任务并留下审计记录。
 8. 异步视频失败、退款或退款待确认时，用户最终扣费为 0，冻结额度释放。
 9. 任何重试、重复回调或服务重启都不会重复充值、扣款或退款。
-10. 登录、支付、成功扣费、失败释放和管理员对账的单元、集成与端到端测试通过。
+10. 多分镜渲染为每次 NewAPI 调用创建独立计费子任务；部分失败只释放失败分镜的冻结，不影响成功分镜的正确结算。
+11. 登录、支付、成功扣费、失败释放和管理员对账的单元、集成与端到端测试通过。
