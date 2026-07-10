@@ -1,5 +1,5 @@
 import { List, PanelRight } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ShotEditor } from "../components/ShotEditor";
 import { ShotList } from "../components/storyboard/ShotList";
 import { ShotOrderStrip } from "../components/storyboard/ShotOrderStrip";
@@ -32,6 +32,35 @@ export interface StoryboardPageProps {
 }
 
 type StoryboardView = "list" | "preview" | "inspector";
+const TABLET_MEDIA_QUERY = "(min-width: 768px) and (max-width: 1179px)";
+const FOCUSABLE_CONTROL_SELECTOR = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[href]",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function useTabletViewport(): boolean {
+  const [matches, setMatches] = useState(() => (
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(TABLET_MEDIA_QUERY).matches
+      : false
+  ));
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+
+    const mediaQuery = window.matchMedia(TABLET_MEDIA_QUERY);
+    const updateMatch = () => setMatches(mediaQuery.matches);
+    updateMatch();
+    mediaQuery.addEventListener("change", updateMatch);
+    return () => mediaQuery.removeEventListener("change", updateMatch);
+  }, []);
+
+  return matches;
+}
 
 export function StoryboardPage({
   assets,
@@ -54,6 +83,11 @@ export function StoryboardPage({
   const selectedShot = ordered.find((shot) => shot.id === selectedShotId) ?? ordered[0] ?? null;
   const [dirty, setDirty] = useState(false);
   const [activeView, setActiveView] = useState<StoryboardView>("preview");
+  const isTabletViewport = useTabletViewport();
+  const listPanelRef = useRef<HTMLElement>(null);
+  const inspectorPanelRef = useRef<HTMLElement>(null);
+  const listOpenerRef = useRef<HTMLButtonElement>(null);
+  const inspectorOpenerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -74,6 +108,20 @@ export function StoryboardPage({
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [dirty]);
 
+  useEffect(() => {
+    if (!isTabletViewport || activeView === "preview") return;
+
+    let cancelled = false;
+    window.queueMicrotask(() => {
+      if (cancelled) return;
+      const panel = activeView === "list" ? listPanelRef.current : inspectorPanelRef.current;
+      panel?.querySelector<HTMLElement>(FOCUSABLE_CONTROL_SELECTOR)?.focus();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeView, isTabletViewport]);
+
   const selectShot = (shotId: string) => {
     if (shotId === selectedShot?.id) {
       return;
@@ -86,6 +134,18 @@ export function StoryboardPage({
 
   const toggleTabletPanel = (view: Exclude<StoryboardView, "preview">) => {
     setActiveView((current) => current === view ? "preview" : view);
+  };
+
+  const handleTabletPanelKeyDown = (
+    event: KeyboardEvent<HTMLElement>,
+    view: Exclude<StoryboardView, "preview">,
+  ) => {
+    if (!isTabletViewport || activeView !== view || event.key !== "Escape") return;
+
+    event.preventDefault();
+    setActiveView("preview");
+    const openerRef = view === "list" ? listOpenerRef : inspectorOpenerRef;
+    window.queueMicrotask(() => openerRef.current?.focus());
   };
 
   return (
@@ -124,6 +184,7 @@ export function StoryboardPage({
         aria-label={strings.storyboardPage.tabletPanelsLabel}
       >
         <button
+          ref={listOpenerRef}
           type="button"
           aria-label={strings.storyboardPage.openShotListLabel}
           aria-pressed={activeView === "list"}
@@ -133,6 +194,7 @@ export function StoryboardPage({
           {strings.storyboardPage.shotListLabel}
         </button>
         <button
+          ref={inspectorOpenerRef}
           type="button"
           aria-label={strings.storyboardPage.openInspectorLabel}
           aria-pressed={activeView === "inspector"}
@@ -145,9 +207,12 @@ export function StoryboardPage({
 
       <div className={`storyboard-list-panel${activeView === "list" ? " is-panel-open" : ""}`}>
         <ShotList
+          modal={isTabletViewport && activeView === "list"}
+          panelRef={listPanelRef}
           shots={ordered}
           selectedShotId={selectedShot?.id ?? null}
           onSelect={selectShot}
+          onPanelKeyDown={(event) => handleTabletPanelKeyDown(event, "list")}
         />
       </div>
       <div className={`storyboard-stage${activeView === "preview" ? " is-panel-open" : ""}`}>
@@ -165,7 +230,9 @@ export function StoryboardPage({
         <ShotEditor
           assets={assets}
           characters={characters}
+          modal={isTabletViewport && activeView === "inspector"}
           optimizing={optimizingShotId === selectedShot?.id}
+          panelRef={inspectorPanelRef}
           regenerating={regeneratingShotId === selectedShot?.id}
           saving={savingShotId === selectedShot?.id}
           shot={selectedShot}
@@ -174,6 +241,7 @@ export function StoryboardPage({
             regionLabel: strings.storyboardPage.inspectorLabel,
           }}
           onDirtyChange={setDirty}
+          onPanelKeyDown={(event) => handleTabletPanelKeyDown(event, "inspector")}
           onOptimizePrompt={onOptimizePrompt}
           onSaveShot={onSaveShot}
           onRegenerateShot={onRegenerateShot}

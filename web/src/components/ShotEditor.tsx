@@ -1,5 +1,5 @@
 import { Check, Images, RefreshCw, Sparkles, Undo2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEventHandler, type Ref } from "react";
 import type { AssetRecord, Character, PromptOptimizeResponse, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
 import type { UIStrings } from "../i18n";
 import {
@@ -14,7 +14,9 @@ import {
 export interface ShotEditorProps {
   assets: AssetRecord[];
   characters: Character[];
+  modal?: boolean;
   optimizing: boolean;
+  panelRef?: Ref<HTMLElement>;
   regenerating: boolean;
   shot: Shot | null;
   saving: boolean;
@@ -23,6 +25,7 @@ export interface ShotEditorProps {
   onRegenerateShot: (shot: Shot) => Promise<void>;
   onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
+  onPanelKeyDown?: KeyboardEventHandler<HTMLElement>;
 }
 
 const SHOT_SIZES = [
@@ -84,12 +87,15 @@ function splitList(value: string): string[] {
 export function ShotEditor({
   assets,
   characters,
+  modal = false,
   optimizing,
+  panelRef,
   regenerating,
   shot,
   saving,
   strings,
   onDirtyChange,
+  onPanelKeyDown,
   onOptimizePrompt,
   onRegenerateShot,
   onSaveShot,
@@ -141,7 +147,14 @@ export function ShotEditor({
   }, [draftIsDirty, onDirtyChange]);
 
   return (
-    <section className="storyboard-panel shot-editor" aria-label={strings.regionLabel}>
+    <section
+      ref={panelRef}
+      className="storyboard-panel shot-editor"
+      role={modal ? "dialog" : undefined}
+      aria-modal={modal ? "true" : undefined}
+      aria-label={strings.regionLabel}
+      onKeyDown={onPanelKeyDown}
+    >
       <div className="section-heading">
         <h2>{strings.title}</h2>
         {shot ? <span>{shot.id}</span> : null}

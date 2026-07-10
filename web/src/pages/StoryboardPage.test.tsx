@@ -5,6 +5,7 @@ import { createProjectResponse } from "../test/fixtures";
 import { StoryboardPage, type StoryboardPageProps } from "./StoryboardPage";
 
 const project = createProjectResponse({ shotCount: 2 });
+const tabletMediaQuery = "(min-width: 768px) and (max-width: 1179px)";
 const storyboardProps: StoryboardPageProps = {
   assets: project.series_bible.assets ?? [],
   characters: project.series_bible.characters,
@@ -26,6 +27,19 @@ const storyboardProps: StoryboardPageProps = {
   onRegenerateShot: vi.fn().mockResolvedValue(undefined),
 };
 
+function useTabletViewport() {
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+    matches: query === tabletMediaQuery,
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(() => true),
+  } satisfies MediaQueryList)));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -33,6 +47,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("StoryboardPage", () => {
@@ -75,6 +90,7 @@ describe("StoryboardPage", () => {
     fireEvent.change(prompt, { target: { value: "切换后仍保留的草稿" } });
     fireEvent.click(listTab);
 
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "分镜列表" }).closest(".storyboard-list-panel"))
       .toHaveClass("is-panel-open");
     expect(screen.getByRole("region", { name: "分镜检查器" }).closest(".storyboard-inspector-panel"))
@@ -82,26 +98,56 @@ describe("StoryboardPage", () => {
 
     fireEvent.click(inspectorTab);
 
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(inspectorTab).toHaveAttribute("aria-selected", "true");
     expect(screen.getByLabelText("分镜提示词")).toBe(prompt);
     expect(screen.getByLabelText("分镜提示词")).toHaveValue("切换后仍保留的草稿");
   });
 
-  it("opens the tablet list and inspector panels separately", () => {
+  it("opens the tablet shot list as a named modal and restores its opener on Escape", async () => {
+    useTabletViewport();
     render(<StoryboardPage {...storyboardProps} />);
 
     const controls = screen.getByRole("group", { name: "分镜侧栏" });
-    fireEvent.click(within(controls).getByRole("button", { name: "打开分镜列表" }));
-    expect(screen.getByRole("navigation", { name: "分镜列表" }).closest(".storyboard-list-panel"))
-      .toHaveClass("is-panel-open");
-    expect(screen.getByRole("region", { name: "分镜检查器" }).closest(".storyboard-inspector-panel"))
-      .not.toHaveClass("is-panel-open");
+    const opener = within(controls).getByRole("button", { name: "打开分镜列表" });
+    opener.focus();
+    fireEvent.click(opener);
 
-    fireEvent.click(within(controls).getByRole("button", { name: "打开分镜检查器" }));
-    expect(screen.getByRole("navigation", { name: "分镜列表" }).closest(".storyboard-list-panel"))
-      .not.toHaveClass("is-panel-open");
-    expect(screen.getByRole("region", { name: "分镜检查器" }).closest(".storyboard-inspector-panel"))
-      .toHaveClass("is-panel-open");
+    const dialog = screen.getByRole("dialog", { name: "分镜列表" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    await waitFor(() => {
+      expect(within(dialog).getByRole("button", { name: "选择分镜 1" })).toHaveFocus();
+    });
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "分镜列表" })).not.toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "分镜列表" })).toBeInTheDocument();
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it("opens only the tablet inspector modal and restores its opener on Escape", async () => {
+    useTabletViewport();
+    render(<StoryboardPage {...storyboardProps} />);
+
+    const controls = screen.getByRole("group", { name: "分镜侧栏" });
+    const listOpener = within(controls).getByRole("button", { name: "打开分镜列表" });
+    const inspectorOpener = within(controls).getByRole("button", { name: "打开分镜检查器" });
+    fireEvent.click(listOpener);
+    fireEvent.click(inspectorOpener);
+
+    const dialog = screen.getByRole("dialog", { name: "分镜检查器" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.queryByRole("dialog", { name: "分镜列表" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    await waitFor(() => expect(within(dialog).getByLabelText("分镜提示词")).toHaveFocus());
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "分镜检查器" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "分镜检查器" })).toBeInTheDocument();
+    await waitFor(() => expect(inspectorOpener).toHaveFocus());
   });
 
   it("renders visible shot status text and stable async editor actions", () => {

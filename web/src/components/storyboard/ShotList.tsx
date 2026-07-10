@@ -1,17 +1,35 @@
+import type { KeyboardEventHandler, Ref } from "react";
 import type { Shot } from "../../domain/types";
 import { getStrings } from "../../i18n";
 
 export interface ShotListProps {
+  modal?: boolean;
+  panelRef?: Ref<HTMLElement>;
   shots: Shot[];
   selectedShotId: string | null;
   onSelect: (shotId: string) => void;
+  onPanelKeyDown?: KeyboardEventHandler<HTMLElement>;
 }
 
-export function ShotList({ shots, selectedShotId, onSelect }: ShotListProps) {
+export function ShotList({
+  modal = false,
+  panelRef,
+  shots,
+  selectedShotId,
+  onSelect,
+  onPanelKeyDown,
+}: ShotListProps) {
   const strings = getStrings("zh");
 
   return (
-    <nav className="storyboard-shot-list" aria-label={strings.storyboardPage.shotListLabel}>
+    <nav
+      ref={panelRef}
+      className="storyboard-shot-list"
+      role={modal ? "dialog" : undefined}
+      aria-modal={modal ? "true" : undefined}
+      aria-label={strings.storyboardPage.shotListLabel}
+      onKeyDown={onPanelKeyDown}
+    >
       <div className="section-heading">
         <h2>{strings.storyboardPage.shotListLabel}</h2>
       </div>
