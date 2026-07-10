@@ -28,7 +28,7 @@ export function ConsistencyPanel({
         <ul className="issue-list">
           {report.issues.map((issue, index) => (
             <li
-              key={`${issue.code}-${issue.shot_id ?? index}`}
+              key={`${issue.code}-${issue.shot_id ?? "report"}-${index}`}
               aria-label={`${strings.severityLabels[issue.severity]} ${issue.code}: ${issue.message}`}
               data-severity={issue.severity}
             >

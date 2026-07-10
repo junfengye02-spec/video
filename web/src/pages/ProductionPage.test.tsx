@@ -216,6 +216,47 @@ describe("ProductionPage", () => {
     expect(issue).toHaveAttribute("data-severity", "error");
   });
 
+  it("preserves issues that share backend identity without duplicate key warnings", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      render(
+        <ConsistencyPanel
+          report={{
+            score: 60,
+            issues: [
+              {
+                shot_id: "shot_001",
+                severity: "warning",
+                code: "missing_visual_lock",
+                message: "First valid issue",
+              },
+              {
+                shot_id: "shot_001",
+                severity: "warning",
+                code: "missing_visual_lock",
+                message: "Second valid issue",
+              },
+            ],
+          }}
+        />,
+      );
+
+      expect(screen.getByText("First valid issue")).toBeInTheDocument();
+      expect(screen.getByText("Second valid issue")).toBeInTheDocument();
+      expect(
+        consoleError.mock.calls.filter((call) =>
+          call.some(
+            (value) => typeof value === "string"
+              && value.includes("Encountered two children with the same key"),
+          ),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("passes typed owner strings through the localized child panels", () => {
     const english = getStrings("en").production;
     render(
