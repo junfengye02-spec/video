@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from redis import Redis
 from sqlalchemy import select
@@ -9,11 +11,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server.app.auth.mailer import Mailer
-from server.app.auth.models import User
+from server.app.auth.models import AdminAuditLog, User
 from server.app.auth.provisioning import UserProvisioner
 from server.app.auth.security import hash_password, normalize_email, verify_password
 from server.app.auth.sessions import SessionStore
 from server.app.auth.verification import InvalidCode, VerificationStore
+
+if TYPE_CHECKING:
+    from server.app.auth.dependencies import CurrentUser
 
 
 LOGIN_WINDOW_SECONDS = 15 * 60
@@ -74,6 +79,21 @@ class SessionIssuanceFailed(AuthServiceError):
     pass
 
 
+class AdminBootstrapFailed(AuthServiceError):
+    def __init__(self):
+        super().__init__("administrator bootstrap could not be completed")
+
+
+class RoleChangeRejected(AuthServiceError):
+    def __init__(self):
+        super().__init__("role change is not permitted")
+
+
+class RoleChangeFailed(AuthServiceError):
+    def __init__(self):
+        super().__init__("role change could not be completed")
+
+
 class LoginRateLimited(AuthServiceError):
     def __init__(self, scope: str):
         self.scope = scope
@@ -117,6 +137,130 @@ class LoginRateLimiter:
 
     def _ip_key(self, source_ip: str) -> str:
         return f"{self._prefix}login:rate:ip:{source_ip}"
+
+
+def _role_json(role: str | None) -> str:
+    return json.dumps({"role": role}, sort_keys=True, separators=(",", ":"))
+
+
+def _admin_audit_log(
+    *,
+    actor_id: str,
+    action: str,
+    target_id: str,
+    before_role: str | None,
+    after_role: str,
+) -> AdminAuditLog:
+    return AdminAuditLog(
+        id=uuid.uuid4().hex,
+        admin_user_id=actor_id,
+        action=action,
+        object_type="user",
+        object_id=target_id,
+        before_json=_role_json(before_role),
+        after_json=_role_json(after_role),
+        ip_address=None,
+    )
+
+
+def bootstrap_admin(*, db: Session, email: str, password: str) -> User:
+    normalized_email = normalize_email(email)
+    password_hash = hash_password(password)
+    for attempt in range(2):
+        try:
+            user = db.execute(
+                select(User)
+                .where(User.email == normalized_email)
+                .with_for_update()
+            ).scalar_one_or_none()
+            before_role = user.role if user is not None else None
+            if user is None:
+                user = User(
+                    id=uuid.uuid4().hex,
+                    email=normalized_email,
+                    password_hash=password_hash,
+                    role="admin",
+                    status="active",
+                )
+                db.add(user)
+            else:
+                user.password_hash = password_hash
+                user.role = "admin"
+                user.status = "active"
+            db.add(
+                _admin_audit_log(
+                    actor_id=user.id,
+                    action="admin.bootstrap",
+                    target_id=user.id,
+                    before_role=before_role,
+                    after_role="admin",
+                )
+            )
+            db.commit()
+            return user
+        except IntegrityError as exc:
+            db.rollback()
+            if attempt == 1:
+                raise AdminBootstrapFailed from exc
+        except Exception as exc:
+            db.rollback()
+            raise AdminBootstrapFailed from exc
+    raise AdminBootstrapFailed
+
+
+def set_role(
+    *,
+    db: Session,
+    session_store: SessionStore,
+    current_user: CurrentUser,
+    target_user_id: str,
+    role: str,
+) -> User:
+    actor_id = getattr(current_user, "id", None)
+    if (
+        getattr(current_user, "role", None) != "admin"
+        or not isinstance(actor_id, str)
+        or not actor_id
+    ):
+        raise RoleChangeRejected
+    if role not in {"user", "admin"}:
+        raise RoleChangeRejected
+    if not isinstance(target_user_id, str) or not target_user_id:
+        raise RoleChangeRejected
+
+    try:
+        target = db.execute(
+            select(User).where(User.id == target_user_id).with_for_update()
+        ).scalar_one_or_none()
+        if target is None:
+            db.rollback()
+            raise RoleChangeRejected
+        if target.role == role:
+            db.rollback()
+        else:
+            before_role = target.role
+            target.role = role
+            db.add(
+                _admin_audit_log(
+                    actor_id=actor_id,
+                    action="admin.set_role",
+                    target_id=target.id,
+                    before_role=before_role,
+                    after_role=role,
+                )
+            )
+            db.commit()
+    except RoleChangeRejected:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise RoleChangeFailed from exc
+
+    try:
+        session_store.revoke_all(target_user_id)
+    except Exception as exc:
+        raise RoleChangeFailed from exc
+    return target
 
 
 def register_user(
