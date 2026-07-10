@@ -112,7 +112,9 @@ FastAPI 仍是唯一面向 OpenMontage 前端的业务 API。后台执行器与 
 ### 5.1 注册流程
 
 ```text
-用户输入邮箱
+打开登录或注册页
+-> GET /api/auth/csrf 创建匿名 Session 并返回 CSRF Token
+-> 用户输入邮箱
 -> POST /api/auth/email-verifications
 -> Redis 保存验证码哈希、用途、发送时间、失败次数，TTL 10 分钟
 -> 用户提交邮箱、验证码、密码
@@ -202,15 +204,18 @@ Token 轮换时先禁用旧 Token，等所有引用旧 Token 的任务完成对�
 
 ### 7.1 接口
 
-新增两个 Token 范围内的只读接口：
+新增三个 Token 范围内的只读接口：
 
 ```text
+GET /api/usage/pricing/model/{model}
 GET /api/usage/receipt/request/{request_id}
 GET /api/usage/receipt/task/{task_id}
 Authorization: Bearer <发起原请求的同一个 Token>
 ```
 
 同步文本和图片使用 `request_id`；异步视频使用 `task_id`。接口必须验证日志或任务的 `token_id` 与鉴权 Token 相同。
+
+定价接口只返回该普通 Token 的固定分组下、指定模型的可解释定价快照、`quota_per_unit` 和定价版本，不返回其他 Token、用户或渠道信息。`auto` 分组、缺失定价和 OpenMontage 尚不能安全计算上限的动态表达式定价必须返回不可估价；OpenMontage 随即拒绝创建付费任务，不使用猜测价格建立冻结。
 
 ### 7.2 回执状态
 
@@ -406,6 +411,7 @@ Session、验证码和限流状态只存 Redis，不进入业务数据库明文�
 ### 11.1 登录
 
 ```text
+GET  /api/auth/csrf
 POST /api/auth/email-verifications
 POST /api/auth/register
 POST /api/auth/login
