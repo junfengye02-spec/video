@@ -47,6 +47,7 @@ export function ResourceLibraryPage({
   const [bindingError, setBindingError] = useState<string | null>(null);
   const [uploadPending, setUploadPending] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const operationPending = binding || uploadPending || uploading;
 
   const filteredAssets = useMemo(
     () => filterAssets(assets, { kind, query }),
@@ -61,18 +62,27 @@ export function ResourceLibraryPage({
     : null;
 
   const openDetail = (assetId: string) => {
+    if (operationPending) {
+      return;
+    }
     setBindingError(null);
     setUploadError(null);
     setPanel({ mode: "detail", assetId });
   };
 
   const openUpload = () => {
+    if (operationPending) {
+      return;
+    }
     setBindingError(null);
     setUploadError(null);
     setPanel({ mode: "upload" });
   };
 
   const closePanel = () => {
+    if (operationPending) {
+      return;
+    }
     setPanel({ mode: "closed" });
     setBindingError(null);
     setUploadError(null);
@@ -80,7 +90,7 @@ export function ResourceLibraryPage({
 
   const handleBind = async (bind: boolean) => {
     if (
-      binding
+      operationPending
       || panel.mode !== "detail"
       || !currentShotId
       || !shots.some((shot) => shot.id === currentShotId)
@@ -101,7 +111,7 @@ export function ResourceLibraryPage({
   };
 
   const handleUpload = async (payload: ReferenceImageUploadRequest) => {
-    if (uploading || uploadPending) {
+    if (operationPending) {
       return;
     }
 
@@ -122,7 +132,7 @@ export function ResourceLibraryPage({
       <div className="section-heading">
         <Boxes aria-hidden="true" size={18} />
         <h1 id="resource-library-title">{strings.title}</h1>
-        <button type="button" onClick={openUpload}>
+        <button type="button" disabled={operationPending} onClick={openUpload}>
           <Upload aria-hidden="true" size={16} />
           {strings.uploadResourceAction}
         </button>
@@ -155,7 +165,13 @@ export function ResourceLibraryPage({
         </label>
       </div>
 
-      <AssetGrid assets={filteredAssets} shots={shots} strings={strings} onSelect={openDetail} />
+      <AssetGrid
+        assets={filteredAssets}
+        disabled={operationPending}
+        shots={shots}
+        strings={strings}
+        onSelect={openDetail}
+      />
 
       {selectedAsset ? (
         <AssetDetailDrawer
@@ -164,6 +180,7 @@ export function ResourceLibraryPage({
           bindingError={bindingError}
           consistencyReport={consistencyReport}
           currentShotId={currentShotId}
+          panelLocked={operationPending}
           shots={shots}
           strings={strings}
           onBind={(bind) => void handleBind(bind)}
@@ -173,7 +190,7 @@ export function ResourceLibraryPage({
 
       {panel.mode === "upload" ? (
         <AssetUploadDrawer
-          busy={uploading || uploadPending}
+          busy={operationPending}
           error={uploadError}
           strings={strings}
           onClose={closePanel}

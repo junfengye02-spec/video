@@ -14,6 +14,14 @@ const resourceProps: ResourceLibraryPageProps = {
   onBindAsset: vi.fn().mockResolvedValue(undefined),
   onUploadReferenceImage: vi.fn().mockResolvedValue(undefined),
 };
+const secondaryAsset: AssetRecord = {
+  id: "prop-envelope",
+  kind: "prop",
+  label: "信封",
+  description: "雨夜发现的密封信件",
+  prompt: "红色火漆封口",
+  reference_images: [],
+};
 
 function createDeferred() {
   let resolve!: () => void;
@@ -102,12 +110,56 @@ describe("ResourceLibraryPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看资源 玛拉" }));
     fireEvent.click(screen.getByRole("button", { name: "绑定到当前分镜" }));
 
-    expect(screen.getByRole("button", { name: "正在绑定" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在更新绑定" })).toBeDisabled();
     deferred.reject(new Error("绑定请求被拒绝"));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("绑定请求被拒绝");
     expect(screen.getByRole("dialog", { name: "资源详情" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "绑定到当前分镜" })).toBeEnabled();
+  });
+
+  it("keeps a pending unbind anchored to its asset and gates every panel transition", async () => {
+    const deferred = createDeferred();
+    const onBindAsset = vi.fn().mockReturnValue(deferred.promise);
+    const shots = resourceProps.shots.map((shot) => (
+      shot.id === "shot-1" ? { ...shot, asset_ids: ["asset-char-1"] } : shot
+    ));
+    render(
+      <ResourceLibraryPage
+        {...resourceProps}
+        assets={[...resourceProps.assets, secondaryAsset]}
+        shots={shots}
+        onBindAsset={onBindAsset}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "查看资源 玛拉" }));
+    fireEvent.click(screen.getByRole("button", { name: "从当前分镜解绑" }));
+
+    expect(onBindAsset).toHaveBeenCalledWith("shot-1", "asset-char-1", false);
+    expect(screen.getByRole("button", { name: "正在更新绑定" })).toBeDisabled();
+    const otherAsset = screen.getByRole("button", { name: "查看资源 信封" });
+    const upload = screen.getByRole("button", { name: "上传资源" });
+    const close = screen.getByRole("button", { name: "关闭资源详情" });
+    expect(otherAsset).toBeDisabled();
+    expect(upload).toBeDisabled();
+    expect(close).toBeDisabled();
+
+    fireEvent.click(otherAsset);
+    fireEvent.click(upload);
+    fireEvent.click(close);
+    const detail = screen.getByRole("dialog", { name: "资源详情" });
+    expect(within(detail).getByRole("heading", { name: "玛拉" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "上传资源" })).not.toBeInTheDocument();
+
+    deferred.reject(new Error("解绑请求被拒绝"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("解绑请求被拒绝");
+    expect(within(screen.getByRole("dialog", { name: "资源详情" })).getByRole("heading", { name: "玛拉" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(otherAsset).toBeEnabled();
+      expect(upload).toBeEnabled();
+      expect(close).toBeEnabled();
+    });
   });
 
   it("renders all resource media and only consistency issues for linked shots", () => {
@@ -236,12 +288,61 @@ describe("ResourceLibraryPage", () => {
     expect(screen.getByRole("button", { name: "提交上传" })).toBeEnabled();
   });
 
-  it("honors the externally supplied uploading busy state", () => {
-    render(<ResourceLibraryPage {...resourceProps} uploading />);
+  it("keeps a pending upload mounted and gates every panel transition", async () => {
+    const deferred = createDeferred();
+    const onUploadReferenceImage = vi.fn().mockReturnValue(deferred.promise);
+    const file = new File(["rain"], "rain.webp", { type: "image/webp" });
+    render(
+      <ResourceLibraryPage
+        {...resourceProps}
+        assets={[...resourceProps.assets, secondaryAsset]}
+        onUploadReferenceImage={onUploadReferenceImage}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "上传资源" }));
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "保留的雨巷" } });
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "保留的描述" } });
+    fireEvent.change(screen.getByLabelText("参考图"), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "提交上传" }));
+
+    expect(onUploadReferenceImage).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "正在上传" })).toBeDisabled();
+    const otherAsset = screen.getByRole("button", { name: "查看资源 信封" });
+    const upload = screen.getByRole("button", { name: "上传资源" });
+    const close = screen.getByRole("button", { name: "关闭上传资源" });
+    expect(otherAsset).toBeDisabled();
+    expect(upload).toBeDisabled();
+    expect(close).toBeDisabled();
+
+    fireEvent.click(otherAsset);
+    fireEvent.click(upload);
+    fireEvent.click(close);
+    expect(screen.getByRole("dialog", { name: "上传资源" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "资源详情" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("名称")).toHaveValue("保留的雨巷");
+
+    deferred.reject(new Error("延迟上传被拒绝"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("延迟上传被拒绝");
+    expect(screen.getByRole("dialog", { name: "上传资源" })).toBeInTheDocument();
+    expect(screen.getByLabelText("名称")).toHaveValue("保留的雨巷");
+    expect(screen.getByLabelText("描述")).toHaveValue("保留的描述");
+    await waitFor(() => {
+      expect(otherAsset).toBeEnabled();
+      expect(upload).toBeEnabled();
+      expect(close).toBeEnabled();
+    });
+  });
+
+  it("honors the externally supplied uploading busy state", () => {
+    const { rerender } = render(<ResourceLibraryPage {...resourceProps} uploading={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "上传资源" }));
+    rerender(<ResourceLibraryPage {...resourceProps} uploading />);
 
     expect(screen.getByRole("button", { name: "正在上传" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "关闭上传资源" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "上传资源" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看资源 玛拉" })).toBeDisabled();
   });
 
   it("does not surface a malformed unsupported resource kind", () => {

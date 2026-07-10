@@ -4,6 +4,7 @@ import { countLinkedShots } from "./assetLibrary";
 
 export interface AssetGridProps {
   assets: AssetRecord[];
+  disabled: boolean;
   shots: Shot[];
   strings?: UIStrings["resources"];
   onSelect: (assetId: string) => void;
@@ -11,6 +12,7 @@ export interface AssetGridProps {
 
 export function AssetGrid({
   assets,
+  disabled,
   shots,
   strings = getStrings("zh").resources,
   onSelect,
@@ -31,6 +33,7 @@ export function AssetGrid({
             type="button"
             key={asset.id}
             aria-label={strings.viewAsset(asset.label)}
+            disabled={disabled}
             onClick={() => onSelect(asset.id)}
           >
             {thumbnail ? <img src={thumbnail} alt="" /> : null}

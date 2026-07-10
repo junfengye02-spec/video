@@ -9,6 +9,7 @@ export interface AssetDetailDrawerProps {
   bindingError: string | null;
   consistencyReport: ConsistencyReport | null;
   currentShotId: string | null;
+  panelLocked: boolean;
   shots: Shot[];
   strings?: UIStrings["resources"];
   onBind: (bind: boolean) => void;
@@ -25,6 +26,7 @@ export function AssetDetailDrawer({
   bindingError,
   consistencyReport,
   currentShotId,
+  panelLocked,
   shots,
   strings = getStrings("zh").resources,
   onBind,
@@ -46,7 +48,7 @@ export function AssetDetailDrawer({
         <button
           type="button"
           aria-label={strings.closeDetailAction}
-          disabled={binding}
+          disabled={panelLocked}
           onClick={onClose}
         >
           <X aria-hidden="true" size={16} />
@@ -117,7 +119,7 @@ export function AssetDetailDrawer({
       {bindingError ? <p role="alert">{bindingError}</p> : null}
       <button
         type="button"
-        disabled={!currentShot || binding}
+        disabled={!currentShot || panelLocked}
         onClick={() => onBind(!boundToCurrentShot)}
       >
         {boundToCurrentShot ? <Unlink aria-hidden="true" size={16} /> : <Link2 aria-hidden="true" size={16} />}
