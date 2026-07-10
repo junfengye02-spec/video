@@ -398,6 +398,66 @@ def test_fastapi_overrides_keyed_by_canonical_providers_satisfy_require_user(
     }
 
 
+def test_fastapi_rejects_invalid_origin_before_authenticated_session_access(
+    redis_client, settings, monkeypatch
+):
+    user = User(
+        id="u1",
+        email="person@example.com",
+        password_hash="hash",
+        role="user",
+        status="active",
+    )
+    access_events: list[str] = []
+
+    class TrackingDb:
+        def get(self, model, user_id):
+            access_events.append("db_get")
+            assert model is User
+            return user if user_id == user.id else None
+
+    store = SessionStore.from_settings(redis_client, settings)
+    session_id, record = store.create("u1")
+    session_key = _session_key(session_id)
+    stored_before = redis_client.get(session_key)
+    original_get = SessionStore.get
+
+    def tracking_get(self, requested_session_id, *, now=None):
+        access_events.append("session_get")
+        return original_get(self, requested_session_id, now=now)
+
+    monkeypatch.setattr(SessionStore, "get", tracking_get)
+    monkeypatch.setattr(
+        SessionStore,
+        "_timestamp",
+        staticmethod(lambda now: record.last_seen_at + 1 if now is None else int(now)),
+    )
+    app = FastAPI()
+
+    @app.post("/protected")
+    def protected(current: CurrentUser = Depends(require_csrf)):
+        return {"id": current.id}
+
+    app.dependency_overrides[canonical_get_db] = TrackingDb
+    app.dependency_overrides[canonical_get_redis] = lambda: redis_client
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    with TestClient(app) as client:
+        client.cookies.set(settings.session_cookie_name, session_id)
+        response = client.post(
+            "/protected",
+            headers={
+                "Origin": "https://evil.example",
+                "X-CSRF-Token": record.csrf_token,
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Invalid request origin"}
+    assert access_events == []
+    assert redis_client.get(session_key) == stored_before
+
+
 def test_require_user_rejects_a_session_for_a_missing_user(db, redis_client, settings):
     session_id, _ = SessionStore.from_settings(redis_client, settings).create("missing")
 

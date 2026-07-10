@@ -34,6 +34,7 @@ def require_user(
     redis: Redis = Depends(get_redis),
     settings: AppSettings = Depends(get_settings),
 ) -> CurrentUser:
+    validate_origin(request, settings.public_origin)
     record = load_session(request, redis, settings)
     if record.user_id is None:
         raise HTTPException(status_code=401, detail="Authentication required")
