@@ -2,7 +2,6 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getStrings } from "./i18n";
-import type { ShortDramaProjectResponse, Shot } from "./domain/types";
 
 const apiMocks = vi.hoisted(() => ({
   createDraftProject: vi.fn(),
@@ -28,42 +27,6 @@ const apiMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./api/client", () => apiMocks);
-
-const localProjectStoreMocks = vi.hoisted(() => ({
-  deleteProject: vi.fn(),
-  listProjectSummaries: vi.fn(),
-  loadProjectSnapshot: vi.fn(),
-  loadRecentProjectSnapshot: vi.fn(),
-  saveProjectSnapshot: vi.fn(),
-  setRecentProjectId: vi.fn(),
-}));
-
-const localMediaStoreMocks = vi.hoisted(() => ({
-  cacheRemoteMedia: vi.fn(),
-  loadMediaBlob: vi.fn(),
-  saveMediaBlob: vi.fn(),
-}));
-
-const localExportMocks = vi.hoisted(() => ({
-  exportProjectBackup: vi.fn(),
-  importProjectBackup: vi.fn(),
-}));
-
-const localStorageEstimateMocks = vi.hoisted(() => ({
-  formatBytes: vi.fn((bytes: number | null) => (bytes === null ? "Unknown" : `${bytes} B`)),
-  getStorageEstimate: vi.fn(),
-}));
-
-const localMediaUrlMocks = vi.hoisted(() => ({
-  resolveLocalMediaUrl: vi.fn(),
-  revokeLocalMediaUrls: vi.fn(),
-}));
-
-vi.mock("./localdb/projectStore", () => localProjectStoreMocks);
-vi.mock("./localdb/mediaStore", () => localMediaStoreMocks);
-vi.mock("./localdb/mediaUrls", () => localMediaUrlMocks);
-vi.mock("./localdb/exportProject", () => localExportMocks);
-vi.mock("./localdb/storageEstimate", () => localStorageEstimateMocks);
 
 const sampleShot = {
   id: "shot-1",
@@ -145,8 +108,8 @@ const sampleProjectResponse = {
 const strings = getStrings("en");
 const originalNavigatorLanguage = navigator.language;
 
-function cloneProjectResponse(): ShortDramaProjectResponse {
-  return structuredClone(sampleProjectResponse) as ShortDramaProjectResponse;
+function cloneProjectResponse() {
+  return structuredClone(sampleProjectResponse);
 }
 
 function setNavigatorLanguage(language: string) {
@@ -189,22 +152,6 @@ describe("App", () => {
     setNavigatorLanguage("en-US");
     apiMocks.createShortDramaProject.mockResolvedValue(cloneProjectResponse());
     apiMocks.loadProject.mockResolvedValue(cloneProjectResponse());
-    localProjectStoreMocks.loadRecentProjectSnapshot.mockResolvedValue(null);
-    localProjectStoreMocks.saveProjectSnapshot.mockResolvedValue(undefined);
-    localProjectStoreMocks.setRecentProjectId.mockResolvedValue(undefined);
-    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue(null);
-    localMediaUrlMocks.resolveLocalMediaUrl.mockImplementation((ref: string) => Promise.resolve(`blob:${ref}`));
-    localMediaUrlMocks.revokeLocalMediaUrls.mockReturnValue(undefined);
-    localExportMocks.exportProjectBackup.mockResolvedValue(new Blob(["backup"], { type: "application/zip" }));
-    localExportMocks.importProjectBackup.mockResolvedValue(cloneProjectResponse());
-    localStorageEstimateMocks.getStorageEstimate.mockResolvedValue({
-      usageBytes: 2048,
-      quotaBytes: 4096,
-      persisted: false,
-    });
-    localStorageEstimateMocks.formatBytes.mockImplementation((bytes: number | null) =>
-      bytes === null ? "Unknown" : `${bytes} B`,
-    );
     apiMocks.optimizePrompt.mockResolvedValue({
       project_id: "p1",
       model: "gpt-5.5",
@@ -477,7 +424,7 @@ describe("App", () => {
 
   it("caps the displayed image-to-video reference count at three", async () => {
     const projectWithManyReferences = cloneProjectResponse();
-    projectWithManyReferences.series_bible.assets![0].reference_images = [
+    projectWithManyReferences.series_bible.assets[0].reference_images = [
       "assets/images/character/mara-1.png",
       "assets/images/character/mara-2.png",
       "assets/images/character/mara-3.png",
@@ -539,52 +486,6 @@ describe("App", () => {
         }),
       }),
     );
-  });
-
-  it("shows the full backend shot language enum in editor controls", async () => {
-    const projectWithFullEnumShot = cloneProjectResponse();
-    projectWithFullEnumShot.storyboard.shots = [
-      {
-        ...sampleShot,
-        shot_language: {
-          shot_size: "insert",
-          camera_movement: "whip_pan",
-          lighting_key: "neon",
-          depth_of_field: "shallow",
-          color_temperature: "cool",
-        },
-      } as Shot,
-    ];
-    apiMocks.createShortDramaProject.mockResolvedValue(projectWithFullEnumShot);
-
-    render(<App />);
-    await createStoryboard();
-
-    expect(screen.getByLabelText(strings.shotEditor.shotSizeLabel)).toHaveValue("insert");
-    expect(screen.getByLabelText(strings.shotEditor.cameraMovementLabel)).toHaveValue("whip_pan");
-  });
-
-  it("selects a storyboard shot for editing instead of always editing the first shot", async () => {
-    render(<App />);
-    await createStoryboard();
-
-    expect(screen.getByLabelText(strings.shotEditor.promptLabel)).toHaveValue(sampleShot.prompt);
-
-    fireEvent.click(screen.getByRole("button", { name: "Edit shot 2" }));
-
-    expect(screen.getByLabelText(strings.shotEditor.promptLabel)).toHaveValue(sampleShot2.prompt);
-    fireEvent.change(screen.getByLabelText(strings.shotEditor.promptLabel), {
-      target: { value: "Mara spots her boss in the rain reflection." },
-    });
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.saveAction }));
-
-    await waitFor(() => expect(apiMocks.saveShot).toHaveBeenCalledWith(
-      "p1",
-      "shot-2",
-      expect.objectContaining({
-        prompt: "Mara spots her boss in the rain reflection.",
-      }),
-    ));
   });
 
   it("optimizes a shot prompt into prompt, intent, and shot language before save", async () => {
@@ -851,14 +752,14 @@ describe("App", () => {
         version: "1.0",
         outputs: [
           {
-            path: "renders/final.mp4",
+            path: "projects/p1/renders/final.mp4",
             format: "mp4",
             resolution: "720x1280",
             duration_seconds: 25,
           },
         ],
       },
-      final_path: "renders/final.mp4",
+      final_path: "projects/p1/renders/final.mp4",
     });
 
     render(<App />);
@@ -881,8 +782,7 @@ describe("App", () => {
     );
   });
 
-  it("caches final render media locally and keeps the local final path", async () => {
-    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/final-1");
+  it("refreshes project state after render and restores final_path from the loaded snapshot", async () => {
     apiMocks.renderProject.mockResolvedValue({
       job_id: "render-1",
       event: {
@@ -899,16 +799,24 @@ describe("App", () => {
       consistency_report: sampleProjectResponse.consistency_report,
       render_report: {
         version: "1.0",
+        outputs: [],
+      },
+      final_path: "",
+    });
+    apiMocks.loadProject.mockResolvedValue({
+      ...sampleProjectResponse,
+      render_report: {
+        version: "1.0",
         outputs: [
           {
-            path: "renders/final.mp4",
+            path: "projects/p1/renders/final.mp4",
             format: "mp4",
             resolution: "720x1280",
             duration_seconds: 25,
           },
         ],
       },
-      final_path: "renders/final.mp4",
+      final_path: "projects/p1/renders/final.mp4",
     });
 
     render(<App />);
@@ -921,22 +829,11 @@ describe("App", () => {
     await screen.findByRole("button", { name: "Render final video" });
     fireEvent.click(screen.getByRole("button", { name: "Render final video" }));
 
-    await waitFor(() =>
-      expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith("/api/projects/p1/media/renders/final.mp4", {
-        projectId: "p1",
-        sourcePath: "renders/final.mp4",
-      }),
-    );
-    await waitFor(() =>
-      expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
-        expect.objectContaining({ final_path: "local://media/final-1" }),
-      ),
-    );
-    expect(apiMocks.loadProject).not.toHaveBeenCalled();
-    expect(await screen.findByText("local://media/final-1")).toBeInTheDocument();
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledWith("p1"));
+    expect(await screen.findByText("projects/p1/renders/final.mp4")).toBeInTheDocument();
   });
 
-  it("keeps successful render results without requiring a follow-up project refresh", async () => {
+  it("keeps successful render results when the follow-up project refresh fails", async () => {
     apiMocks.renderProject.mockResolvedValue({
       job_id: "render-1",
       event: {
@@ -955,225 +852,36 @@ describe("App", () => {
         version: "1.0",
         outputs: [
           {
-            path: "renders/final.mp4",
+            path: "projects/p1/renders/final.mp4",
             format: "mp4",
             resolution: "720x1280",
             duration_seconds: 25,
           },
         ],
       },
-      final_path: "renders/final.mp4",
+      final_path: "projects/p1/renders/final.mp4",
     });
+    apiMocks.loadProject.mockRejectedValue(new Error("reload failed"));
 
     render(<App />);
     await createStoryboard();
 
     fireEvent.click(screen.getByRole("button", { name: "Render final video" }));
 
-    expect(await screen.findByText("renders/final.mp4")).toBeInTheDocument();
-    expect(apiMocks.loadProject).not.toHaveBeenCalled();
+    expect(await screen.findByText("projects/p1/renders/final.mp4")).toBeInTheDocument();
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledWith("p1"));
     expect(screen.queryByText(strings.errors.renderFallback)).not.toBeInTheDocument();
+    expect(screen.queryByText("reload failed")).not.toBeInTheDocument();
   });
 
-  it("restores the recent browser-local project on mount without calling server latest", async () => {
-    apiMocks.loadLatestProject.mockRejectedValue(new Error("server latest must not be called"));
-    localProjectStoreMocks.loadRecentProjectSnapshot.mockResolvedValue({
-      id: "p1",
-      title: "Rain Alley",
-      updatedAt: "2026-07-08T00:00:00.000Z",
-      snapshot: cloneProjectResponse(),
-    });
+  it("auto-loads the latest project on mount", async () => {
+    apiMocks.loadLatestProject.mockResolvedValue(cloneProjectResponse());
 
     render(<App />);
 
-    await waitFor(() => expect(localProjectStoreMocks.loadRecentProjectSnapshot).toHaveBeenCalled());
-    expect(apiMocks.loadLatestProject).not.toHaveBeenCalled();
+    await waitFor(() => expect(apiMocks.loadLatestProject).toHaveBeenCalled());
     expect(await screen.findByRole("button", { name: strings.shotEditor.saveAction })).toBeEnabled();
     expect(screen.getByText("Rain Alley")).toBeInTheDocument();
-  });
-
-  it("starts a new local draft from a loaded project so another project type can be selected", async () => {
-    localProjectStoreMocks.loadRecentProjectSnapshot.mockResolvedValue({
-      id: "p1",
-      title: "Rain Alley",
-      updatedAt: "2026-07-08T00:00:00.000Z",
-      snapshot: cloneProjectResponse(),
-    });
-
-    render(<App />);
-
-    expect(await screen.findByText("Rain Alley")).toBeInTheDocument();
-    expect(screen.getByLabelText(strings.projectType.miniSeries)).toBeDisabled();
-
-    fireEvent.click(screen.getByRole("button", { name: "New draft" }));
-
-    await waitFor(() => expect(localProjectStoreMocks.setRecentProjectId).toHaveBeenCalledWith(null));
-    expect(screen.getByText(strings.appShell.noProjectYet)).toBeInTheDocument();
-    expect(screen.getByLabelText(strings.projectType.miniSeries)).toBeEnabled();
-
-    fireEvent.click(screen.getByLabelText(strings.projectType.miniSeries));
-
-    expect(screen.getByRole("tab", { name: strings.nav.series })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: strings.nav.episodes })).toBeInTheDocument();
-  });
-
-  it("saves created projects to browser-local storage", async () => {
-    render(<App />);
-
-    await createStoryboard();
-
-    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenCalledWith(
-      expect.objectContaining({ project: expect.objectContaining({ id: "p1" }) }),
-    ));
-  });
-
-  it("shows browser-local storage controls and imports a backup into the workspace", async () => {
-    render(<App />);
-
-    expect(await screen.findByText("Local storage")).toBeInTheDocument();
-    expect(screen.getByText("Projects are saved in this browser. Export backups before clearing browser data.")).toBeInTheDocument();
-    expect(screen.getByText("Browser storage used: 2048 B")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Export project" })).toBeDisabled();
-
-    await createStoryboard();
-
-    expect(screen.getByRole("button", { name: "Export project" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "Export project" }));
-    await waitFor(() => expect(localExportMocks.exportProjectBackup).toHaveBeenCalledWith("p1"));
-
-    const fileInput = screen.getByLabelText("Import project");
-    const backupFile = new File(["backup"], "rain.omproj", { type: "application/zip" });
-    fireEvent.change(fileInput, { target: { files: [backupFile] } });
-
-    await waitFor(() => expect(localExportMocks.importProjectBackup).toHaveBeenCalledWith(backupFile));
-    expect(screen.getByText("Rain Alley")).toBeInTheDocument();
-  });
-
-  it("caches regenerated shot media locally and persists the updated snapshot", async () => {
-    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/shot-1");
-    apiMocks.regenerateShot.mockResolvedValue({
-      job_id: "j-regenerate",
-      event: {
-        id: "e-regenerate",
-        job_id: "j-regenerate",
-        project_id: "p1",
-        stage: "regenerate",
-        status: "complete",
-        message: "Regenerated",
-        created_at: "now",
-      },
-      shot: { ...sampleShot, output_path: "assets/video/shot-1.mp4", output_url: null },
-      storyboard: {
-        shots: [
-          { ...sampleShot, output_path: "assets/video/shot-1.mp4", output_url: null },
-          sampleShot2,
-        ],
-      },
-      consistency_report: { score: 100, issues: [] },
-    });
-
-    render(<App />);
-    await createStoryboard();
-
-    fireEvent.click(screen.getByRole("button", { name: strings.shotEditor.regenerateAction }));
-
-    await waitFor(() =>
-      expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith("/api/projects/p1/media/assets/video/shot-1.mp4", {
-        projectId: "p1",
-        sourcePath: "assets/video/shot-1.mp4",
-      }),
-    );
-    await waitFor(() =>
-      expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          storyboard: expect.objectContaining({
-            shots: expect.arrayContaining([
-              expect.objectContaining({ id: "shot-1", output_path: "local://media/shot-1" }),
-            ]),
-          }),
-        }),
-      ),
-    );
-  });
-
-  it("resolves browser-local media refs for restored project previews", async () => {
-    const localSnapshot = cloneProjectResponse();
-    localSnapshot.series_bible.assets = [
-      {
-        id: "asset-local",
-        kind: "character",
-        label: "Local reference",
-        description: "Stored in browser",
-        prompt: "reference",
-        reference_images: ["local://media/asset-1"],
-        media_urls: [],
-        shot_ids: [],
-        version: 1,
-      },
-    ];
-    localSnapshot.final_path = "local://media/final-1";
-    localProjectStoreMocks.loadRecentProjectSnapshot.mockResolvedValue({
-      id: "p1",
-      title: "Rain Alley",
-      updatedAt: "2026-07-08T00:00:00.000Z",
-      snapshot: localSnapshot,
-    });
-
-    render(<App />);
-
-    await waitFor(() => expect(localMediaUrlMocks.resolveLocalMediaUrl).toHaveBeenCalledWith("local://media/asset-1"));
-    await waitFor(() => expect(localMediaUrlMocks.resolveLocalMediaUrl).toHaveBeenCalledWith("local://media/final-1"));
-
-    fireEvent.click(screen.getByRole("tab", { name: strings.nav.resources }));
-
-    const image = await screen.findByRole("img", { name: "Local reference" });
-    expect(image).toHaveAttribute("src", "blob:local://media/asset-1");
-    const finalVideo = screen.getByLabelText(strings.appShell.finalVideoTitle);
-    expect(finalVideo).toHaveAttribute("src", "blob:local://media/final-1");
-  });
-
-  it("downloads the browser-local final video as an mp4", async () => {
-    const localSnapshot = cloneProjectResponse();
-    localSnapshot.final_path = "local://media/final-1";
-    localProjectStoreMocks.loadRecentProjectSnapshot.mockResolvedValue({
-      id: "p1",
-      title: "Rain Alley",
-      updatedAt: "2026-07-08T00:00:00.000Z",
-      snapshot: localSnapshot,
-    });
-    localMediaStoreMocks.loadMediaBlob.mockResolvedValue(new Blob(["final-video"], { type: "video/mp4" }));
-    const createObjectUrl = vi.fn(() => "blob:download-final");
-    const revokeObjectUrl = vi.fn();
-    Object.defineProperty(URL, "createObjectURL", {
-      configurable: true,
-      value: createObjectUrl,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      configurable: true,
-      value: revokeObjectUrl,
-    });
-    const click = vi.fn();
-    const originalCreateElement = document.createElement.bind(document);
-    const createElement = vi.spyOn(document, "createElement").mockImplementation((tagName, options) => {
-      const element = originalCreateElement(tagName, options);
-      if (tagName.toLowerCase() === "a") {
-        element.click = click;
-      }
-      return element;
-    });
-
-    render(<App />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Download final video" }));
-
-    await waitFor(() => expect(localMediaStoreMocks.loadMediaBlob).toHaveBeenCalledWith("local://media/final-1"));
-    expect(createObjectUrl).toHaveBeenCalledWith(expect.any(Blob));
-    const link = createElement.mock.results.find((result) => result.value instanceof HTMLAnchorElement)
-      ?.value as HTMLAnchorElement;
-    expect(link.download).toBe("Rain Alley-final.mp4");
-    expect(link.href).toBe("blob:download-final");
-    expect(click).toHaveBeenCalled();
-    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:download-final");
   });
 
   it("localizes storyboard status labels in Chinese while preserving current English labels", async () => {

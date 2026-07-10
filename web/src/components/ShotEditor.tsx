@@ -22,6 +22,7 @@ export interface ShotEditorProps {
   onOptimizePrompt: (shot: Shot, prompt: string) => Promise<PromptOptimizeResponse>;
   onRegenerateShot: (shot: Shot) => Promise<void>;
   onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 const SHOT_SIZES = [
@@ -88,6 +89,7 @@ export function ShotEditor({
   shot,
   saving,
   strings,
+  onDirtyChange,
   onOptimizePrompt,
   onRegenerateShot,
   onSaveShot,
@@ -132,6 +134,10 @@ export function ShotEditor({
   const generationModeLabel =
     selectedReferenceCount > 0 ? strings.imageToVideoMode(selectedReferenceCount) : strings.textToVideoMode;
   const draftIsDirty = shotDraftIsDirty(draftState);
+
+  useEffect(() => {
+    onDirtyChange?.(draftIsDirty);
+  }, [draftIsDirty, onDirtyChange]);
 
   return (
     <section className="storyboard-panel shot-editor" aria-label={strings.regionLabel}>
@@ -419,7 +425,9 @@ export function ShotEditor({
                   return current;
                 }
                 const changedWhileSaving = shotDraftIsDirty({ ...current, baseline: submittedDraft });
-                return changedWhileSaving ? { ...savedState, draft: current.draft } : savedState;
+                return changedWhileSaving
+                  ? { ...savedState, draft: current.draft, undoOptimization: current.undoOptimization }
+                  : savedState;
               });
             } catch {
               // App owns the error banner; the unsaved draft stays intact.

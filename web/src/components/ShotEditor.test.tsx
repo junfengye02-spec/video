@@ -62,6 +62,45 @@ describe("ShotEditor", () => {
     expect(onRegenerateShot).not.toHaveBeenCalled();
   });
 
+  it("reports dirty edits and a clean selection reset", async () => {
+    const onDirtyChange = vi.fn();
+    const nextShot = createShot({ id: "shot-2", prompt: "第二个分镜" });
+    const { props, rerender } = renderEditor({ onDirtyChange });
+
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+    fireEvent.change(screen.getByLabelText("分镜提示词"), { target: { value: "未保存草稿" } });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+
+    rerender(<ShotEditor {...props} shot={nextShot} />);
+
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+    expect(onDirtyChange.mock.calls.map(([dirty]) => dirty)).toEqual([false, true, false]);
+  });
+
+  it("reports clean after undo restores the baseline", async () => {
+    const onDirtyChange = vi.fn();
+    renderEditor({ onDirtyChange });
+
+    fireEvent.click(screen.getByRole("button", { name: "AI 优化提示词" }));
+    expect(await screen.findByRole("button", { name: "撤销优化" })).toBeInTheDocument();
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "撤销优化" }));
+
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+  });
+
+  it("reports clean after save accepts the current draft", async () => {
+    const onDirtyChange = vi.fn();
+    renderEditor({ onDirtyChange });
+    fireEvent.change(screen.getByLabelText("分镜提示词"), { target: { value: "待保存草稿" } });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+  });
+
   it("does not save automatically when regenerate is clicked", async () => {
     const onSaveShot = vi.fn();
     const onRegenerateShot = vi.fn().mockResolvedValue(undefined);
@@ -154,6 +193,32 @@ describe("ShotEditor", () => {
     expect(screen.getByLabelText("分镜提示词")).toHaveValue("已提交的提示词");
     expect(screen.getByLabelText("场景")).toHaveValue("提交后的新场景");
     expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();
+  });
+
+  it("keeps a later optimization dirty and undoable when an earlier save resolves", async () => {
+    let resolveOptimize: ((response: PromptOptimizeResponse) => void) | undefined;
+    let resolveSave: (() => void) | undefined;
+    const onOptimizePrompt = vi.fn().mockReturnValue(new Promise<PromptOptimizeResponse>((resolve) => {
+      resolveOptimize = resolve;
+    }));
+    const onSaveShot = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+      resolveSave = resolve;
+    }));
+    renderEditor({ onOptimizePrompt, onSaveShot });
+
+    fireEvent.click(screen.getByRole("button", { name: "AI 优化提示词" }));
+    await waitFor(() => expect(onOptimizePrompt).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(onSaveShot).toHaveBeenCalledTimes(1));
+
+    await act(async () => resolveOptimize?.(optimizedResponse));
+    expect(await screen.findByRole("button", { name: "撤销优化" })).toBeInTheDocument();
+    await act(async () => resolveSave?.());
+
+    expect(screen.getByLabelText("分镜提示词")).toHaveValue(optimizedResponse.optimized_text);
+    expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "撤销优化" }));
+    expect(screen.getByLabelText("分镜提示词")).toHaveValue(sampleShot.prompt);
   });
 
   it("ignores an old optimization after the selection cycles back to the same shot", async () => {
