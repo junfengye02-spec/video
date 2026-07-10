@@ -95,6 +95,7 @@ export function ShotEditor({
   onSaveShot,
 }: ShotEditorProps) {
   const [draftState, setDraftState] = useState(() => createShotDraftState(shot));
+  const optimizationRevisionRef = useRef(0);
   const selectionRevisionRef = useRef(0);
 
   useEffect(() => {
@@ -372,10 +373,12 @@ export function ShotEditor({
             const selectionRevision = selectionRevisionRef.current;
             try {
               const optimized = await onOptimizePrompt(shot, draftState.draft.prompt);
+              if (selectionRevisionRef.current !== selectionRevision) {
+                return;
+              }
+              optimizationRevisionRef.current += 1;
               setDraftState((current) => (
-                current.shotId === shot.id && selectionRevisionRef.current === selectionRevision
-                  ? applyPromptOptimization(current, optimized)
-                  : current
+                current.shotId === shot.id ? applyPromptOptimization(current, optimized) : current
               ));
             } catch {
               // App owns the error banner.
@@ -390,7 +393,10 @@ export function ShotEditor({
             className="primary-button"
             type="button"
             disabled={!shot || saving || optimizing}
-            onClick={() => setDraftState((current) => undoPromptOptimization(current))}
+            onClick={() => {
+              optimizationRevisionRef.current += 1;
+              setDraftState((current) => undoPromptOptimization(current));
+            }}
           >
             <Undo2 aria-hidden="true" size={16} />
             {strings.undoOptimizationAction}
@@ -406,6 +412,7 @@ export function ShotEditor({
             }
             const submittedDraft = draftState.draft;
             const payload = toShotSaveRequest(draftState.draft);
+            const optimizationRevision = optimizationRevisionRef.current;
             const selectionRevision = selectionRevisionRef.current;
             try {
               await onSaveShot(shot.id, payload);
@@ -425,8 +432,13 @@ export function ShotEditor({
                   return current;
                 }
                 const changedWhileSaving = shotDraftIsDirty({ ...current, baseline: submittedDraft });
+                const optimizationChangedWhileSaving = optimizationRevisionRef.current !== optimizationRevision;
                 return changedWhileSaving
-                  ? { ...savedState, draft: current.draft, undoOptimization: current.undoOptimization }
+                  ? {
+                      ...savedState,
+                      draft: current.draft,
+                      undoOptimization: optimizationChangedWhileSaving ? current.undoOptimization : null,
+                    }
                   : savedState;
               });
             } catch {

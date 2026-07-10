@@ -195,6 +195,30 @@ describe("ShotEditor", () => {
     expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();
   });
 
+  it("clears a saved optimization undo while preserving later edits", async () => {
+    let resolveSave: (() => void) | undefined;
+    const onSaveShot = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+      resolveSave = resolve;
+    }));
+    renderEditor({ onSaveShot });
+
+    fireEvent.click(screen.getByRole("button", { name: "AI 优化提示词" }));
+    expect(await screen.findByRole("button", { name: "撤销优化" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(onSaveShot).toHaveBeenCalledWith(
+      sampleShot.id,
+      expect.objectContaining({ prompt: optimizedResponse.optimized_text }),
+    ));
+
+    fireEvent.change(screen.getByLabelText("场景"), { target: { value: "保存提交后的新场景" } });
+    await act(async () => resolveSave?.());
+
+    expect(screen.getByLabelText("分镜提示词")).toHaveValue(optimizedResponse.optimized_text);
+    expect(screen.getByLabelText("场景")).toHaveValue("保存提交后的新场景");
+    expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "撤销优化" })).not.toBeInTheDocument();
+  });
+
   it("keeps a later optimization dirty and undoable when an earlier save resolves", async () => {
     let resolveOptimize: ((response: PromptOptimizeResponse) => void) | undefined;
     let resolveSave: (() => void) | undefined;
