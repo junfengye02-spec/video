@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import uuid
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from redis import Redis
+from sqlalchemy.orm import Session
 
 from server.app.artifact_sync import read_workflow_settings, rewrite_workflow_artifacts, sync_asset_shot_ids
+from server.app.auth.dependencies import CurrentUser, require_csrf, require_user
 from server.app.auth.router import router as auth_router
+from server.app.core.config import AppSettings, get_settings
 from server.app.consistency import apply_consistency_scores, evaluate_storyboard_consistency
 from server.app.events import EventBus
 from server.app.key_validation import validate_gateway_models
@@ -41,6 +46,17 @@ from server.app.openmontage_runner import (
     run_single_shot_generation,
 )
 from server.app.prompt_optimizer import optimize_text_prompt
+from server.app.projects.models import ProjectRecord
+from server.app.projects.repository import ProjectRepository
+from server.app.projects.schemas import (
+    MAX_IMPORT_ARTIFACT_BYTES,
+    ProjectCreateRequest,
+    ProjectImportRequest,
+    ProjectListResponse,
+    ProjectResponse,
+)
+from server.app.db.session import get_db
+from server.app.redis import get_redis
 from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
 from server.app.storyboard_generator import generate_short_drama_storyboard
 from server.app.storage import WorkbenchStore
@@ -149,6 +165,9 @@ def _decorate_asset_media(project_id: str, project_dir: Path, asset: dict[str, A
     reference_images = []
     media_urls = []
     for reference in asset.get("reference_images", []) or []:
+        if isinstance(reference, str) and reference.startswith("local://media/"):
+            reference_images.append(reference)
+            continue
         try:
             relative = relative_project_path(project_dir, reference)
         except HTTPException:
@@ -160,19 +179,20 @@ def _decorate_asset_media(project_id: str, project_dir: Path, asset: dict[str, A
     return decorated
 
 
-def _project_snapshot(workbench: WorkbenchStore, project_id: str) -> dict[str, Any]:
-    project = workbench.get_project(project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    project_dir = workbench.project_dir(project_id)
-    storyboard = workbench.read_artifact(project_id, "episode_storyboard.json") or {"shots": []}
-    series_bible = workbench.read_artifact(project_id, "series_bible.json") or {"characters": [], "assets": []}
+def _project_data(project: ProjectRecord) -> dict[str, Any]:
+    return ProjectResponse.model_validate(project).model_dump(mode="json")
+
+
+def _project_snapshot(workbench: WorkbenchStore, project: ProjectRecord) -> dict[str, Any]:
+    project_dir = workbench.project_dir(project.id)
+    storyboard = workbench.read_artifact(project.id, "episode_storyboard.json") or {"shots": []}
+    series_bible = workbench.read_artifact(project.id, "series_bible.json") or {"characters": [], "assets": []}
     series_bible = dict(series_bible)
     series_bible["assets"] = [
-        _decorate_asset_media(project_id, project_dir, asset)
+        _decorate_asset_media(project.id, project_dir, asset)
         for asset in series_bible.get("assets", [])
     ]
-    render_report = workbench.read_artifact(project_id, "render_report.json")
+    render_report = workbench.read_artifact(project.id, "render_report.json")
     response_storyboard = _sanitize_storyboard_response(project_dir, storyboard)
     response_render_report = (
         _sanitize_render_report_response(project_dir, render_report) if render_report else None
@@ -181,15 +201,49 @@ def _project_snapshot(workbench: WorkbenchStore, project_id: str) -> dict[str, A
     if response_render_report and response_render_report.get("outputs"):
         final_path = response_render_report["outputs"][0].get("path")
     return {
-        "project": project.model_dump(),
+        "project": _project_data(project),
         "series_bible": series_bible,
         "storyboard": response_storyboard,
-        "consistency_report": workbench.read_artifact(project_id, "consistency_report.json") or {"score": 100, "issues": []},
-        "continuity_plan": workbench.read_artifact(project_id, "continuity_plan.json") or _default_continuity_plan(project.project_type),
-        "workflow_artifacts": _workflow_artifacts(workbench, project_id),
+        "consistency_report": workbench.read_artifact(project.id, "consistency_report.json") or {"score": 100, "issues": []},
+        "continuity_plan": workbench.read_artifact(project.id, "continuity_plan.json") or _default_continuity_plan(project.project_type),
+        "workflow_artifacts": _workflow_artifacts(workbench, project.id),
         "render_report": response_render_report,
         "final_path": final_path,
     }
+
+
+def _require_function_user(
+    request: Request,
+    db: Session = Depends(get_db, scope="function"),
+    redis: Redis = Depends(get_redis),
+    settings: AppSettings = Depends(get_settings),
+) -> CurrentUser:
+    return require_user(request=request, db=db, redis=redis, settings=settings)
+
+
+def _require_owned_user(
+    project_id: str,
+    current: CurrentUser = Depends(_require_function_user, scope="function"),
+    db: Session = Depends(get_db, scope="function"),
+) -> ProjectRecord:
+    return ProjectRepository(db).require_owned(project_id, current.id)
+
+
+def _require_owned_csrf(
+    project_id: str,
+    current: CurrentUser = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> ProjectRecord:
+    return ProjectRepository(db).require_owned(project_id, current.id)
+
+
+async def _require_import_csrf(
+    request: Request,
+    current: CurrentUser = Depends(require_csrf),
+) -> CurrentUser:
+    if len(await request.body()) > MAX_IMPORT_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="Imported project JSON is too large")
+    return current
 
 
 class KeySessionRequest(BaseModel):
@@ -227,18 +281,13 @@ class RenderProjectRequest(BaseModel):
     render_runtime: str = "ffmpeg"
 
 
-class DraftProjectRequest(BaseModel):
-    title: str = Field(min_length=1)
-    project_type: ProjectType = "single_video"
-
-
 def create_app(
     db_path: str | Path = DEFAULT_DB_PATH,
     projects_root: str | Path = DEFAULT_PROJECTS_ROOT,
 ) -> FastAPI:
     app = FastAPI(title="OpenMontage Short Drama Workbench")
     app.include_router(auth_router)
-    store = WorkbenchStore(db_path=Path(db_path), projects_root=Path(projects_root))
+    store = WorkbenchStore(projects_root=Path(projects_root), db_path=Path(db_path))
     events = EventBus()
     app.state.store = store
     app.state.events = events
@@ -281,10 +330,13 @@ def create_app(
 
     @app.post("/api/projects")
     def create_draft_project(
-        payload: DraftProjectRequest,
+        payload: ProjectCreateRequest,
         workbench: WorkbenchStore = Depends(get_store),
+        current: CurrentUser = Depends(require_csrf),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        project = workbench.create_project(
+        project = ProjectRepository(db).create(
+            owner_user_id=current.id,
             title=payload.title,
             mode="short_drama",
             project_type=payload.project_type,
@@ -316,12 +368,40 @@ def create_app(
             video_model=DEFAULT_VIDEO_MODEL,
             continuity_plan=continuity_plan,
         )
-        return _project_snapshot(workbench, project.id)
+        db.commit()
+        return _project_snapshot(workbench, project)
+
+    @app.post("/api/projects/import", status_code=201)
+    def import_project(
+        payload: ProjectImportRequest,
+        workbench: WorkbenchStore = Depends(get_store),
+        current: CurrentUser = Depends(_require_import_csrf),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        if payload.artifact_size_bytes() > MAX_IMPORT_ARTIFACT_BYTES:
+            raise HTTPException(status_code=413, detail="Imported project JSON is too large")
+        project = ProjectRepository(db).create(
+            owner_user_id=current.id,
+            title=payload.title,
+            mode="short_drama",
+            project_type=payload.project_type,
+        )
+        artifacts = payload.artifact_payloads()
+        for filename, artifact in artifacts.items():
+            workbench.write_artifact(project.id, filename, artifact)
+        workbench.write_asset_library(
+            project.id,
+            list(artifacts["series_bible.json"]["assets"]),
+        )
+        db.commit()
+        return _project_snapshot(workbench, project)
 
     @app.post("/api/projects/short-drama")
     def create_short_drama_project(
         payload: ShortDramaRequest,
         workbench: WorkbenchStore = Depends(get_store),
+        current: CurrentUser = Depends(require_csrf),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         key_environment(payload.video_key, payload.base_url)
         try:
@@ -342,7 +422,8 @@ def create_app(
         )
         apply_consistency_scores(result["storyboard"], result["consistency_report"])
 
-        project = workbench.create_project(
+        project = ProjectRepository(db).create(
+            owner_user_id=current.id,
             title=payload.title,
             mode="short_drama",
             project_type=payload.project_type,
@@ -366,33 +447,41 @@ def create_app(
             continuity_plan=continuity_plan,
         )
 
-        return _project_snapshot(workbench, project.id)
+        db.commit()
+        return _project_snapshot(workbench, project)
+
+    @app.get("/api/projects", response_model=ProjectListResponse)
+    def list_projects(
+        current: CurrentUser = Depends(require_user),
+        db: Session = Depends(get_db),
+    ) -> ProjectListResponse:
+        projects = ProjectRepository(db).list(current.id)
+        return ProjectListResponse(
+            projects=[ProjectResponse.model_validate(project) for project in projects]
+        )
 
     @app.get("/api/projects/latest")
     def get_latest_project(
-        workbench: WorkbenchStore = Depends(get_store),
+        current: CurrentUser = Depends(require_user),
     ) -> dict[str, Any]:
-        project = workbench.get_latest_project()
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
-        return _project_snapshot(workbench, project.id)
+        raise HTTPException(status_code=404, detail="Global latest project is disabled")
 
     @app.get("/api/projects/{project_id}")
     def get_project(
         project_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_user)],
         workbench: WorkbenchStore = Depends(get_store),
     ) -> dict[str, Any]:
-        return _project_snapshot(workbench, project_id)
+        return _project_snapshot(workbench, project)
 
     @app.patch("/api/projects/{project_id}/continuity")
     def save_continuity_plan(
         project_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
         payload: ContinuityPlan,
         workbench: WorkbenchStore = Depends(get_store),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        project = workbench.get_project(project_id)
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
         plan = payload.model_dump()
         plan["project_type"] = project.project_type
         if project.project_type == "single_video":
@@ -410,21 +499,24 @@ def create_app(
                 video_model=DEFAULT_VIDEO_MODEL,
                 continuity_plan=plan,
             )
-        return {"project": project.model_dump(), "continuity_plan": plan}
+        project.updated_at = datetime.now(UTC)
+        db.commit()
+        return {"project": _project_data(project), "continuity_plan": plan}
 
     @app.post("/api/projects/{project_id}/assets/upload")
     async def upload_reference_image(
         project_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
         kind: str = Form(...),
         label: str = Form(...),
         description: str = Form(""),
         prompt: str = Form(""),
         file: UploadFile = File(...),
         workbench: WorkbenchStore = Depends(get_store),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        project = workbench.get_project(project_id)
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
-        if project is None or series_bible is None:
+        if series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
         if kind not in {"character", "scene", "prop"}:
             raise HTTPException(status_code=422, detail="Unsupported asset kind")
@@ -465,6 +557,8 @@ def create_app(
             video_model=DEFAULT_VIDEO_MODEL,
             continuity_plan=continuity_plan,
         )
+        project.updated_at = datetime.now(UTC)
+        db.commit()
         return {
             "media": {
                 "path": relative_path,
@@ -479,11 +573,9 @@ def create_app(
     def project_media(
         project_id: str,
         relative_path: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_user)],
         workbench: WorkbenchStore = Depends(get_store),
     ) -> FileResponse:
-        project = workbench.get_project(project_id)
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
         media_path = safe_project_media_file(workbench.project_dir(project_id), relative_path)
         if not media_path.exists():
             raise HTTPException(status_code=404, detail="Media file not found")
@@ -493,15 +585,16 @@ def create_app(
     def save_shot(
         project_id: str,
         shot_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
         payload: ShotSaveRequest,
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        project = workbench.get_project(project_id)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
-        if project is None or storyboard is None or series_bible is None:
+        if storyboard is None or series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
         job_id = uuid.uuid4().hex
         try:
@@ -529,18 +622,18 @@ def create_app(
             video_model=workflow_settings["video_model"],
             continuity_plan=continuity_plan,
         )
+        project.updated_at = datetime.now(UTC)
+        db.commit()
         event = bus.emit(project_id, job_id=job_id, stage="save", status="complete", message="Shot saved")
         return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
 
     @app.post("/api/projects/{project_id}/prompt-optimize", response_model=PromptOptimizeResponse)
     def optimize_prompt(
         project_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
         payload: PromptOptimizeRequest,
         workbench: WorkbenchStore = Depends(get_store),
     ) -> PromptOptimizeResponse:
-        project = workbench.get_project(project_id)
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
         try:
             result = optimize_text_prompt(
                 source_text=payload.source_text,
@@ -557,18 +650,19 @@ def create_app(
     def regenerate_shot(
         project_id: str,
         shot_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
         payload: ShotRegenerateRequest,
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         if not payload.video_key:
             raise HTTPException(status_code=422, detail="video_key is required for shot regeneration")
         key_environment(payload.video_key, payload.base_url)
-        project = workbench.get_project(project_id)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
-        if project is None or storyboard is None or series_bible is None:
+        if storyboard is None or series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
         job_id = uuid.uuid4().hex
         bus.emit(project_id, job_id=job_id, stage="regenerate", status="running", message="Regenerating shot")
@@ -638,6 +732,8 @@ def create_app(
             video_model=payload.video_model,
             continuity_plan=continuity_plan,
         )
+        project.updated_at = datetime.now(UTC)
+        db.commit()
         event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
         project_dir = workbench.project_dir(project_id)
         response_storyboard = _sanitize_storyboard_response(project_dir, storyboard)
@@ -654,15 +750,16 @@ def create_app(
     @app.post("/api/projects/{project_id}/render")
     def render_project(
         project_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
         payload: RenderProjectRequest,
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        project = workbench.get_project(project_id)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
-        if project is None or storyboard is None or series_bible is None:
+        if storyboard is None or series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
 
         job_id = uuid.uuid4().hex
@@ -692,6 +789,8 @@ def create_app(
         workbench.write_artifact(project_id, "episode_storyboard.json", result["storyboard"])
         workbench.write_artifact(project_id, "consistency_report.json", report)
         workbench.write_artifact(project_id, "render_report.json", result["render_report"])
+        project.updated_at = datetime.now(UTC)
+        db.commit()
         project_dir = workbench.project_dir(project_id)
         response_storyboard = _sanitize_storyboard_response(project_dir, result["storyboard"])
         response_render_report = _sanitize_render_report_response(project_dir, result["render_report"])
@@ -704,7 +803,7 @@ def create_app(
         return {
             "job_id": job_id,
             "event": event,
-            "project": project.model_dump(),
+            "project": _project_data(project),
             "storyboard": response_storyboard,
             "consistency_report": report,
             "render_report": response_render_report,
@@ -713,7 +812,14 @@ def create_app(
         }
 
     @app.get("/api/projects/{project_id}/events")
-    async def project_events(project_id: str, bus: EventBus = Depends(get_events)) -> StreamingResponse:
+    async def project_events(
+        project_id: str,
+        project: Annotated[
+            ProjectRecord,
+            Depends(_require_owned_user, scope="function"),
+        ],
+        bus: EventBus = Depends(get_events),
+    ) -> StreamingResponse:
         return StreamingResponse(bus.stream(project_id), media_type="text/event-stream")
 
     return app

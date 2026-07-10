@@ -1,8 +1,42 @@
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from server.app.artifact_sync import rewrite_workflow_artifacts
-from server.app.main import create_app
+from server.app.auth.dependencies import CurrentUser, require_csrf, require_user
+from server.app.db.base import Base
+from server.app.db.session import get_db
+from server.app.main import (
+    _require_function_user,
+    create_app as create_production_app,
+)
+
+
+TEST_USER = CurrentUser(
+    id="api-test-user0000000000000000001",
+    email="api-test@example.com",
+    role="user",
+)
+
+
+def create_app(*, db_path, projects_root):
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = Session(engine, expire_on_commit=False)
+    app = create_production_app(db_path=db_path, projects_root=projects_root)
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[require_user] = lambda: TEST_USER
+    app.dependency_overrides[require_csrf] = lambda: TEST_USER
+    app.dependency_overrides[_require_function_user] = lambda: TEST_USER
+    app.state.test_db = db
+    app.state.test_db_engine = engine
+    return app
 
 
 TEXT_TEST_KEY = "txt-test-key-1234567890abcdef"
