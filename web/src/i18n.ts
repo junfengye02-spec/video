@@ -16,14 +16,66 @@ export interface UIStrings {
     shortDramaMode: string;
     projectLabel: string;
     noProjectYet: string;
+    newDraftAction: string;
+    exportProjectAction: string;
+    importProjectAction: string;
+    storageLabel: string;
+    browserLocalStorageHint: string;
+    storageUsageLabel: (usage: string) => string;
     shotCountLabel: (count: number) => string;
     localDraftLabel: string;
     activeCastLabel: string;
     waitingLabel: string;
     finalRenderLabel: string;
-      finalVideoTitle: string;
-      renderFinalVideoAction: string;
-      renderingVideoAction: string;
+    finalVideoTitle: string;
+    downloadFinalVideoAction: string;
+    downloadingFinalVideoAction: string;
+    renderFinalVideoAction: string;
+    renderingVideoAction: string;
+  };
+  projectsPage: {
+    title: string;
+    localStorageNote: string;
+    createAction: string;
+    importAction: string;
+    importingAction: string;
+    loading: string;
+    emptyState: string;
+    shotCount: (count: number) => string;
+    updatedAt: (value: string) => string;
+    finalRenderReady: string;
+    openAction: string;
+    openProject: (title: string) => string;
+    exportAction: string;
+    exportingAction: string;
+    exportProject: (title: string) => string;
+    deleteAction: string;
+    deleteProject: (title: string) => string;
+    deleteDialogTitle: string;
+    deleteDialogBody: (title: string) => string;
+    cancelAction: string;
+    confirmDeleteAction: string;
+    deletingAction: string;
+    loadError: string;
+    exportError: string;
+    importError: string;
+    deleteError: string;
+  };
+  newProjectPage: {
+    title: string;
+    backToProjects: string;
+    projectTitleLabel: string;
+    projectTitlePlaceholder: string;
+    projectTypeLabel: string;
+    singleVideo: string;
+    miniSeries: string;
+    longSeries: string;
+    promptLabel: string;
+    promptPlaceholder: string;
+    openProvider: string;
+    createAction: string;
+    creatingAction: string;
+    createError: string;
   };
   nav: {
     ariaLabel: string;
@@ -74,6 +126,10 @@ export interface UIStrings {
     createStoryboardRequiresPrompt: string;
     saveContinuityFallback: string;
     uploadReferenceFallback: string;
+    localProjectSaveFallback: string;
+    exportProjectFallback: string;
+    importProjectFallback: string;
+    downloadFinalVideoFallback: string;
     missingTextKeyForOptimize: string;
     missingVideoKeyForRender: string;
     missingVideoKeyForRegenerate: string;
@@ -95,8 +151,8 @@ export interface UIStrings {
     depthOfFieldLabel: string;
     colorTemperatureLabel: string;
     unspecifiedOption: string;
-    shotSizeOptions: Record<"wide" | "medium" | "medium_close" | "close_up" | "establishing", string>;
-    cameraMovementOptions: Record<"static" | "dolly_in" | "dolly_out" | "handheld" | "steadicam" | "orbital", string>;
+    shotSizeOptions: Record<ShotSize, string>;
+    cameraMovementOptions: Record<CameraMovement, string>;
     lensOptions: Record<"14" | "24" | "35" | "50" | "85" | "135" | "200", string>;
     lightingOptions: Record<
       "high_key" | "low_key" | "natural" | "golden_hour" | "blue_hour" | "tungsten_warm" | "neon" | "silhouette" | "rim_lit" | "volumetric" | "overcast_soft",
@@ -122,6 +178,7 @@ export interface UIStrings {
     noLocationFallback: string;
     scoreLabel: (score: number) => string;
     versionLabel: (version: number) => string;
+    editShotLabel: (shotIndex: number) => string;
     regenerateShotLabel: (shotIndex: number) => string;
     statusLabels: Record<ShotStatus, string>;
   };
@@ -188,14 +245,66 @@ const STRINGS: Record<Locale, UIStrings> = {
       shortDramaMode: "Short Drama Mode",
       projectLabel: "Project",
       noProjectYet: "No project yet",
+      newDraftAction: "New draft",
+      exportProjectAction: "Export project",
+      importProjectAction: "Import project",
+      storageLabel: "Local storage",
+      browserLocalStorageHint: "Projects are saved in this browser. Export backups before clearing browser data.",
+      storageUsageLabel: (usage: string) => `Browser storage used: ${usage}`,
       shotCountLabel: (count: number) => `${count} shots`,
       localDraftLabel: "Local draft",
       activeCastLabel: "Active Cast",
       waitingLabel: "Waiting",
       finalRenderLabel: "Final render",
       finalVideoTitle: "Final Video",
+      downloadFinalVideoAction: "Download final video",
+      downloadingFinalVideoAction: "Preparing download",
       renderFinalVideoAction: "Render final video",
       renderingVideoAction: "Rendering video",
+    },
+    projectsPage: {
+      title: "Projects",
+      localStorageNote: "Projects are stored in this browser.",
+      createAction: "New project",
+      importAction: "Import project",
+      importingAction: "Importing...",
+      loading: "Loading local projects...",
+      emptyState: "No local projects yet.",
+      shotCount: (count: number) => `${count} shots`,
+      updatedAt: (value: string) => `Updated ${value}`,
+      finalRenderReady: "Final render ready",
+      openAction: "Open",
+      openProject: (title: string) => `Open ${title}`,
+      exportAction: "Export",
+      exportingAction: "Exporting...",
+      exportProject: (title: string) => `Export ${title}`,
+      deleteAction: "Delete",
+      deleteProject: (title: string) => `Delete ${title}`,
+      deleteDialogTitle: "Delete project",
+      deleteDialogBody: (title: string) => `Delete “${title}”? This action cannot be undone.`,
+      cancelAction: "Cancel",
+      confirmDeleteAction: "Confirm delete",
+      deletingAction: "Deleting...",
+      loadError: "Unable to load local projects.",
+      exportError: "Unable to export project.",
+      importError: "Unable to import project.",
+      deleteError: "Unable to delete project.",
+    },
+    newProjectPage: {
+      title: "New project",
+      backToProjects: "Back to projects",
+      projectTitleLabel: "Project title",
+      projectTitlePlaceholder: "Untitled project",
+      projectTypeLabel: "Project type",
+      singleVideo: "Single video",
+      miniSeries: "Mini series",
+      longSeries: "Long series",
+      promptLabel: "Story and visual requirements",
+      promptPlaceholder: "Describe the story, characters, mood, and visual direction.",
+      openProvider: "Open provider settings",
+      createAction: "Plan storyboard with AI",
+      creatingAction: "Planning storyboard...",
+      createError: "Unable to plan the storyboard.",
     },
     nav: {
       ariaLabel: "Studio sections",
@@ -246,6 +355,11 @@ const STRINGS: Record<Locale, UIStrings> = {
       createStoryboardRequiresPrompt: "Enter a story prompt before creating the storyboard.",
       saveContinuityFallback: "Unable to save continuity settings.",
       uploadReferenceFallback: "Unable to upload reference image.",
+      localProjectSaveFallback:
+        "This project is open, but the browser could not save the local draft. Export the project before closing this tab.",
+      exportProjectFallback: "Project export failed.",
+      importProjectFallback: "Project import failed.",
+      downloadFinalVideoFallback: "Final video download failed.",
       missingTextKeyForOptimize: "Enter a text API key before optimizing a shot prompt.",
       missingVideoKeyForRender: "Enter a video API key before rendering final video.",
       missingVideoKeyForRegenerate: "Enter a video API key before regenerating a shot.",
@@ -268,19 +382,36 @@ const STRINGS: Record<Locale, UIStrings> = {
       colorTemperatureLabel: "Color temperature",
       unspecifiedOption: "Unspecified",
       shotSizeOptions: {
+        extreme_wide: "Extreme wide",
         wide: "Wide",
+        medium_wide: "Medium wide",
         medium: "Medium",
         medium_close: "Medium close",
         close_up: "Close up",
+        extreme_close_up: "Extreme close up",
+        over_shoulder: "Over shoulder",
+        insert: "Insert",
         establishing: "Establishing",
       },
       cameraMovementOptions: {
         static: "Static",
+        pan_left: "Pan left",
+        pan_right: "Pan right",
+        tilt_up: "Tilt up",
+        tilt_down: "Tilt down",
         dolly_in: "Dolly in",
         dolly_out: "Dolly out",
+        tracking_left: "Tracking left",
+        tracking_right: "Tracking right",
+        crane_up: "Crane up",
+        crane_down: "Crane down",
         handheld: "Handheld",
         steadicam: "Steadicam",
+        whip_pan: "Whip pan",
         orbital: "Orbital",
+        zoom_in: "Zoom in",
+        zoom_out: "Zoom out",
+        rack_focus: "Rack focus",
       },
       lensOptions: {
         "14": "14 mm",
@@ -333,6 +464,7 @@ const STRINGS: Record<Locale, UIStrings> = {
       noLocationFallback: "No location",
       scoreLabel: (score: number) => `Score ${score}`,
       versionLabel: (version: number) => `Version ${version}`,
+      editShotLabel: (shotIndex: number) => `Edit shot ${shotIndex}`,
       regenerateShotLabel: (shotIndex: number) => `Regenerate shot ${shotIndex}`,
       statusLabels: {
         draft: "draft",
@@ -404,14 +536,67 @@ const STRINGS: Record<Locale, UIStrings> = {
       shortDramaMode: "\u77ed\u5267\u6a21\u5f0f",
       projectLabel: "\u9879\u76ee",
       noProjectYet: "\u5c1a\u672a\u521b\u5efa\u9879\u76ee",
+      newDraftAction: "\u65b0\u5efa\u8349\u7a3f",
+      exportProjectAction: "\u5bfc\u51fa\u9879\u76ee",
+      importProjectAction: "\u5bfc\u5165\u9879\u76ee",
+      storageLabel: "\u672c\u5730\u5b58\u50a8",
+      browserLocalStorageHint:
+        "\u9879\u76ee\u4fdd\u5b58\u5728\u6b64\u6d4f\u89c8\u5668\u4e2d\u3002\u6e05\u9664\u6d4f\u89c8\u5668\u6570\u636e\u524d\u8bf7\u5148\u5bfc\u51fa\u5907\u4efd\u3002",
+      storageUsageLabel: (usage: string) => `\u6d4f\u89c8\u5668\u5b58\u50a8\u5df2\u7528\uff1a${usage}`,
       shotCountLabel: (count: number) => `${count} \u4e2a\u955c\u5934`,
       localDraftLabel: "\u672c\u5730\u8349\u7a3f",
       activeCastLabel: "\u5f53\u524d\u89d2\u8272",
       waitingLabel: "\u7b49\u5f85\u4e2d",
       finalRenderLabel: "\u6700\u7ec8\u6e32\u67d3",
       finalVideoTitle: "\u6700\u7ec8\u89c6\u9891",
+      downloadFinalVideoAction: "\u4e0b\u8f7d\u6700\u7ec8\u89c6\u9891",
+      downloadingFinalVideoAction: "\u6b63\u5728\u51c6\u5907\u4e0b\u8f7d",
       renderFinalVideoAction: "\u6e32\u67d3\u6700\u7ec8\u89c6\u9891",
       renderingVideoAction: "\u6b63\u5728\u6e32\u67d3\u89c6\u9891",
+    },
+    projectsPage: {
+      title: "\u9879\u76ee",
+      localStorageNote: "\u9879\u76ee\u4fdd\u5b58\u5728\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d\u3002",
+      createAction: "\u65b0\u5efa\u9879\u76ee",
+      importAction: "\u5bfc\u5165\u9879\u76ee",
+      importingAction: "\u6b63\u5728\u5bfc\u5165...",
+      loading: "\u6b63\u5728\u52a0\u8f7d\u672c\u5730\u9879\u76ee...",
+      emptyState: "\u6682\u65e0\u672c\u5730\u9879\u76ee\u3002",
+      shotCount: (count: number) => `${count} \u4e2a\u5206\u955c`,
+      updatedAt: (value: string) => `\u66f4\u65b0\u4e8e ${value}`,
+      finalRenderReady: "\u5df2\u6709\u6210\u7247",
+      openAction: "\u6253\u5f00",
+      openProject: (title: string) => `\u6253\u5f00 ${title}`,
+      exportAction: "\u5bfc\u51fa",
+      exportingAction: "\u6b63\u5728\u5bfc\u51fa...",
+      exportProject: (title: string) => `\u5bfc\u51fa ${title}`,
+      deleteAction: "\u5220\u9664",
+      deleteProject: (title: string) => `\u5220\u9664 ${title}`,
+      deleteDialogTitle: "\u5220\u9664\u9879\u76ee",
+      deleteDialogBody: (title: string) => `\u786e\u5b9a\u8981\u5220\u9664\u201c${title}\u201d\u5417\uff1f\u6b64\u64cd\u4f5c\u65e0\u6cd5\u64a4\u9500\u3002`,
+      cancelAction: "\u53d6\u6d88",
+      confirmDeleteAction: "\u786e\u8ba4\u5220\u9664",
+      deletingAction: "\u6b63\u5728\u5220\u9664...",
+      loadError: "\u65e0\u6cd5\u52a0\u8f7d\u672c\u5730\u9879\u76ee\u3002",
+      exportError: "\u65e0\u6cd5\u5bfc\u51fa\u9879\u76ee\u3002",
+      importError: "\u65e0\u6cd5\u5bfc\u5165\u9879\u76ee\u3002",
+      deleteError: "\u65e0\u6cd5\u5220\u9664\u9879\u76ee\u3002",
+    },
+    newProjectPage: {
+      title: "\u65b0\u5efa\u9879\u76ee",
+      backToProjects: "\u8fd4\u56de\u9879\u76ee\u5217\u8868",
+      projectTitleLabel: "\u9879\u76ee\u6807\u9898",
+      projectTitlePlaceholder: "\u672a\u547d\u540d\u9879\u76ee",
+      projectTypeLabel: "\u9879\u76ee\u7c7b\u578b",
+      singleVideo: "\u5355\u89c6\u9891",
+      miniSeries: "\u77ed\u7cfb\u5217",
+      longSeries: "\u957f\u7cfb\u5217",
+      promptLabel: "\u6545\u4e8b\u4e0e\u753b\u9762\u8981\u6c42",
+      promptPlaceholder: "\u63cf\u8ff0\u6545\u4e8b\u3001\u89d2\u8272\u3001\u6c1b\u56f4\u548c\u753b\u9762\u65b9\u5411\u3002",
+      openProvider: "\u6253\u5f00\u63a5\u53e3\u914d\u7f6e",
+      createAction: "AI \u89c4\u5212\u5206\u955c",
+      creatingAction: "\u6b63\u5728\u89c4\u5212\u5206\u955c...",
+      createError: "\u65e0\u6cd5\u89c4\u5212\u5206\u955c\u3002",
     },
     nav: {
       ariaLabel: "\u5de5\u4f5c\u53f0\u5206\u533a",
@@ -464,6 +649,11 @@ const STRINGS: Record<Locale, UIStrings> = {
       createStoryboardRequiresPrompt: "\u8bf7\u5148\u8f93\u5165\u6545\u4e8b\u63d0\u793a\uff0c\u518d\u521b\u5efa\u6545\u4e8b\u677f\u3002",
       saveContinuityFallback: "\u65e0\u6cd5\u4fdd\u5b58\u8fde\u7eed\u6027\u8bbe\u5b9a\u3002",
       uploadReferenceFallback: "\u65e0\u6cd5\u4e0a\u4f20\u53c2\u8003\u56fe\u3002",
+      localProjectSaveFallback:
+        "\u9879\u76ee\u5df2\u6253\u5f00\uff0c\u4f46\u6d4f\u89c8\u5668\u65e0\u6cd5\u4fdd\u5b58\u672c\u5730\u8349\u7a3f\u3002\u5173\u95ed\u6b64\u6807\u7b7e\u9875\u524d\u8bf7\u5148\u5bfc\u51fa\u9879\u76ee\u3002",
+      exportProjectFallback: "\u9879\u76ee\u5bfc\u51fa\u5931\u8d25\u3002",
+      importProjectFallback: "\u9879\u76ee\u5bfc\u5165\u5931\u8d25\u3002",
+      downloadFinalVideoFallback: "\u6700\u7ec8\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\u3002",
       missingTextKeyForOptimize:
         "\u8bf7\u5148\u8f93\u5165 text API key\uff0c\u518d\u4f18\u5316\u955c\u5934\u63d0\u793a\u8bcd\u3002",
       missingVideoKeyForRender:
@@ -490,19 +680,36 @@ const STRINGS: Record<Locale, UIStrings> = {
       colorTemperatureLabel: "\u8272\u6e29",
       unspecifiedOption: "\u672a\u6307\u5b9a",
       shotSizeOptions: {
+        extreme_wide: "\u5927\u8fdc\u666f",
         wide: "\u8fdc\u666f",
+        medium_wide: "\u4e2d\u8fdc\u666f",
         medium: "\u4e2d\u666f",
         medium_close: "\u4e2d\u8fd1\u666f",
         close_up: "\u7279\u5199",
+        extreme_close_up: "\u5927\u7279\u5199",
+        over_shoulder: "\u8fc7\u80a9\u955c\u5934",
+        insert: "\u63d2\u5165\u7279\u5199",
         establishing: "\u5efa\u7acb\u955c\u5934",
       },
       cameraMovementOptions: {
         static: "\u56fa\u5b9a",
+        pan_left: "\u5de6\u6447",
+        pan_right: "\u53f3\u6447",
+        tilt_up: "\u4e0a\u4ef0",
+        tilt_down: "\u4e0b\u4fef",
         dolly_in: "\u63a8\u955c",
         dolly_out: "\u62c9\u955c",
+        tracking_left: "\u5de6\u79fb\u8ddf\u62cd",
+        tracking_right: "\u53f3\u79fb\u8ddf\u62cd",
+        crane_up: "\u5347\u964d\u4e0a\u79fb",
+        crane_down: "\u5347\u964d\u4e0b\u79fb",
         handheld: "\u624b\u6301",
         steadicam: "\u7a33\u5b9a\u5668",
+        whip_pan: "\u5feb\u901f\u6447\u955c",
         orbital: "\u73af\u7ed5",
+        zoom_in: "\u53d8\u7126\u63a8\u8fd1",
+        zoom_out: "\u53d8\u7126\u62c9\u8fdc",
+        rack_focus: "\u7126\u70b9\u8f6c\u79fb",
       },
       lensOptions: {
         "14": "14 \u6beb\u7c73",
@@ -555,6 +762,7 @@ const STRINGS: Record<Locale, UIStrings> = {
       noLocationFallback: "\u672a\u8bbe\u7f6e\u573a\u666f",
       scoreLabel: (score: number) => `\u5206\u6570 ${score}`,
       versionLabel: (version: number) => `\u7248\u672c ${version}`,
+      editShotLabel: (shotIndex: number) => `\u7f16\u8f91\u955c\u5934 ${shotIndex}`,
       regenerateShotLabel: (shotIndex: number) => `\u91cd\u65b0\u751f\u6210\u955c\u5934 ${shotIndex}`,
       statusLabels: {
         draft: "\u8349\u7a3f",
