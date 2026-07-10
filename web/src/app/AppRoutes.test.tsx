@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import type { ShortDramaProjectResponse } from "../domain/types";
@@ -118,6 +118,7 @@ describe("App routes", () => {
     });
     apiMocks.createShortDramaProject.mockResolvedValue(cloneProjectResponse(projectWithEightShots));
     apiMocks.subscribeProjectEvents.mockReturnValue(vi.fn());
+    localProjectStoreMocks.listProjectSummaries.mockResolvedValue([]);
     localProjectStoreMocks.loadRecentProjectSnapshot.mockResolvedValue(null);
     localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue(null);
     localProjectStoreMocks.saveProjectSnapshot.mockResolvedValue(undefined);
@@ -133,6 +134,7 @@ describe("App routes", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     window.history.pushState({}, "", "/");
   });
 
@@ -184,6 +186,43 @@ describe("App routes", () => {
     await waitFor(() => expect(localProjectStoreMocks.setRecentProjectId).toHaveBeenCalledWith("p2"));
     expect(screen.queryByText("Project One")).not.toBeInTheDocument();
   });
+
+  it.each(["/projects", "/projects/new"])(
+    "cancels a pending deep-link load when navigation leaves for %s",
+    async (destination) => {
+      const pendingLoad = deferred<Awaited<ReturnType<typeof localProjectStoreMocks.loadProjectSnapshot>>>();
+      const staleProject = cloneProjectResponse();
+      staleProject.final_path = "local://media/stale-final";
+      localProjectStoreMocks.loadProjectSnapshot.mockReturnValue(pendingLoad.promise);
+
+      renderAppAt("/projects/p1/storyboard");
+      await waitFor(() => expect(localProjectStoreMocks.loadProjectSnapshot).toHaveBeenCalledWith("p1"));
+
+      act(() => {
+        window.history.pushState({}, "", destination);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      if (destination === "/projects") {
+        expect(await screen.findByRole("heading", { name: zh.projectsPage.title })).toBeInTheDocument();
+      } else {
+        expect(await screen.findByRole("heading", { name: zh.newProjectPage.title })).toBeInTheDocument();
+      }
+
+      await act(async () => {
+        pendingLoad.resolve({
+          id: "p1",
+          title: "Stale project",
+          updatedAt: "2026-07-10T08:00:00Z",
+          snapshot: staleProject,
+        });
+        await pendingLoad.promise;
+      });
+
+      expect(localProjectStoreMocks.setRecentProjectId).not.toHaveBeenCalledWith("p1");
+      expect(apiMocks.subscribeProjectEvents).not.toHaveBeenCalledWith("p1", expect.any(Function));
+      expect(localMediaUrlMocks.resolveLocalMediaUrl).not.toHaveBeenCalledWith("local://media/stale-final");
+    },
+  );
 
   it("cleans up project event subscriptions when the active project changes and unmounts", async () => {
     const firstCleanup = vi.fn();
@@ -244,6 +283,141 @@ describe("App routes", () => {
 
     expect(await screen.findByText("\u6b64\u9879\u76ee\u4e0d\u5728\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "\u8fd4\u56de\u9879\u76ee\u5217\u8868" })).toHaveAttribute("href", "/projects");
+  });
+
+  it("shows a storage error instead of missing-project copy when local loading rejects", async () => {
+    localProjectStoreMocks.loadProjectSnapshot.mockRejectedValue(new Error("browser storage failed"));
+
+    renderAppAt("/projects/p1/storyboard");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("browser storage failed");
+    expect(screen.queryByText("\u6b64\u9879\u76ee\u4e0d\u5728\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d")).not.toBeInTheDocument();
+  });
+
+  it("does not flash the previous missing state while loading a new project ID", async () => {
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValueOnce(null);
+    renderAppAt("/projects/missing/storyboard");
+    expect(await screen.findByText("\u6b64\u9879\u76ee\u4e0d\u5728\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d")).toBeInTheDocument();
+
+    const nextLoad = deferred<Awaited<ReturnType<typeof localProjectStoreMocks.loadProjectSnapshot>>>();
+    localProjectStoreMocks.loadProjectSnapshot.mockReturnValueOnce(nextLoad.promise);
+    act(() => {
+      window.history.pushState({}, "", "/projects/p2/storyboard");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(screen.queryByText("\u6b64\u9879\u76ee\u4e0d\u5728\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("\u6b63\u5728\u52a0\u8f7d\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d\u7684\u9879\u76ee");
+
+    const nextProject = cloneProjectResponse();
+    nextProject.project = { ...nextProject.project, id: "p2", title: "Project Two" };
+    nextLoad.resolve({
+      id: "p2",
+      title: "Project Two",
+      updatedAt: "2026-07-10T09:00:00Z",
+      snapshot: nextProject,
+    });
+    expect(await screen.findByText("Project Two")).toBeInTheDocument();
+  });
+
+  it("guards dirty storyboard navigation and preserves the draft when cancelled", async () => {
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: "Rain Alley",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(),
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderAppAt("/projects/p1/storyboard");
+    const prompt = await screen.findByLabelText(zh.shotEditor.promptLabel);
+    fireEvent.change(prompt, { target: { value: "\u672a\u4fdd\u5b58\u5206\u955c\u8349\u7a3f" } });
+
+    fireEvent.click(screen.getByRole("link", { name: zh.resources.title }));
+
+    expect(confirm).toHaveBeenCalledWith(zh.storyboardPage.discardChangesConfirm);
+    expect(window.location.pathname).toBe("/projects/p1/storyboard");
+    expect(screen.getByLabelText(zh.shotEditor.promptLabel)).toHaveValue("\u672a\u4fdd\u5b58\u5206\u955c\u8349\u7a3f");
+
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("link", { name: zh.resources.title }));
+    await waitFor(() => expect(window.location.pathname).toBe("/projects/p1/resources"));
+  });
+
+  it("guards dirty global settings navigation and preserves the draft when cancelled", async () => {
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: "Rain Alley",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(),
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderAppAt("/projects/p1/settings");
+    const worldview = await screen.findByLabelText(zh.continuity.worldview);
+    fireEvent.change(worldview, { target: { value: "\u672a\u4fdd\u5b58\u5168\u5c40\u8bbe\u5b9a" } });
+
+    fireEvent.click(screen.getByRole("link", { name: "OpenMontage" }));
+
+    expect(confirm).toHaveBeenCalledWith(zh.storyboardPage.discardChangesConfirm);
+    expect(window.location.pathname).toBe("/projects/p1/settings");
+    expect(screen.getByLabelText(zh.continuity.worldview)).toHaveValue("\u672a\u4fdd\u5b58\u5168\u5c40\u8bbe\u5b9a");
+
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("link", { name: "OpenMontage" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/projects"));
+  });
+
+  it("guards a dirty storyboard from browser history navigation", async () => {
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: "Rain Alley",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(),
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderAppAt("/projects/p1/settings");
+    await screen.findByLabelText(zh.continuity.worldview);
+    fireEvent.click(screen.getByRole("link", { name: "分镜编辑" }));
+    const prompt = await screen.findByLabelText(zh.shotEditor.promptLabel);
+    fireEvent.change(prompt, { target: { value: "未保存的历史导航草稿" } });
+
+    act(() => window.history.back());
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(zh.storyboardPage.discardChangesConfirm));
+    await waitFor(() => expect(window.location.pathname).toBe("/projects/p1/storyboard"));
+    expect(screen.getByLabelText(zh.shotEditor.promptLabel)).toHaveValue("未保存的历史导航草稿");
+
+    confirm.mockReturnValue(true);
+    act(() => window.history.back());
+    await waitFor(() => expect(window.location.pathname).toBe("/projects/p1/settings"));
+  });
+
+  it("guards a dirty global settings draft from history and browser unload", async () => {
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: "Rain Alley",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(),
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderAppAt("/projects/p1/storyboard");
+    await screen.findByLabelText(zh.shotEditor.promptLabel);
+    fireEvent.click(screen.getByRole("link", { name: "全局设定" }));
+    const worldview = await screen.findByLabelText(zh.continuity.worldview);
+    fireEvent.change(worldview, { target: { value: "未保存的历史全局设定" } });
+
+    const unload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+
+    act(() => window.history.back());
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(zh.storyboardPage.discardChangesConfirm));
+    await waitFor(() => expect(window.location.pathname).toBe("/projects/p1/settings"));
+    expect(screen.getByLabelText(zh.continuity.worldview)).toHaveValue("未保存的历史全局设定");
+
+    confirm.mockReturnValue(true);
+    act(() => window.history.back());
+    await waitFor(() => expect(window.location.pathname).toBe("/projects/p1/storyboard"));
   });
 
   it("binds unique asset IDs and lets a rejected save reach the resource page", async () => {

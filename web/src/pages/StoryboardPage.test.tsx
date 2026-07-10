@@ -36,6 +36,19 @@ afterEach(() => {
 });
 
 describe("StoryboardPage", () => {
+  it("reports dirty state upward while preserving its existing shot guard", async () => {
+    const onDirtyChange = vi.fn();
+    const props = { ...storyboardProps, onDirtyChange } as StoryboardPageProps;
+    render(<StoryboardPage {...props} />);
+
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+    fireEvent.change(screen.getByLabelText("分镜提示词"), {
+      target: { value: "向路由报告的未保存草稿" },
+    });
+
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+  });
+
   it("renders a selectable shot list, central preview, read-only order strip and inspector", () => {
     render(<StoryboardPage {...storyboardProps} />);
 

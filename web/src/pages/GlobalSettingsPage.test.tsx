@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStrings } from "../i18n";
 import { createContinuityPlan } from "../test/fixtures";
-import { GlobalSettingsPage } from "./GlobalSettingsPage";
+import { GlobalSettingsPage, type GlobalSettingsPageProps } from "./GlobalSettingsPage";
 
 const singleVideoPlan = createContinuityPlan("single_video");
 const seriesPlan = createContinuityPlan("mini_series");
@@ -22,6 +22,27 @@ afterEach(() => {
 });
 
 describe("GlobalSettingsPage", () => {
+  it("reports dirty state upward and returns clean after a successful save", async () => {
+    const onDirtyChange = vi.fn();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const props = {
+      plan: createContinuityPlan("single_video"),
+      saving: false,
+      onSave,
+      onDirtyChange,
+    } as GlobalSettingsPageProps;
+    render(<GlobalSettingsPage {...props} />);
+
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+    fireEvent.change(screen.getByLabelText("世界观"), {
+      target: { value: "向路由报告的未保存设定" },
+    });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "保存全局设定" }));
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+  });
+
   it("shows the reduced settings set for a single video", () => {
     render(<GlobalSettingsPage plan={singleVideoPlan} saving={false} onSave={vi.fn()} />);
 

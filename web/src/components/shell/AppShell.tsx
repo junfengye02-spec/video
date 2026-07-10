@@ -1,5 +1,5 @@
 import { CreditCard, Settings2 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
 import type { Project } from "../../domain/types";
 import { projectRoutes } from "../../app/routes";
@@ -10,6 +10,7 @@ export interface AppShellProps {
   project: Project | null;
   providerPanel: ReactNode;
   providerOpen?: boolean;
+  onBeforeNavigate?: () => boolean;
   onProviderOpenChange?: (open: boolean) => void;
 }
 
@@ -18,12 +19,19 @@ export function AppShell({
   project,
   providerPanel,
   providerOpen,
+  onBeforeNavigate,
   onProviderOpenChange,
 }: AppShellProps) {
   const [localProviderOpen, setLocalProviderOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const drawerOpen = providerOpen ?? localProviderOpen;
   const setDrawerOpen = onProviderOpenChange ?? setLocalProviderOpen;
+
+  const handleNavigate = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (onBeforeNavigate && !onBeforeNavigate()) {
+      event.preventDefault();
+    }
+  };
 
   useEffect(() => {
     if (!toast) return;
@@ -43,7 +51,7 @@ export function AppShell({
   return (
     <div className="workbench-shell">
       <header className="workbench-topbar">
-        <Link className="workbench-brand" to={projectRoutes.list}>OpenMontage</Link>
+        <Link className="workbench-brand" to={projectRoutes.list} onClick={handleNavigate}>OpenMontage</Link>
         <span className="workbench-project-title">{project?.title ?? "项目工作台"}</span>
         <div className="workbench-topbar-actions">
           <button type="button" onClick={() => setDrawerOpen(true)}>
@@ -58,7 +66,7 @@ export function AppShell({
         {project ? (
           <aside className="project-navigation" aria-label="项目导航">
             {links.map(([label, to]) => (
-              <NavLink key={to} to={to}>{label}</NavLink>
+              <NavLink key={to} to={to} onClick={handleNavigate}>{label}</NavLink>
             ))}
           </aside>
         ) : null}

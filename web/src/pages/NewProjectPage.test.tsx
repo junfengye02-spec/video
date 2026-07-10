@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getStrings } from "../i18n";
 import { createProjectResponse } from "../test/fixtures";
 import { NewProjectPage } from "./NewProjectPage";
 
@@ -61,12 +62,29 @@ describe("NewProjectPage", () => {
     expect(document.querySelector('[name="shot_count"]')).not.toBeInTheDocument();
   });
 
+  it("rejects an empty trimmed prompt with an accessible error", async () => {
+    const onCreate = vi.fn();
+    render(<NewProjectPage providerReady onCreate={onCreate} onCreated={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "   " } });
+
+    fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
+
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      getStrings("zh").errors.createStoryboardRequiresPrompt,
+    );
+  });
+
   it("shows creation progress and recovers from a rejected request", async () => {
     let rejectCreate: (reason: unknown) => void = () => undefined;
     const onCreate = vi.fn().mockReturnValue(new Promise((_, reject) => {
       rejectCreate = reject;
     }));
     render(<NewProjectPage providerReady onCreate={onCreate} onCreated={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText("故事与画面要求"), {
+      target: { value: "雨夜追踪" },
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
     expect(screen.getByRole("button", { name: "正在规划分镜..." })).toBeDisabled();

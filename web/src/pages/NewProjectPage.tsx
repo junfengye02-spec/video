@@ -22,7 +22,8 @@ export function NewProjectPage({
   onCreate,
   onCreated,
 }: NewProjectPageProps) {
-  const strings = getStrings("zh").newProjectPage;
+  const uiStrings = getStrings("zh");
+  const strings = uiStrings.newProjectPage;
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [projectType, setProjectType] = useState<ProjectType>("single_video");
@@ -31,13 +32,18 @@ export function NewProjectPage({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const normalizedPrompt = prompt.trim();
+    if (!normalizedPrompt) {
+      setError(uiStrings.errors.createStoryboardRequiresPrompt);
+      return;
+    }
     setCreating(true);
     setError(null);
 
     try {
       const input: CreateProjectInput = {
         title: title.trim() || "未命名项目",
-        prompt: prompt.trim(),
+        prompt: normalizedPrompt,
         project_type: projectType,
       };
       const result = await onCreate(input);

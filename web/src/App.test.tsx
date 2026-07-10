@@ -96,6 +96,12 @@ function cloneProjectResponse(value = projectResponse()): ShortDramaProjectRespo
   return structuredClone(value);
 }
 
+function projectWithId(id: string, title = id): ShortDramaProjectResponse {
+  const snapshot = projectResponse();
+  snapshot.project = { ...snapshot.project, id, title };
+  return snapshot;
+}
+
 function event(overrides: Partial<JobEvent> = {}): JobEvent {
   return {
     id: "event-1",
@@ -107,6 +113,16 @@ function event(overrides: Partial<JobEvent> = {}): JobEvent {
     created_at: "2026-07-10T08:00:00Z",
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 function ProviderHarness() {
@@ -155,6 +171,7 @@ function ProviderHarness() {
         />
       </label>
       <button type="button" onClick={() => run(() => workbench.openLocalProject("p1"))}>Open project</button>
+      <button type="button" onClick={() => run(() => workbench.openLocalProject("p2"))}>Open second project</button>
       <button type="button" onClick={() => run(workbench.saveProvider)}>Save provider</button>
       <button
         type="button"
@@ -164,6 +181,14 @@ function ProviderHarness() {
           project_type: "single_video",
         }))}
       >Create project</button>
+      <button
+        type="button"
+        onClick={() => run(() => workbench.createProject({
+          title: "Rain Alley",
+          prompt: "   ",
+          project_type: "single_video",
+        }))}
+      >Create empty project</button>
       <button
         type="button"
         disabled={!firstShot}
@@ -205,6 +230,9 @@ function ProviderHarness() {
       <output data-testid="events">{JSON.stringify(workbench.events)}</output>
       <output data-testid="error">{workbench.error ?? ""}</output>
       <output data-testid="final-url">{workbench.finalRenderUrl ?? ""}</output>
+      <output data-testid="busy">{JSON.stringify(workbench.busy)}</output>
+      <output data-testid="provider-ready">{String(workbench.providerReady)}</output>
+      <output data-testid="local-media">{JSON.stringify(workbench.localMediaUrls)}</output>
     </div>
   );
 }
@@ -305,6 +333,8 @@ describe("App workbench integration", () => {
   it("creates and persists a project without sending a shot count", async () => {
     renderProvider();
     setCredentials();
+    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
+    await waitFor(() => expect(screen.getByTestId("provider-ready")).toHaveTextContent("true"));
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
     await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
@@ -315,15 +345,89 @@ describe("App workbench integration", () => {
       text_key: "text-key",
       image_key: "image-key",
       video_key: "video-key",
-      base_url: "https://api.0000238.xyz",
-      text_model: "gpt-5.5",
-      image_model: "gpt-image-2",
-      video_model: "omni_flash-10s",
+      base_url: "https://example.invalid",
+      text_model: "text-model",
+      image_model: "image-model",
+      video_model: "video-model",
     });
     expect(apiMocks.createShortDramaProject.mock.calls[0]?.[0]).not.toHaveProperty("shot_count");
     expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenCalledWith(
       expect.objectContaining({ project: expect.objectContaining({ id: "p1" }), final_path: null }),
     );
+  });
+
+  it("rejects project creation until the current complete credentials are verified", async () => {
+    renderProvider();
+    setCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
+    expect(apiMocks.createShortDramaProject).not.toHaveBeenCalled();
+    expect(screen.getByTestId("error")).toHaveTextContent(zh.errors.createStoryboardRequiresKeys);
+  });
+
+  it("invalidates provider readiness whenever a verified credential changes", async () => {
+    renderProvider();
+    setCredentials();
+    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
+    await waitFor(() => expect(screen.getByTestId("provider-ready")).toHaveTextContent("true"));
+
+    fireEvent.change(screen.getByLabelText("Video credential"), {
+      target: { value: "different-video-key" },
+    });
+
+    expect(screen.getByTestId("provider-ready")).toHaveTextContent("false");
+  });
+
+  it("rejects an invalid provider session without installing masked keys", async () => {
+    apiMocks.saveGatewayKey.mockResolvedValue({
+      masked_keys: { text: "***text", image: "***image", video: "***video" },
+      provider: "syapi",
+      base_url: "https://example.invalid",
+      models: { text: "text-model", image: "image-model", video: "video-model" },
+      valid: false,
+    });
+    renderProvider();
+    setCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
+    expect(screen.getByTestId("provider-ready")).toHaveTextContent("false");
+    expect(screen.getByTestId("error")).toHaveTextContent(zh.errors.saveKeysFallback);
+  });
+
+  it("clears previously verified readiness when provider revalidation is invalid", async () => {
+    renderProvider();
+    setCredentials();
+    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
+    await waitFor(() => expect(screen.getByTestId("provider-ready")).toHaveTextContent("true"));
+    apiMocks.saveGatewayKey.mockResolvedValueOnce({
+      masked_keys: { text: "***text", image: "***image", video: "***video" },
+      provider: "syapi",
+      base_url: "https://example.invalid",
+      models: { text: "text-model", image: "image-model", video: "video-model" },
+      valid: false,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
+    expect(screen.getByTestId("provider-ready")).toHaveTextContent("false");
+  });
+
+  it("defensively rejects an empty project prompt", async () => {
+    renderProvider();
+    setCredentials();
+    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
+    await waitFor(() => expect(screen.getByTestId("provider-ready")).toHaveTextContent("true"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Create empty project" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
+    expect(apiMocks.createShortDramaProject).not.toHaveBeenCalled();
+    expect(screen.getByTestId("error")).toHaveTextContent(zh.errors.createStoryboardRequiresPrompt);
   });
 
   it("saves shot metadata, clears render metadata, and propagates rejection", async () => {
@@ -384,6 +488,146 @@ describe("App workbench integration", () => {
     });
   });
 
+  it("does not let a stale optimize rejection set the new project's error or clear its busy state", async () => {
+    const first = deferred<{
+      project_id: string;
+      model: string;
+      optimized_text: string;
+      notes: string[];
+    }>();
+    const second = deferred<{
+      project_id: string;
+      model: string;
+      optimized_text: string;
+      notes: string[];
+    }>();
+    apiMocks.optimizePrompt
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const projectA = projectWithId("p1", "Project A");
+    const projectB = projectWithId("p2", "Project B");
+    localProjectStoreMocks.loadProjectSnapshot.mockImplementation((projectId: string) => Promise.resolve({
+      id: projectId,
+      title: projectId === "p1" ? "Project A" : "Project B",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(projectId === "p1" ? projectA : projectB),
+    }));
+    renderProvider();
+    setCredentials();
+    fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent("p1"));
+    fireEvent.click(screen.getByRole("button", { name: "Optimize shot" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second project" }));
+    await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent("p2"));
+    fireEvent.click(screen.getByRole("button", { name: "Optimize shot" }));
+    await waitFor(() => expect(screen.getByTestId("busy")).toHaveTextContent('"optimizingShotId":"shot-1"'));
+
+    first.reject(new Error("stale optimize failed"));
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
+    expect(screen.getByTestId("error")).toBeEmptyDOMElement();
+    expect(screen.getByTestId("busy")).toHaveTextContent('"optimizingShotId":"shot-1"');
+
+    second.resolve({
+      project_id: "p2",
+      model: "gpt-5.5",
+      optimized_text: "Project B optimized",
+      notes: [],
+    });
+    await waitFor(() => expect(screen.getByTestId("busy")).toHaveTextContent('"optimizingShotId":null'));
+  });
+
+  it("does not let a stale shot save success overwrite the new project or clear its save busy state", async () => {
+    const projectA = projectWithId("p1", "Project A");
+    const projectB = projectWithId("p2", "Project B");
+    const first = deferred<{
+      job_id: string;
+      event: JobEvent;
+      shot: Shot;
+      storyboard: ShortDramaProjectResponse["storyboard"];
+      consistency_report: ShortDramaProjectResponse["consistency_report"];
+    }>();
+    const second = deferred<{
+      job_id: string;
+      event: JobEvent;
+      shot: Shot;
+      storyboard: ShortDramaProjectResponse["storyboard"];
+      consistency_report: ShortDramaProjectResponse["consistency_report"];
+    }>();
+    apiMocks.saveShot.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    localProjectStoreMocks.loadProjectSnapshot.mockImplementation((projectId: string) => Promise.resolve({
+      id: projectId,
+      title: projectId === "p1" ? "Project A" : "Project B",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(projectId === "p1" ? projectA : projectB),
+    }));
+    renderProvider();
+    fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent("p1"));
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second project" }));
+    await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent("p2"));
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+    await waitFor(() => expect(screen.getByTestId("busy")).toHaveTextContent('"savingShotId":"shot-1"'));
+
+    const staleShot = { ...projectA.storyboard.shots[0], prompt: "Stale A save" };
+    first.resolve({
+      job_id: "save-a",
+      event: event({ id: "save-a", project_id: "p1" }),
+      shot: staleShot,
+      storyboard: { ...projectA.storyboard, shots: [staleShot, projectA.storyboard.shots[1]] },
+      consistency_report: projectA.consistency_report,
+    });
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(screen.getByTestId("project-id")).toHaveTextContent("p2");
+    expect(screen.getByTestId("snapshot")).not.toHaveTextContent("Stale A save");
+    expect(screen.getByTestId("busy")).toHaveTextContent('"savingShotId":"shot-1"');
+
+    const savedB = { ...projectB.storyboard.shots[0], prompt: "Saved B" };
+    second.resolve({
+      job_id: "save-b",
+      event: event({ id: "save-b", project_id: "p2" }),
+      shot: savedB,
+      storyboard: { ...projectB.storyboard, shots: [savedB, projectB.storyboard.shots[1]] },
+      consistency_report: projectB.consistency_report,
+    });
+    await waitFor(() => expect(screen.getByTestId("busy")).toHaveTextContent('"savingShotId":null'));
+  });
+
+  it("does not let a stale render rejection set the new project's error or clear its render busy state", async () => {
+    const projectA = projectWithId("p1", "Project A");
+    const projectB = projectWithId("p2", "Project B");
+    const first = deferred<never>();
+    const second = deferred<never>();
+    apiMocks.renderProject.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    localProjectStoreMocks.loadProjectSnapshot.mockImplementation((projectId: string) => Promise.resolve({
+      id: projectId,
+      title: projectId === "p1" ? "Project A" : "Project B",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(projectId === "p1" ? projectA : projectB),
+    }));
+    renderProvider();
+    setCredentials();
+    fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent("p1"));
+    fireEvent.click(screen.getByRole("button", { name: "Render final" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second project" }));
+    await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent("p2"));
+    fireEvent.click(screen.getByRole("button", { name: "Render final" }));
+    await waitFor(() => expect(screen.getByTestId("busy")).toHaveTextContent('"rendering":true'));
+
+    first.reject(new Error("stale render failed"));
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
+    expect(screen.getByTestId("error")).toBeEmptyDOMElement();
+    expect(screen.getByTestId("busy")).toHaveTextContent('"rendering":true');
+
+    second.reject(new Error("current render failed"));
+    await waitFor(() => expect(screen.getByTestId("error")).toHaveTextContent("current render failed"));
+    expect(screen.getByTestId("busy")).toHaveTextContent('"rendering":false');
+  });
+
   it("caches regenerated shot media locally and persists the updated snapshot", async () => {
     const current = projectResponse();
     const regeneratedShot: Shot = {
@@ -428,6 +672,49 @@ describe("App workbench integration", () => {
     );
   });
 
+  it("preserves a newer shot save that lands while regenerated media is caching", async () => {
+    const current = projectResponse();
+    const cachedMedia = deferred<string | null>();
+    const regeneratedShot = {
+      ...current.storyboard.shots[0],
+      output_path: "assets/video/shot-1.mp4",
+      output_url: null,
+    };
+    const saved = cloneProjectResponse(current);
+    saved.storyboard.shots[0].prompt = "Newer save survived regeneration cache";
+    apiMocks.regenerateShot.mockResolvedValue({
+      job_id: "regenerate-cache-race",
+      event: event({ id: "regenerate-cache-race", stage: "regenerate" }),
+      shot: regeneratedShot,
+      storyboard: {
+        ...current.storyboard,
+        shots: [regeneratedShot, current.storyboard.shots[1]],
+      },
+      consistency_report: current.consistency_report,
+    });
+    apiMocks.saveShot.mockResolvedValue({
+      job_id: "save-during-regenerate-cache",
+      event: event({ id: "save-during-regenerate-cache" }),
+      shot: saved.storyboard.shots[0],
+      storyboard: saved.storyboard,
+      consistency_report: saved.consistency_report,
+    });
+    localMediaStoreMocks.cacheRemoteMedia.mockReturnValue(cachedMedia.promise);
+    renderProvider();
+    await openProject(current);
+    setCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate shot" }));
+    await waitFor(() => expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+    await waitFor(() => expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer save survived regeneration cache"));
+
+    cachedMedia.resolve("local://media/regenerate-cache-race");
+
+    await waitFor(() => expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/regenerate-cache-race"));
+    expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer save survived regeneration cache");
+  });
+
   it("saves continuity with the exact plan and persists the refreshed project", async () => {
     const current = projectResponse();
     const plan = current.continuity_plan as ContinuityPlan;
@@ -449,9 +736,100 @@ describe("App workbench integration", () => {
     expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(refreshed);
   });
 
+  it("retries a continuity refresh when a newer shot save lands during the first GET", async () => {
+    const current = projectResponse();
+    const updatedPlan = {
+      ...(current.continuity_plan as ContinuityPlan),
+      series_bible: {
+        ...(current.continuity_plan as ContinuityPlan).series_bible,
+        worldview: "Continuity saved",
+      },
+    };
+    const firstRefresh = deferred<ShortDramaProjectResponse>();
+    const staleRefresh = cloneProjectResponse(current);
+    staleRefresh.continuity_plan = updatedPlan;
+    const combined = cloneProjectResponse(staleRefresh);
+    combined.storyboard.shots[0].prompt = "Newer shot survived";
+    apiMocks.saveContinuityPlan.mockResolvedValue({
+      project: current.project,
+      continuity_plan: updatedPlan,
+    });
+    apiMocks.loadProject
+      .mockReturnValueOnce(firstRefresh.promise)
+      .mockResolvedValueOnce(combined);
+    apiMocks.saveShot.mockResolvedValue({
+      job_id: "newer-save",
+      event: event({ id: "newer-save" }),
+      shot: combined.storyboard.shots[0],
+      storyboard: combined.storyboard,
+      consistency_report: combined.consistency_report,
+    });
+    renderProvider();
+    await openProject(current);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save continuity" }));
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+    await waitFor(() => expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer shot survived"));
+
+    firstRefresh.resolve(staleRefresh);
+
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer shot survived");
+      expect(screen.getByTestId("snapshot")).toHaveTextContent("Continuity saved");
+    });
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        continuity_plan: expect.objectContaining({
+          series_bible: expect.objectContaining({ worldview: "Continuity saved" }),
+        }),
+        storyboard: expect.objectContaining({
+          shots: expect.arrayContaining([
+            expect.objectContaining({ prompt: "Newer shot survived" }),
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it("preserves browser-local media refs across a non-media authoritative refresh", async () => {
+    const current = projectResponse();
+    current.storyboard.shots[0].output_path = "local://media/cached-shot";
+    current.final_path = "local://media/cached-final";
+    current.render_report = {
+      version: "1.0",
+      outputs: [{
+        path: "renders/final.mp4",
+        format: "mp4",
+        resolution: "720x1280",
+        duration_seconds: 25,
+      }],
+    };
+    const refreshed = cloneProjectResponse(current);
+    refreshed.storyboard.shots[0].output_path = "assets/video/shot-1.mp4";
+    refreshed.final_path = "renders/final.mp4";
+    const plan = current.continuity_plan as ContinuityPlan;
+    apiMocks.saveContinuityPlan.mockResolvedValue({ project: current.project, continuity_plan: plan });
+    apiMocks.loadProject.mockResolvedValue(refreshed);
+    renderProvider();
+    await openProject(current);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save continuity" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/cached-shot");
+    expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/cached-final");
+    expect(screen.getByTestId("snapshot")).not.toHaveTextContent("assets/video/shot-1.mp4");
+  });
+
   it("uploads the exact reference payload and persists the refreshed project", async () => {
     const current = projectResponse();
+    current.storyboard.shots[0].output_path = "local://media/upload-cached-shot";
+    current.series_bible.assets![0].reference_images = ["local://media/upload-cached-asset"];
     const refreshed = cloneProjectResponse(current);
+    refreshed.storyboard.shots[0].output_path = "assets/video/shot-1.mp4";
+    refreshed.series_bible.assets![0].reference_images = ["assets/images/character/mara.png"];
     refreshed.series_bible.assets = [
       ...(refreshed.series_bible.assets ?? []),
       {
@@ -485,10 +863,171 @@ describe("App workbench integration", () => {
       file: expect.any(File),
     }));
     expect(apiMocks.loadProject).toHaveBeenCalledWith("p1");
-    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(refreshed);
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        storyboard: expect.objectContaining({
+          shots: expect.arrayContaining([
+            expect.objectContaining({ output_path: "local://media/upload-cached-shot" }),
+          ]),
+        }),
+        series_bible: expect.objectContaining({
+          assets: expect.arrayContaining([
+            expect.objectContaining({
+              id: "asset-char-1",
+              reference_images: ["local://media/upload-cached-asset"],
+            }),
+            expect.objectContaining({ id: "asset-uploaded" }),
+          ]),
+        }),
+      }),
+    );
   });
 
-  it("caches final render media locally and keeps the render response without reloading", async () => {
+  it("retries an upload refresh when a newer shot save lands during the first GET", async () => {
+    const current = projectResponse();
+    const uploadedAsset = {
+      id: "asset-uploaded-race",
+      kind: "character" as const,
+      label: "Uploaded race asset",
+      description: "Uploaded while editing",
+      prompt: "Reference",
+      reference_images: ["assets/images/uploaded-race.png"],
+      media_urls: ["/api/projects/p1/media/assets/images/uploaded-race.png"],
+      shot_ids: [],
+      version: 1,
+    };
+    const firstRefresh = deferred<ShortDramaProjectResponse>();
+    const staleRefresh = cloneProjectResponse(current);
+    staleRefresh.series_bible.assets = [
+      ...(staleRefresh.series_bible.assets ?? []),
+      uploadedAsset,
+    ];
+    const combined = cloneProjectResponse(staleRefresh);
+    combined.storyboard.shots[0].prompt = "Newer shot survived upload";
+    apiMocks.uploadReferenceImage.mockResolvedValue({
+      media: {
+        path: "assets/images/uploaded-race.png",
+        media_url: "/api/projects/p1/media/assets/images/uploaded-race.png",
+        filename: "uploaded-race.png",
+        content_type: "image/png",
+      },
+      asset: uploadedAsset,
+    });
+    apiMocks.loadProject
+      .mockReturnValueOnce(firstRefresh.promise)
+      .mockResolvedValueOnce(combined);
+    apiMocks.saveShot.mockResolvedValue({
+      job_id: "newer-save-upload",
+      event: event({ id: "newer-save-upload" }),
+      shot: combined.storyboard.shots[0],
+      storyboard: combined.storyboard,
+      consistency_report: combined.consistency_report,
+    });
+    renderProvider();
+    await openProject(current);
+
+    fireEvent.click(screen.getByRole("button", { name: "Upload reference" }));
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+    await waitFor(() => expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer shot survived upload"));
+
+    firstRefresh.resolve(staleRefresh);
+
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer shot survived upload");
+      expect(screen.getByTestId("snapshot")).toHaveTextContent("Uploaded race asset");
+    });
+  });
+
+  it("refreshes from the authoritative project after render and caches its final path", async () => {
+    const current = projectResponse();
+    current.storyboard.shots[0].output_path = "local://media/render-cached-shot";
+    const authoritative = cloneProjectResponse(current);
+    authoritative.storyboard.shots[0].output_path = "assets/video/shot-1.mp4";
+    authoritative.continuity_plan = {
+      ...(authoritative.continuity_plan as ContinuityPlan),
+      series_bible: {
+        ...(authoritative.continuity_plan as ContinuityPlan).series_bible,
+        worldview: "Authoritative world",
+      },
+    };
+    authoritative.workflow_artifacts = [{
+      name: "authoritative-render.json",
+      path: "artifacts/authoritative-render.json",
+      exists: true,
+    }];
+    authoritative.render_report = {
+      version: "1.0",
+      outputs: [{
+        path: "renders/final.mp4",
+        format: "mp4",
+        resolution: "1080x1920",
+        duration_seconds: 26,
+      }],
+    };
+    authoritative.final_path = "renders/final.mp4";
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-job",
+      event: event({ id: "render-event", stage: "render" }),
+      project: current.project,
+      storyboard: current.storyboard,
+      consistency_report: current.consistency_report,
+      render_report: {
+        version: "1.0",
+        outputs: [{
+          path: "renders/final.webm",
+          format: "webm",
+          resolution: "720x1280",
+          duration_seconds: 25,
+        }],
+      },
+      final_path: "renders/final.webm",
+    });
+    apiMocks.loadProject.mockResolvedValue(authoritative);
+    localMediaStoreMocks.cacheRemoteMedia.mockImplementation(
+      (_url: string, metadata: { sourcePath: string }) => Promise.resolve(
+        metadata.sourcePath.endsWith("final.mp4")
+          ? "local://media/final-authoritative"
+          : "local://media/final-response",
+      ),
+    );
+    renderProvider();
+    await openProject(current);
+    setCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: "Render final" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(apiMocks.renderProject).toHaveBeenCalledWith("p1", {
+      video_key: "video-key",
+      base_url: "https://api.0000238.xyz",
+      video_model: "omni_flash-10s",
+      render_runtime: "ffmpeg",
+    });
+    expect(apiMocks.loadProject).toHaveBeenCalledWith("p1");
+    expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledTimes(1);
+    expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith(
+      "/api/projects/p1/media/renders/final.mp4",
+      { projectId: "p1", sourcePath: "renders/final.mp4" },
+    );
+    expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        continuity_plan: expect.objectContaining({
+          series_bible: expect.objectContaining({ worldview: "Authoritative world" }),
+        }),
+        workflow_artifacts: authoritative.workflow_artifacts,
+        final_path: "local://media/final-authoritative",
+        storyboard: expect.objectContaining({
+          shots: expect.arrayContaining([
+            expect.objectContaining({ output_path: "local://media/render-cached-shot" }),
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it("retains the render response without publishing a refresh failure", async () => {
     const current = projectResponse();
     apiMocks.renderProject.mockResolvedValue({
       job_id: "render-job",
@@ -507,7 +1046,8 @@ describe("App workbench integration", () => {
       },
       final_path: "renders/final.mp4",
     });
-    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/final-1");
+    apiMocks.loadProject.mockRejectedValue(new Error("authoritative refresh failed"));
+    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/final-response");
     renderProvider();
     await openProject(current);
     setCredentials();
@@ -515,20 +1055,184 @@ describe("App workbench integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Render final" }));
 
     await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
-    expect(apiMocks.renderProject).toHaveBeenCalledWith("p1", {
-      video_key: "video-key",
-      base_url: "https://api.0000238.xyz",
-      video_model: "omni_flash-10s",
-      render_runtime: "ffmpeg",
+    expect(apiMocks.loadProject).toHaveBeenCalledWith("p1");
+    expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/final-response");
+    expect(screen.getByTestId("error")).toBeEmptyDOMElement();
+  });
+
+  it("retains render response metadata when an immediate refresh is incomplete", async () => {
+    const current = projectResponse();
+    const postRender = cloneProjectResponse(current);
+    postRender.project.title = "POST render title";
+    postRender.storyboard.shots[0].prompt = "POST render storyboard";
+    postRender.consistency_report = { score: 91, issues: [] };
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-incomplete-refresh",
+      event: event({ id: "render-incomplete-refresh", stage: "render" }),
+      project: postRender.project,
+      storyboard: postRender.storyboard,
+      consistency_report: postRender.consistency_report,
+      render_report: {
+        version: "1.0",
+        outputs: [{
+          path: "renders/final.mp4",
+          format: "mp4",
+          resolution: "720x1280",
+          duration_seconds: 25,
+        }],
+      },
+      final_path: "renders/final.mp4",
     });
-    expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith(
-      "/api/projects/p1/media/renders/final.mp4",
-      { projectId: "p1", sourcePath: "renders/final.mp4" },
-    );
+    const incomplete = cloneProjectResponse(current);
+    incomplete.project.title = "Stale incomplete GET title";
+    incomplete.storyboard.shots[0].prompt = "Stale incomplete GET storyboard";
+    incomplete.consistency_report = { score: 12, issues: [] };
+    incomplete.render_report = null;
+    incomplete.final_path = null;
+    apiMocks.loadProject.mockResolvedValue(incomplete);
+    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/render-incomplete-refresh");
+    renderProvider();
+    await openProject(current);
+    setCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: "Render final" }));
+
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/render-incomplete-refresh");
+    expect(screen.getByTestId("snapshot")).toHaveTextContent('"render_report":{"version":"1.0"');
+    expect(screen.getByTestId("snapshot")).toHaveTextContent("POST render title");
+    expect(screen.getByTestId("snapshot")).toHaveTextContent("POST render storyboard");
+    expect(screen.getByTestId("snapshot")).toHaveTextContent('"consistency_report":{"score":91');
+    expect(screen.getByTestId("snapshot")).not.toHaveTextContent("Stale incomplete GET");
+  });
+
+  it("preserves a newer shot save that lands while rendered media is caching", async () => {
+    const current = projectResponse();
+    const finalCache = deferred<string | null>();
+    const authoritative = cloneProjectResponse(current);
+    authoritative.storyboard.shots[0].prompt = "Newer save survived render cache";
+    authoritative.render_report = {
+      version: "1.0",
+      outputs: [{
+        path: "renders/final.mp4",
+        format: "mp4",
+        resolution: "720x1280",
+        duration_seconds: 25,
+      }],
+    };
+    authoritative.final_path = "renders/final.mp4";
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-cache-race",
+      event: event({ id: "render-cache-race", stage: "render" }),
+      project: current.project,
+      storyboard: current.storyboard,
+      consistency_report: current.consistency_report,
+      render_report: {
+        version: "1.0",
+        outputs: [{
+          path: "renders/final.mp4",
+          format: "mp4",
+          resolution: "720x1280",
+          duration_seconds: 25,
+        }],
+      },
+      final_path: "renders/final.mp4",
+    });
+    apiMocks.saveShot.mockResolvedValue({
+      job_id: "save-during-render-cache",
+      event: event({ id: "save-during-render-cache" }),
+      shot: authoritative.storyboard.shots[0],
+      storyboard: authoritative.storyboard,
+      consistency_report: authoritative.consistency_report,
+    });
+    const authoritativeRefresh = deferred<ShortDramaProjectResponse>();
+    apiMocks.loadProject.mockReturnValue(authoritativeRefresh.promise);
+    localMediaStoreMocks.cacheRemoteMedia
+      .mockReturnValueOnce(finalCache.promise);
+    renderProvider();
+    await openProject(current);
+    setCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: "Render final" }));
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledTimes(1));
+    authoritativeRefresh.resolve(authoritative);
+    await waitFor(() => expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+    await waitFor(() => expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer save survived render cache"));
+
+    finalCache.resolve("local://media/render-cache-authoritative");
+    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
+    expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer save survived render cache");
+    expect(screen.getByTestId("snapshot")).toHaveTextContent('"render_report":null');
+    expect(screen.getByTestId("snapshot")).toHaveTextContent('"final_path":null');
     expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
-      expect.objectContaining({ final_path: "local://media/final-1" }),
+      expect.objectContaining({
+        storyboard: expect.objectContaining({
+          shots: expect.arrayContaining([
+            expect.objectContaining({ prompt: "Newer save survived render cache" }),
+          ]),
+        }),
+        render_report: null,
+        final_path: null,
+      }),
     );
-    expect(apiMocks.loadProject).not.toHaveBeenCalled();
+    expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a render refresh when a newer shot save lands during the first GET", async () => {
+    const current = projectResponse();
+    const renderReport = {
+      version: "1.0" as const,
+      outputs: [{
+        path: "renders/final.mp4",
+        format: "mp4",
+        resolution: "720x1280",
+        duration_seconds: 25,
+      }],
+    };
+    const firstRefresh = deferred<ShortDramaProjectResponse>();
+    const staleRefresh = cloneProjectResponse(current);
+    staleRefresh.render_report = renderReport;
+    staleRefresh.final_path = "renders/final.mp4";
+    const combined = cloneProjectResponse(staleRefresh);
+    combined.storyboard.shots[0].prompt = "Newer shot survived render";
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-race",
+      event: event({ id: "render-race", stage: "render" }),
+      project: current.project,
+      storyboard: current.storyboard,
+      consistency_report: current.consistency_report,
+      render_report: renderReport,
+      final_path: "renders/final.mp4",
+    });
+    apiMocks.loadProject
+      .mockReturnValueOnce(firstRefresh.promise)
+      .mockResolvedValueOnce(combined);
+    apiMocks.saveShot.mockResolvedValue({
+      job_id: "newer-save-render",
+      event: event({ id: "newer-save-render" }),
+      shot: combined.storyboard.shots[0],
+      storyboard: combined.storyboard,
+      consistency_report: combined.consistency_report,
+    });
+    localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/render-race");
+    renderProvider();
+    await openProject(current);
+    setCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: "Render final" }));
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
+    await waitFor(() => expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer shot survived render"));
+
+    firstRefresh.resolve(staleRefresh);
+
+    await waitFor(() => expect(apiMocks.loadProject).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.getByTestId("snapshot")).toHaveTextContent("Newer shot survived render");
+      expect(screen.getByTestId("snapshot")).toHaveTextContent('"render_report":{"version":"1.0"');
+      expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/render-race");
+    });
   });
 
   it("resolves and downloads a browser-local final video", async () => {
@@ -562,6 +1266,91 @@ describe("App workbench integration", () => {
     expect(link.download).toBe("Rain Alley-final.mp4");
     expect(click).toHaveBeenCalled();
     expect(revokeObjectUrl).toHaveBeenCalledWith("blob:download-final");
+  });
+
+  it("fully resets a stale media resolution after its project is no longer active", async () => {
+    const projectA = projectWithId("p1", "Project A");
+    projectA.final_path = "local://media/stale-final";
+    const projectB = projectWithId("p2", "Project B");
+    const resolution = deferred<string | null>();
+    localMediaUrlMocks.resolveLocalMediaUrl.mockReturnValue(resolution.promise);
+    localProjectStoreMocks.loadProjectSnapshot.mockImplementation((projectId: string) => Promise.resolve({
+      id: projectId,
+      title: projectId === "p1" ? "Project A" : "Project B",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(projectId === "p1" ? projectA : projectB),
+    }));
+    renderProvider();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(localMediaUrlMocks.resolveLocalMediaUrl).toHaveBeenCalledWith("local://media/stale-final"));
+    fireEvent.click(screen.getByRole("button", { name: "Open second project" }));
+    await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent("p2"));
+
+    resolution.resolve("blob:stale-final");
+
+    await waitFor(() => expect(localMediaUrlMocks.revokeLocalMediaUrls).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("local-media")).not.toHaveTextContent("blob:stale-final");
+  });
+
+  it("resets orphaned media and rebuilds retained refs after a same-project refresh", async () => {
+    const current = projectResponse();
+    current.final_path = "local://media/retained-final";
+    current.storyboard.shots[0].output_path = "local://media/orphaned-shot";
+    const refreshed = cloneProjectResponse(current);
+    refreshed.storyboard.shots[0].output_path = null;
+    const plan = current.continuity_plan as ContinuityPlan;
+    apiMocks.saveContinuityPlan.mockResolvedValue({
+      project: current.project,
+      continuity_plan: plan,
+    });
+    apiMocks.loadProject.mockResolvedValue(refreshed);
+    let retainedResolution = 0;
+    localMediaUrlMocks.resolveLocalMediaUrl.mockImplementation((ref: string) => Promise.resolve(
+      ref.endsWith("retained-final")
+        ? `blob:retained-final-${++retainedResolution}`
+        : "blob:orphaned-shot",
+    ));
+    renderProvider();
+    await openProject(current);
+    await waitFor(() => {
+      expect(screen.getByTestId("local-media")).toHaveTextContent("blob:retained-final-1");
+      expect(screen.getByTestId("local-media")).toHaveTextContent("blob:orphaned-shot");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save continuity" }));
+
+    await waitFor(() => expect(localMediaUrlMocks.revokeLocalMediaUrls).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("local-media")).toHaveTextContent("blob:retained-final-2"));
+    expect(screen.getByTestId("local-media")).not.toHaveTextContent("blob:orphaned-shot");
+  });
+
+  it("returns a fresh resolver URL when an orphaned same-project ref is re-added", async () => {
+    const current = projectResponse();
+    current.storyboard.shots[0].output_path = "local://media/reappearing-shot";
+    const refreshed = cloneProjectResponse(current);
+    refreshed.storyboard.shots[0].output_path = null;
+    apiMocks.saveContinuityPlan.mockResolvedValue({
+      project: current.project,
+      continuity_plan: current.continuity_plan as ContinuityPlan,
+    });
+    apiMocks.loadProject.mockResolvedValue(refreshed);
+    localMediaUrlMocks.resolveLocalMediaUrl
+      .mockResolvedValueOnce("blob:reappearing-shot-old")
+      .mockResolvedValueOnce("blob:reappearing-shot-fresh");
+    renderProvider();
+    await openProject(current);
+    await waitFor(() => expect(screen.getByTestId("local-media")).toHaveTextContent("blob:reappearing-shot-old"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Save continuity" }));
+    await waitFor(() => expect(localMediaUrlMocks.revokeLocalMediaUrls).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("local-media")).not.toHaveTextContent("blob:reappearing-shot-old");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+
+    await waitFor(() => expect(localMediaUrlMocks.revokeLocalMediaUrls).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(localMediaUrlMocks.resolveLocalMediaUrl).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId("local-media")).toHaveTextContent("blob:reappearing-shot-fresh");
   });
 
   it("deduplicates subscribed project events", async () => {

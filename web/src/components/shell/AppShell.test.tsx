@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "./AppShell";
 
@@ -8,6 +9,31 @@ afterEach(() => {
 });
 
 describe("AppShell", () => {
+  it("runs the navigation guard for the brand and every project navigation link", () => {
+    const onBeforeNavigate = vi.fn(() => false);
+    const props = {
+      children: <div />,
+      project: { id: "p1", title: "雨夜来信", mode: "short_drama" as const },
+      providerPanel: <div>接口表单</div>,
+      onBeforeNavigate,
+    } as ComponentProps<typeof AppShell>;
+    render(
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <AppShell {...props}>
+          <div>页面内容</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "OpenMontage" }));
+    fireEvent.click(screen.getByRole("link", { name: "分镜编辑" }));
+    fireEvent.click(screen.getByRole("link", { name: "全局设定" }));
+    fireEvent.click(screen.getByRole("link", { name: "资源库" }));
+    fireEvent.click(screen.getByRole("link", { name: "制作与成片" }));
+
+    expect(onBeforeNavigate).toHaveBeenCalledTimes(5);
+  });
+
   it("shows project navigation and keeps recharge as a development notice", () => {
     render(
       <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>

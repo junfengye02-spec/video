@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Link,
   Navigate,
@@ -30,6 +30,16 @@ const zh = getStrings("zh");
 
 type RootLayoutContext = {
   openProvider: () => void;
+};
+
+type ProjectLayoutContext = {
+  onDirtyChange: (dirty: boolean) => void;
+};
+
+type ProjectLoadState = {
+  error?: string;
+  projectId: string | null;
+  status: "error" | "loading" | "missing" | "ready";
 };
 
 function ProviderPanel() {
@@ -83,52 +93,128 @@ function RootLayout() {
 
 function ProjectLayout() {
   const { projectId } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   const { openLocalProject, snapshot } = useWorkbench();
   const requestGenerationRef = useRef(0);
-  const [loadState, setLoadState] = useState<"loading" | "ready" | "missing">("loading");
+  const acceptedHistoryIndexRef = useRef<number | null>(
+    typeof window.history.state?.idx === "number" ? window.history.state.idx : null,
+  );
+  const restoringHistoryRef = useRef(false);
+  const requestedProjectId = projectId ?? null;
+  const [dirty, setDirty] = useState(false);
+  const [loadState, setLoadState] = useState<ProjectLoadState>({
+    projectId: requestedProjectId,
+    status: "loading",
+  });
+  const currentLoadState = loadState.projectId === requestedProjectId
+    ? loadState
+    : { projectId: requestedProjectId, status: "loading" as const };
   const activeSnapshot = snapshot?.project.id === projectId ? snapshot : null;
+
+  const confirmNavigation = useCallback(
+    () => !dirty || window.confirm(zh.storyboardPage.discardChangesConfirm),
+    [dirty],
+  );
+
+  useEffect(() => setDirty(false), [projectId]);
+
+  useEffect(() => {
+    if (typeof window.history.state?.idx === "number") {
+      acceptedHistoryIndexRef.current = window.history.state.idx;
+    }
+  }, [location.key]);
+
+  useEffect(() => {
+    if (!dirty) return;
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const handlePopState = (event: PopStateEvent) => {
+      const nextIndex = typeof event.state?.idx === "number" ? event.state.idx : null;
+      if (restoringHistoryRef.current) {
+        restoringHistoryRef.current = false;
+        acceptedHistoryIndexRef.current = nextIndex;
+        return;
+      }
+      if (window.confirm(zh.storyboardPage.discardChangesConfirm)) {
+        acceptedHistoryIndexRef.current = nextIndex;
+        return;
+      }
+
+      event.stopImmediatePropagation();
+      const currentIndex = acceptedHistoryIndexRef.current;
+      if (currentIndex !== null && nextIndex !== null && currentIndex !== nextIndex) {
+        restoringHistoryRef.current = true;
+        window.history.go(currentIndex - nextIndex);
+        return;
+      }
+      navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true });
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("popstate", handlePopState, true);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("popstate", handlePopState, true);
+    };
+  }, [dirty, location.hash, location.pathname, location.search, navigate]);
 
   useEffect(() => {
     const generation = ++requestGenerationRef.current;
     if (!projectId) {
-      setLoadState("missing");
+      setLoadState({ projectId: null, status: "missing" });
       return;
     }
     if (snapshot?.project.id === projectId) {
-      setLoadState("ready");
+      setLoadState({ projectId, status: "ready" });
       return;
     }
 
-    setLoadState("loading");
+    setLoadState({ projectId, status: "loading" });
     void openLocalProject(projectId)
       .then((found) => {
         if (generation === requestGenerationRef.current) {
-          setLoadState(found ? "ready" : "missing");
+          setLoadState({ projectId, status: found ? "ready" : "missing" });
         }
       })
-      .catch(() => {
+      .catch((loadError: unknown) => {
         if (generation === requestGenerationRef.current) {
-          setLoadState("missing");
+          setLoadState({
+            error: loadError instanceof Error && loadError.message
+              ? loadError.message
+              : "无法读取当前浏览器中的项目。",
+            projectId,
+            status: "error",
+          });
         }
       });
   }, [openLocalProject, projectId, snapshot?.project.id]);
 
   let content;
-  if (loadState === "missing") {
+  if (currentLoadState.status === "missing") {
     content = (
       <section aria-labelledby="missing-project-title">
         <h1 id="missing-project-title">此项目不在当前浏览器中</h1>
         <Link to={projectRoutes.list}>返回项目列表</Link>
       </section>
     );
-  } else if (!activeSnapshot || loadState === "loading") {
+  } else if (currentLoadState.status === "error") {
+    content = <p role="alert">{currentLoadState.error}</p>;
+  } else if (!activeSnapshot || currentLoadState.status === "loading") {
     content = <p role="status">正在加载当前浏览器中的项目...</p>;
   } else {
-    content = <Outlet />;
+    content = <Outlet context={{ onDirtyChange: setDirty } satisfies ProjectLayoutContext} />;
   }
 
   return (
-    <AppShell project={activeSnapshot?.project ?? null} providerPanel={<ProviderPanel />}>
+    <AppShell
+      project={activeSnapshot?.project ?? null}
+      providerPanel={<ProviderPanel />}
+      onBeforeNavigate={confirmNavigation}
+    >
       <ErrorSurface />
       {content}
     </AppShell>
@@ -183,6 +269,7 @@ function useDecoratedAssets() {
 
 function StoryboardRoute() {
   const location = useLocation();
+  const { onDirtyChange } = useOutletContext<ProjectLayoutContext>();
   const assets = useDecoratedAssets();
   const {
     busy,
@@ -211,6 +298,7 @@ function StoryboardRoute() {
       plannedShotCount={plannedShotCount}
       resolveShotMedia={resolveShotMedia}
       onSelectShot={selectShot}
+      onDirtyChange={onDirtyChange}
       onOptimizePrompt={optimizeShotPrompt}
       onSaveShot={saveShotChanges}
       onRegenerateShot={regenerateSelectedShot}
@@ -219,6 +307,7 @@ function StoryboardRoute() {
 }
 
 function GlobalSettingsRoute() {
+  const { onDirtyChange } = useOutletContext<ProjectLayoutContext>();
   const { busy, saveContinuity, snapshot } = useWorkbench();
   if (!snapshot) return null;
   const projectType = snapshot.project.project_type
@@ -229,6 +318,7 @@ function GlobalSettingsRoute() {
     <GlobalSettingsPage
       plan={snapshot.continuity_plan ?? emptyContinuityPlan(projectType)}
       saving={busy.savingContinuity}
+      onDirtyChange={onDirtyChange}
       onSave={saveContinuity}
     />
   );

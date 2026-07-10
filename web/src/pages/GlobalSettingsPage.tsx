@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ContinuityEditor,
   type ContinuityEditorStrings,
@@ -10,6 +10,7 @@ export interface GlobalSettingsPageProps {
   plan: ContinuityPlan;
   saving: boolean;
   strings?: ContinuityEditorStrings;
+  onDirtyChange?: (dirty: boolean) => void;
   onSave: (plan: ContinuityPlan) => Promise<void>;
 }
 
@@ -43,6 +44,7 @@ export function GlobalSettingsPage({
   plan,
   saving,
   strings = getStrings("zh"),
+  onDirtyChange,
   onSave,
 }: GlobalSettingsPageProps) {
   const pageStrings = strings.globalSettings;
@@ -51,6 +53,12 @@ export function GlobalSettingsPage({
   const [error, setError] = useState<string | null>(null);
   const planGenerationRef = useRef(0);
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   useLayoutEffect(() => {
     planGenerationRef.current += 1;

@@ -24,6 +24,7 @@ export interface StoryboardPageProps {
   plannedShotCount?: number | null;
   resolveShotMedia: (shot: Shot) => string | null;
   onSelectShot: (shotId: string) => void;
+  onDirtyChange?: (dirty: boolean) => void;
   onOptimizePrompt: (shot: Shot, sourceText: string) => Promise<PromptOptimizeResponse>;
   onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
   onRegenerateShot: (shot: Shot) => Promise<void>;
@@ -40,6 +41,7 @@ export function StoryboardPage({
   plannedShotCount = null,
   resolveShotMedia,
   onSelectShot,
+  onDirtyChange,
   onOptimizePrompt,
   onSaveShot,
   onRegenerateShot,
@@ -48,6 +50,12 @@ export function StoryboardPage({
   const ordered = useMemo(() => orderedShots(shots), [shots]);
   const selectedShot = ordered.find((shot) => shot.id === selectedShotId) ?? ordered[0] ?? null;
   const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   useEffect(() => {
     if (!dirty) {
