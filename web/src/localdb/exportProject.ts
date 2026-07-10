@@ -4,16 +4,24 @@ import {
   strFromU8,
   strToU8,
   Unzip,
+  UnzipInflate,
   Zip,
   ZipPassThrough,
   type AsyncFlateStreamHandler,
   type UnzipDecoder,
   type UnzipFile,
-} from "fflate";
+} from "fflate/browser";
 import type { ShortDramaProjectResponse } from "../domain/types";
 import { deleteMediaBlob, loadMediaBlob, saveMediaBlob } from "./mediaStore";
-import { loadProjectSnapshot, saveProjectSnapshot } from "./projectStore";
+import {
+  loadProjectSnapshot,
+  ProjectImportConflictError,
+  saveImportedProjectSnapshot,
+} from "./projectStore";
+import { normalizeAndValidateProjectSnapshot } from "./snapshotSchema";
 import type { LocalMediaRef } from "./types";
+
+export { ProjectImportConflictError } from "./projectStore";
 
 const MANIFEST_NAME = "openmontage-project.json";
 const MEDIA_MANIFEST_NAME = "openmontage-media.json";
@@ -22,8 +30,12 @@ const MIB = 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 512 * MIB;
 const MAX_ARCHIVE_ENTRIES = 512;
 const MAX_ENTRY_BYTES = 256 * MIB;
+const MAX_MANIFEST_BYTES = 8 * MIB;
 const MAX_TOTAL_UNCOMPRESSED_BYTES = 1024 * MIB;
 const FALLBACK_READ_CHUNK_BYTES = 64 * 1024;
+const FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES = 320_000;
+const MAX_ACTIVE_INFLATE_WORKERS = 2;
+const WORKER_PROBE_TIMEOUT_MS = 2_000;
 
 type MediaBackupEntry = {
   ref: LocalMediaRef;
@@ -51,32 +63,71 @@ type BackupBlobEntry = {
   blob: Blob;
 };
 
-class WorkerUnzipInflate implements UnzipDecoder {
+class ResilientUnzipInflate implements UnzipDecoder {
   static readonly compression = 8;
   ondata!: AsyncFlateStreamHandler;
-  private readonly inflate: AsyncInflate;
+  private readonly inflate: UnzipDecoder;
 
-  constructor() {
-    this.inflate = new AsyncInflate((error, data, final) => this.ondata(error, data, final));
+  constructor(name: string, size?: number) {
+    try {
+      this.inflate = new AsyncUnzipInflate(name, size);
+    } catch {
+      this.inflate = new UnzipInflate();
+    }
+    this.inflate.ondata = (error, data, final) => this.ondata(error, data, final);
   }
 
   push(chunk: Uint8Array, final: boolean): void {
-    this.inflate.push(chunk.slice(), final);
+    this.inflate.push(chunk, final);
   }
 
   terminate(): void {
-    this.inflate.terminate();
+    this.inflate.terminate?.();
   }
 }
 
-export class ProjectImportConflictError extends Error {
-  readonly projectId: string;
+let workerProbeCache: {
+  workerConstructor: typeof Worker;
+  result: Promise<boolean>;
+} | null = null;
 
-  constructor(projectId: string) {
-    super(`Project ${projectId} already exists; explicit overwrite permission is required`);
-    this.name = "ProjectImportConflictError";
-    this.projectId = projectId;
+function canUseInflateWorker(): Promise<boolean> {
+  const workerConstructor = globalThis.Worker;
+  if (typeof workerConstructor !== "function") {
+    return Promise.resolve(false);
   }
+  if (workerProbeCache?.workerConstructor === workerConstructor) {
+    return workerProbeCache.result;
+  }
+
+  const result = new Promise<boolean>((resolve) => {
+    let settled = false;
+    let inflate: AsyncInflate | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const finish = (supported: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      inflate?.terminate();
+      resolve(supported);
+    };
+
+    timeoutId = setTimeout(() => finish(false), WORKER_PROBE_TIMEOUT_MS);
+    try {
+      inflate = new AsyncInflate((error, _data, final) => {
+        if (error) {
+          finish(false);
+        } else if (final) {
+          finish(true);
+        }
+      });
+      inflate.push(new Uint8Array([0x03, 0x00]), true);
+    } catch {
+      finish(false);
+    }
+  });
+  workerProbeCache = { workerConstructor, result };
+  return result;
 }
 
 function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
@@ -152,14 +203,29 @@ function shouldRetainArchiveEntry(name: string): boolean {
   return name === MANIFEST_NAME || name === MEDIA_MANIFEST_NAME || name.startsWith("media/");
 }
 
+function archiveEntryByteLimit(name: string): number {
+  return name === MANIFEST_NAME || name === MEDIA_MANIFEST_NAME
+    ? MAX_MANIFEST_BYTES
+    : MAX_ENTRY_BYTES;
+}
+
+function archiveEntryLimitError(name: string): Error {
+  return name === MANIFEST_NAME || name === MEDIA_MANIFEST_NAME
+    ? new Error(`Backup manifest ${name} exceeds the JSON manifest size limit`)
+    : new Error(`Backup entry ${name} exceeds the per-entry size limit`);
+}
+
 async function createBackupArchive(entries: BackupBlobEntry[]): Promise<Blob> {
   if (entries.length > MAX_ARCHIVE_ENTRIES) {
     throw new Error("Backup entry count exceeds the archive entry limit");
   }
   let totalInputBytes = 0;
   for (const entry of entries) {
-    if (!Number.isSafeInteger(entry.blob.size) || entry.blob.size > MAX_ENTRY_BYTES) {
-      throw new Error(`Backup entry ${entry.name} exceeds the per-entry size limit`);
+    if (
+      !Number.isSafeInteger(entry.blob.size) ||
+      entry.blob.size > archiveEntryByteLimit(entry.name)
+    ) {
+      throw archiveEntryLimitError(entry.name);
     }
     totalInputBytes += entry.blob.size;
     if (totalInputBytes > MAX_TOTAL_UNCOMPRESSED_BYTES) {
@@ -232,6 +298,7 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
   if (!Number.isSafeInteger(file.size) || file.size > MAX_ARCHIVE_BYTES) {
     throw new Error("Backup archive exceeds the compressed size limit");
   }
+  const workerSupported = await canUseInflateWorker();
 
   return new Promise((resolve, reject) => {
     const files: Record<string, Uint8Array> = {};
@@ -243,8 +310,36 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
     let declaredTotal = 0;
     let actualTotal = 0;
     let pendingEntries = 0;
+    let activeInflateWorkers = 0;
     let inputDone = false;
     let settled = false;
+    const queuedWorkerStarts: Array<(release: () => void) => void> = [];
+    const inputGateResolvers: Array<() => void> = [];
+
+    const releaseInputGate = () => {
+      if (!settled && queuedWorkerStarts.length > 0) return;
+      for (const release of inputGateResolvers.splice(0)) release();
+    };
+    const drainWorkerStarts = () => {
+      while (!settled && activeInflateWorkers < MAX_ACTIVE_INFLATE_WORKERS) {
+        const start = queuedWorkerStarts.shift();
+        if (!start) break;
+        activeInflateWorkers += 1;
+        let released = false;
+        start(() => {
+          if (released) return;
+          released = true;
+          activeInflateWorkers -= 1;
+          drainWorkerStarts();
+        });
+      }
+      releaseInputGate();
+    };
+    const waitForInputGate = (): Promise<void> | null => (
+      queuedWorkerStarts.length > 0
+        ? new Promise((resolveGate) => inputGateResolvers.push(resolveGate))
+        : null
+    );
 
     const maybeResolve = () => {
       if (!settled && inputDone && pendingEntries === 0) {
@@ -255,6 +350,7 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
+      releaseInputGate();
       void reader.cancel(error);
       for (const activeFile of activeFiles) {
         activeFile.terminate();
@@ -283,9 +379,9 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
         if (
           !Number.isSafeInteger(archiveEntry.originalSize) ||
           archiveEntry.originalSize < 0 ||
-          archiveEntry.originalSize > MAX_ENTRY_BYTES
+          archiveEntry.originalSize > archiveEntryByteLimit(archiveEntry.name)
         ) {
-          fail(new Error(`Backup entry ${archiveEntry.name} exceeds the per-entry size limit`));
+          fail(archiveEntryLimitError(archiveEntry.name));
           return;
         }
         declaredTotal += archiveEntry.originalSize;
@@ -297,18 +393,20 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
 
       const chunks: Uint8Array[] = [];
       let entryBytes = 0;
+      let releaseWorkerSlot: (() => void) | null = null;
       pendingEntries += 1;
       activeFiles.add(archiveEntry);
       archiveEntry.ondata = (error, data, final) => {
         if (settled) return;
         if (error) {
+          releaseWorkerSlot?.();
           fail(error);
           return;
         }
         const nextEntryBytes = entryBytes + data.length;
         const nextActualTotal = actualTotal + data.length;
-        if (nextEntryBytes > MAX_ENTRY_BYTES) {
-          fail(new Error(`Backup entry ${archiveEntry.name} exceeds the per-entry size limit`));
+        if (nextEntryBytes > archiveEntryByteLimit(archiveEntry.name)) {
+          fail(archiveEntryLimitError(archiveEntry.name));
           return;
         }
         if (nextActualTotal > MAX_TOTAL_UNCOMPRESSED_BYTES) {
@@ -326,16 +424,32 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
           }
           activeFiles.delete(archiveEntry);
           pendingEntries -= 1;
+          releaseWorkerSlot?.();
           maybeResolve();
         }
       };
-      try {
-        archiveEntry.start();
-      } catch (error) {
-        fail(error);
+      const startEntry = (release?: () => void) => {
+        releaseWorkerSlot = release ?? null;
+        try {
+          archiveEntry.start();
+        } catch (error) {
+          releaseWorkerSlot?.();
+          fail(error);
+        }
+      };
+      const needsWorkerSlot = (
+        workerSupported &&
+        archiveEntry.compression === 8 &&
+        (archiveEntry.size === undefined || archiveEntry.size >= FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES)
+      );
+      if (needsWorkerSlot) {
+        queuedWorkerStarts.push(startEntry);
+        drainWorkerStarts();
+      } else {
+        startEntry();
       }
     });
-    unzip.register(typeof Worker === "function" ? WorkerUnzipInflate : AsyncUnzipInflate);
+    unzip.register(workerSupported ? ResilientUnzipInflate : UnzipInflate);
 
     void (async () => {
       try {
@@ -347,12 +461,17 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
             maybeResolve();
             break;
           }
-          archivedBytesRead += value.length;
-          if (archivedBytesRead > MAX_ARCHIVE_BYTES) {
-            fail(new Error("Backup archive exceeds the compressed size limit"));
-            break;
+          for (let offset = 0; offset < value.length && !settled; offset += FALLBACK_READ_CHUNK_BYTES) {
+            const inputGate = waitForInputGate();
+            if (inputGate) await inputGate;
+            const chunk = value.subarray(offset, offset + FALLBACK_READ_CHUNK_BYTES);
+            archivedBytesRead += chunk.length;
+            if (archivedBytesRead > MAX_ARCHIVE_BYTES) {
+              fail(new Error("Backup archive exceeds the compressed size limit"));
+              break;
+            }
+            unzip.push(chunk, false);
           }
-          unzip.push(value, false);
         }
       } catch (error) {
         fail(error);
@@ -410,36 +529,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
-function isNullableString(value: unknown): value is string | null {
-  return value === null || typeof value === "string";
-}
-
-function isValidShot(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    value.id.length > 0 &&
-    typeof value.scene_id === "string" &&
-    Number.isSafeInteger(value.index) &&
-    typeof value.beat === "string" &&
-    typeof value.prompt === "string" &&
-    isStringArray(value.characters) &&
-    isNullableString(value.location) &&
-    isStringArray(value.props) &&
-    ["draft", "ready", "generating", "complete", "failed"].includes(String(value.status)) &&
-    typeof value.consistency_score === "number" &&
-    isNullableString(value.output_url) &&
-    isNullableString(value.output_path) &&
-    isStringArray(value.asset_ids) &&
-    Number.isSafeInteger(value.version) &&
-    Array.isArray(value.history)
-  );
-}
-
 function validateLocalMediaRefs(value: unknown, seen = new WeakSet<object>()): void {
   if (typeof value === "string") {
     if (value.startsWith(LOCAL_MEDIA_PREFIX) && !isLocalMediaRef(value)) {
@@ -456,37 +545,21 @@ function validateLocalMediaRefs(value: unknown, seen = new WeakSet<object>()): v
   }
 }
 
-function validateSnapshot(value: unknown): asserts value is ShortDramaProjectResponse {
-  if (
-    !isRecord(value) ||
-    !isRecord(value.project) ||
-    typeof value.project.id !== "string" ||
-    value.project.id.length === 0 ||
-    typeof value.project.title !== "string" ||
-    value.project.title.length === 0 ||
-    value.project.mode !== "short_drama" ||
-    !["single_video", "mini_series", "long_series"].includes(String(value.project.project_type)) ||
-    !isRecord(value.series_bible) ||
-    !Array.isArray(value.series_bible.characters) ||
-    (value.series_bible.assets !== undefined && !Array.isArray(value.series_bible.assets)) ||
-    !isRecord(value.storyboard) ||
-    !Array.isArray(value.storyboard.shots) ||
-    !value.storyboard.shots.every(isValidShot) ||
-    !isRecord(value.consistency_report) ||
-    typeof value.consistency_report.score !== "number" ||
-    !Array.isArray(value.consistency_report.issues)
-  ) {
-    throw new Error("Backup project metadata is invalid");
-  }
-  validateLocalMediaRefs(value);
+function normalizeAndValidateSnapshot(value: unknown): ShortDramaProjectResponse {
+  const normalized = normalizeAndValidateProjectSnapshot(value);
+  validateLocalMediaRefs(normalized);
+  return normalized;
 }
 
 function validateProjectEnvelope(value: unknown): ShortDramaProjectResponse {
-  if (!isRecord(value) || value.version !== 1) {
+  if (!isRecord(value)) {
     throw new Error("Backup format version is unsupported");
   }
-  validateSnapshot(value.project);
-  return value.project;
+  const isLegacySnapshot = isRecord(value.project) && typeof value.project.id === "string";
+  if (!isLegacySnapshot && value.version !== 1) {
+    throw new Error("Backup format version is unsupported");
+  }
+  return normalizeAndValidateSnapshot(isLegacySnapshot ? value : value.project);
 }
 
 function validateMediaManifest(
@@ -561,11 +634,11 @@ export async function exportProjectBackup(projectId: string): Promise<Blob> {
   if (!record) {
     throw new Error("Project not found in this browser");
   }
-  validateSnapshot(record.snapshot);
+  const snapshot = normalizeAndValidateSnapshot(record.snapshot);
 
   const projectManifest = strToU8(
     JSON.stringify(
-      { version: 1, project: record.snapshot } satisfies ProjectBackupEnvelope,
+      { version: 1, project: snapshot } satisfies ProjectBackupEnvelope,
       null,
       2,
     ),
@@ -573,7 +646,7 @@ export async function exportProjectBackup(projectId: string): Promise<Blob> {
   const mediaManifest: MediaBackupManifest = { version: 1, media: [] };
   const mediaEntries: BackupBlobEntry[] = [];
 
-  for (const ref of collectLocalMediaRefs(record.snapshot)) {
+  for (const ref of collectLocalMediaRefs(snapshot)) {
     const blob = await loadMediaBlob(ref);
     if (!blob) {
       throw new Error(`Required local media ${ref} is missing or unreadable`);
@@ -651,9 +724,11 @@ export async function importProjectBackup(
       refMap.size > 0
         ? (rewriteLocalMediaRefs(snapshot, refMap) as ShortDramaProjectResponse)
         : snapshot;
-    validateSnapshot(restoredSnapshot);
-    await saveProjectSnapshot(restoredSnapshot);
-    return restoredSnapshot;
+    const validatedSnapshot = normalizeAndValidateSnapshot(restoredSnapshot);
+    await saveImportedProjectSnapshot(validatedSnapshot, {
+      overwrite: options.overwrite ?? false,
+    });
+    return validatedSnapshot;
   } catch (error) {
     return rollbackStagedMedia(stagedRefs, error);
   }

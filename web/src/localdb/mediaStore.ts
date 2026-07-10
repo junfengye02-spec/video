@@ -12,6 +12,10 @@ type StorageWithOpfs = StorageManager & {
   getDirectory?: () => Promise<FileSystemDirectoryHandle>;
 };
 
+type IterableDirectoryHandle = FileSystemDirectoryHandle & {
+  entries?: () => AsyncIterableIterator<[string, FileSystemHandle]>;
+};
+
 const LOCAL_MEDIA_PREFIX = "local://media/";
 const OPFS_MEDIA_DIR = "openmontage-media";
 
@@ -28,6 +32,12 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
     tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
     tx.oncomplete = () => resolve();
   });
+}
+
+function cleanupError(message: string, causes: unknown[]): Error {
+  const error = new Error(message) as Error & { causes: unknown[] };
+  error.causes = causes;
+  return error;
 }
 
 function mediaIdFromRef(ref: LocalMediaRef): string {
@@ -105,6 +115,12 @@ async function loadRecord(id: string): Promise<LocalMediaRecord | null> {
     tx.objectStore(LOCAL_STORES.media).get(id),
   );
   return record ?? null;
+}
+
+async function loadAllRecords(): Promise<LocalMediaRecord[]> {
+  const db = await openLocalDb();
+  const tx = db.transaction(LOCAL_STORES.media, "readonly");
+  return requestToPromise<LocalMediaRecord[]>(tx.objectStore(LOCAL_STORES.media).getAll());
 }
 
 async function writeBlobToOpfs(id: string, blob: Blob): Promise<string | null> {
@@ -211,8 +227,11 @@ export async function saveMediaBlob(input: SaveMediaInput): Promise<LocalMediaRe
     if (opfsPath) {
       try {
         await deleteBlobFromOpfs(record);
-      } catch {
-        // Preserve the original persistence error; the unindexed OPFS file is not addressable.
+      } catch (opfsCleanupError) {
+        throw cleanupError(
+          "Media persistence failed and OPFS cleanup was incomplete",
+          [error, opfsCleanupError],
+        );
       }
     }
     throw error;
@@ -247,6 +266,50 @@ export async function deleteMediaBlob(ref: LocalMediaRef): Promise<void> {
     await deleteBlobFromOpfs(record);
   }
   await deleteRecord(id);
+}
+
+export async function cleanupOrphanedOpfsMedia(): Promise<number> {
+  const storage = navigator.storage as StorageWithOpfs | undefined;
+  if (!storage?.getDirectory) {
+    throw new Error("OPFS is unavailable for orphan media cleanup");
+  }
+
+  const trackedFiles = new Set(
+    (await loadAllRecords())
+      .filter((record) => record.storage === "opfs" && record.opfsPath?.startsWith(`${OPFS_MEDIA_DIR}/`))
+      .map((record) => record.opfsPath!.slice(OPFS_MEDIA_DIR.length + 1)),
+  );
+  const root = await storage.getDirectory();
+  let mediaDir: IterableDirectoryHandle;
+  try {
+    mediaDir = await root.getDirectoryHandle(OPFS_MEDIA_DIR) as IterableDirectoryHandle;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "NotFoundError") {
+      return 0;
+    }
+    throw error;
+  }
+  if (typeof mediaDir.entries !== "function") {
+    throw new Error("OPFS directory enumeration is unavailable for orphan media cleanup");
+  }
+
+  let removed = 0;
+  const errors: unknown[] = [];
+  for await (const [name, handle] of mediaDir.entries()) {
+    if (handle.kind !== "file" || trackedFiles.has(name)) continue;
+    try {
+      await mediaDir.removeEntry(name);
+      removed += 1;
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "NotFoundError")) {
+        errors.push(error);
+      }
+    }
+  }
+  if (errors.length > 0) {
+    throw cleanupError("OPFS orphan media cleanup was incomplete", errors);
+  }
+  return removed;
 }
 
 export async function cacheRemoteMedia(

@@ -4,6 +4,8 @@ import { resetLocalDbForTests } from "./indexedDb";
 import { cacheRemoteMedia, loadMediaBlob, saveMediaBlob } from "./mediaStore";
 import { LOCAL_DB_NAME } from "./types";
 
+const originalStorage = Object.getOwnPropertyDescriptor(Navigator.prototype, "storage");
+
 async function blobFromText(text: string, contentType: string): Promise<Blob> {
   return new Response(text, { headers: { "content-type": contentType } }).blob();
 }
@@ -30,8 +32,57 @@ async function deleteLocalDb() {
   });
 }
 
+function installOpfs(options: { removeError: Error | null }) {
+  const files = new Map<string, Blob>();
+  const mediaDirectory = {
+    async getFileHandle(name: string, handleOptions?: { create?: boolean }) {
+      if (!files.has(name) && !handleOptions?.create) {
+        throw new DOMException("File not found", "NotFoundError");
+      }
+      return {
+        async createWritable() {
+          return {
+            async write(blob: Blob) {
+              files.set(name, blob);
+            },
+            async close() {},
+          };
+        },
+      };
+    },
+    async removeEntry(name: string) {
+      if (options.removeError) throw options.removeError;
+      if (!files.delete(name)) throw new DOMException("File not found", "NotFoundError");
+    },
+    async *entries() {
+      for (const name of files.keys()) {
+        yield [name, { kind: "file", name }];
+      }
+    },
+  };
+  Object.defineProperty(Navigator.prototype, "storage", {
+    configurable: true,
+    value: {
+      async getDirectory() {
+        return {
+          async getDirectoryHandle() {
+            return mediaDirectory;
+          },
+        };
+      },
+    },
+  });
+  return { files };
+}
+
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  if (originalStorage) {
+    Object.defineProperty(Navigator.prototype, "storage", originalStorage);
+  } else {
+    delete (Navigator.prototype as { storage?: StorageManager }).storage;
+  }
   await deleteLocalDb();
 });
 
@@ -92,5 +143,53 @@ describe("mediaStore", () => {
       projectId: "p1",
       sourcePath: "assets/images/shot.png",
     })).resolves.toBeNull();
+  });
+
+  it("preserves both failures when an OPFS write cannot be recorded or rolled back", async () => {
+    const idbError = new DOMException("Quota exceeded", "QuotaExceededError");
+    const opfsError = new Error("OPFS remove failed");
+    const opfsOptions = { removeError: opfsError as Error | null };
+    const { files } = installOpfs(opfsOptions);
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(() => {
+      throw idbError;
+    });
+
+    let failure: unknown;
+    try {
+      await saveMediaBlob({
+        projectId: "p1",
+        sourcePath: "assets/video/shot_001.mp4",
+        contentType: "video/mp4",
+        blob: await blobFromText("video", "video/mp4"),
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({ causes: [idbError, opfsError] });
+    expect(files.size).toBe(1);
+  });
+
+  it("deterministically removes an unindexed OPFS file on cleanup retry", async () => {
+    const opfsOptions = { removeError: new Error("OPFS remove failed") as Error | null };
+    const { files } = installOpfs(opfsOptions);
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+    await saveMediaBlob({
+      projectId: "p1",
+      sourcePath: "assets/video/shot_001.mp4",
+      contentType: "video/mp4",
+      blob: await blobFromText("video", "video/mp4"),
+    }).catch(() => undefined);
+    putSpy.mockRestore();
+    opfsOptions.removeError = null;
+
+    const mediaStore = await import("./mediaStore") as typeof import("./mediaStore") & {
+      cleanupOrphanedOpfsMedia?: () => Promise<number>;
+    };
+    expect(mediaStore.cleanupOrphanedOpfsMedia).toBeTypeOf("function");
+    await expect(mediaStore.cleanupOrphanedOpfsMedia!()).resolves.toBe(1);
+    expect(files.size).toBe(0);
   });
 });

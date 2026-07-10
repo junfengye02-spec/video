@@ -277,6 +277,52 @@ describe("projectStore", () => {
     expect(shared ? await blobToText(shared) : null).toBe("shared");
   });
 
+  it("collects shared IndexedDB media after the final referencing project is deleted", async () => {
+    const sharedRef = await saveMediaBlob({
+      projectId: "p1",
+      sourcePath: "assets/shared.mp4",
+      contentType: "video/mp4",
+      blob: await mediaBlob("shared"),
+    });
+    const first = snapshot("p1", "First");
+    first.final_path = sharedRef;
+    const second = snapshot("p2", "Second");
+    second.final_path = sharedRef;
+    await saveProjectSnapshot(first);
+    await saveProjectSnapshot(second);
+
+    await deleteProject("p1");
+    expect(await loadMediaBlob(sharedRef)).not.toBeNull();
+
+    await deleteProject("p2");
+    expect(await loadMediaBlob(sharedRef)).toBeNull();
+  });
+
+  it("collects shared OPFS media after the final referencing project is deleted", async () => {
+    const { files, removeEntry } = installOpfs();
+    const sharedRef = await saveMediaBlob({
+      projectId: "p1",
+      sourcePath: "assets/shared.mp4",
+      contentType: "video/mp4",
+      blob: await mediaBlob("shared"),
+    });
+    const first = snapshot("p1", "First");
+    first.final_path = sharedRef;
+    const second = snapshot("p2", "Second");
+    second.final_path = sharedRef;
+    await saveProjectSnapshot(first);
+    await saveProjectSnapshot(second);
+
+    await deleteProject("p1");
+    expect(files.size).toBe(1);
+    expect(removeEntry).not.toHaveBeenCalled();
+
+    await deleteProject("p2");
+    expect(files.size).toBe(0);
+    expect(removeEntry).toHaveBeenCalledTimes(1);
+    expect(await loadMediaBlob(sharedRef)).toBeNull();
+  });
+
   it("reports OPFS cleanup failure while retaining media data for retry", async () => {
     installOpfs({ removeError: new Error("OPFS remove failed") });
     const ref = await saveMediaBlob({

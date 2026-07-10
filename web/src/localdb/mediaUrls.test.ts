@@ -58,6 +58,7 @@ function mediaRef(id: string): LocalMediaRef {
 
 afterEach(async () => {
   revokeLocalMediaUrls();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   restoreObjectUrlApi();
 });
@@ -133,5 +134,24 @@ describe("mediaUrls", () => {
     mediaStoreMocks.loadMediaBlob.mockResolvedValueOnce(new Blob(["fresh"]));
     await expect(resolveLocalMediaUrl(ref)).resolves.toBe("blob:stale");
     expect(mediaStoreMocks.loadMediaBlob).toHaveBeenCalledTimes(2);
+  });
+
+  it("backs off repeated storage errors until the cache is retried or revoked", async () => {
+    vi.useFakeTimers();
+    const ref = mediaRef("storage-error");
+    const storageError = new Error("IndexedDB unavailable");
+    mediaStoreMocks.loadMediaBlob.mockRejectedValue(storageError);
+
+    await expect(resolveLocalMediaUrl(ref)).rejects.toBe(storageError);
+    await expect(resolveLocalMediaUrl(ref)).rejects.toBe(storageError);
+    expect(mediaStoreMocks.loadMediaBlob).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(resolveLocalMediaUrl(ref)).rejects.toBe(storageError);
+    expect(mediaStoreMocks.loadMediaBlob).toHaveBeenCalledTimes(2);
+
+    revokeLocalMediaUrls();
+    await expect(resolveLocalMediaUrl(ref)).rejects.toBe(storageError);
+    expect(mediaStoreMocks.loadMediaBlob).toHaveBeenCalledTimes(3);
   });
 });

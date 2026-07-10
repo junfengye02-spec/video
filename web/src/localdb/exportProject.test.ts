@@ -1,8 +1,12 @@
 import "fake-indexeddb/auto";
-import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+import { inflateSync, strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ShortDramaProjectResponse, Shot } from "../domain/types";
-import { exportProjectBackup, importProjectBackup } from "./exportProject";
+import type { ContinuityPlan, ShortDramaProjectResponse, Shot } from "../domain/types";
+import {
+  exportProjectBackup,
+  importProjectBackup,
+  ProjectImportConflictError,
+} from "./exportProject";
 import { resetLocalDbForTests } from "./indexedDb";
 import { loadMediaBlob, saveMediaBlob } from "./mediaStore";
 import {
@@ -11,6 +15,9 @@ import {
   saveProjectSnapshot,
 } from "./projectStore";
 import { LOCAL_DB_NAME, type LocalMediaRef } from "./types";
+
+const originalStorage = Object.getOwnPropertyDescriptor(Navigator.prototype, "storage");
+const originalCreateObjectUrl = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
 
 async function blobFromText(text: string, contentType: string): Promise<Blob> {
   return new Response(text, { headers: { "content-type": contentType } }).blob();
@@ -105,6 +112,83 @@ type TestMediaEntry = {
   sourcePath: string;
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+function installDelayedOpfs() {
+  const files = new Map<string, Blob>();
+  const writeStarted = deferred<void>();
+  const closeGate = deferred<void>();
+  const mediaDirectory = {
+    async getFileHandle(name: string, options?: { create?: boolean }) {
+      if (!files.has(name) && !options?.create) {
+        throw new DOMException("File not found", "NotFoundError");
+      }
+      return {
+        async createWritable() {
+          return {
+            async write(blob: Blob) {
+              files.set(name, blob);
+              writeStarted.resolve();
+            },
+            async close() {
+              await closeGate.promise;
+            },
+          };
+        },
+        async getFile() {
+          const blob = files.get(name);
+          if (!blob) throw new DOMException("File not found", "NotFoundError");
+          return blob;
+        },
+      };
+    },
+    async removeEntry(name: string) {
+      files.delete(name);
+    },
+  };
+  Object.defineProperty(Navigator.prototype, "storage", {
+    configurable: true,
+    value: {
+      async getDirectory() {
+        return {
+          async getDirectoryHandle() {
+            return mediaDirectory;
+          },
+        };
+      },
+    },
+  });
+  return { files, writeStarted: writeStarted.promise, releaseClose: closeGate.resolve };
+}
+
+async function saveThroughSecondConnection(value: ShortDramaProjectResponse): Promise<void> {
+  const request = indexedDB.open(LOCAL_DB_NAME);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+  const transaction = db.transaction(["projects", "settings"], "readwrite");
+  transaction.objectStore("projects").put({
+    id: value.project.id,
+    title: value.project.title,
+    updatedAt: new Date().toISOString(),
+    snapshot: value,
+  });
+  transaction.objectStore("settings").put({ key: "recentProjectId", value: value.project.id });
+  await new Promise<void>((resolve, reject) => {
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+    transaction.oncomplete = () => resolve();
+  });
+  db.close();
+}
+
 function backupFile(options: {
   project?: unknown;
   version?: number;
@@ -126,6 +210,110 @@ function backupFile(options: {
     }));
   }
   return new File([zipSync(files)], "project.omproj", { type: "application/zip" });
+}
+
+function legacyBackupFile(project: unknown): File {
+  return new File([zipSync({
+    "openmontage-project.json": strToU8(JSON.stringify(project)),
+  })], "legacy.omproj", { type: "application/zip" });
+}
+
+function continuityPlan(
+  projectType: "single_video" | "mini_series" | "long_series",
+): ContinuityPlan {
+  return {
+    project_type: projectType,
+    active_episode_number: projectType === "single_video" ? null : 1,
+    series_bible: {
+      worldview: "Near future",
+      main_arc: "Find the sender",
+      style_lock: "Noir",
+      visual_rules: "Consistent wardrobe",
+      taboos: [],
+      locations: ["Alley"],
+      props: ["Letter"],
+      relationship_map: [],
+    },
+    episodes: projectType === "single_video" ? [] : [{
+      episode_number: 1,
+      title: "The Letter",
+      goal: "Find the sender",
+      conflict: "Hidden clues",
+      twist: "The sender is nearby",
+      cliffhanger: "Another letter",
+      inherited_state: [],
+      locked: false,
+    }],
+    story_state: {
+      character_knowledge: [],
+      relationship_changes: [],
+      active_foreshadowing: [],
+      resolved_foreshadowing: [],
+      prop_state: [],
+      character_status: [],
+      current_locations: ["Alley"],
+    },
+  };
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const size = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result;
+}
+
+function incompressibleBytes(size: number, seed: number): Uint8Array {
+  const result = new Uint8Array(size);
+  let state = seed >>> 0;
+  for (let index = 0; index < result.length; index += 1) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    result[index] = state & 0xff;
+  }
+  return result;
+}
+
+function installInflateWorker(options: { constructionError?: Error } = {}) {
+  const stats = { created: 0, active: 0, maxActive: 0 };
+  class InflateWorker {
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    private readonly chunks: Uint8Array[] = [];
+    private terminated = false;
+
+    constructor() {
+      if (options.constructionError) throw options.constructionError;
+      stats.created += 1;
+      stats.active += 1;
+      stats.maxActive = Math.max(stats.maxActive, stats.active);
+    }
+
+    postMessage(message: unknown): void {
+      if (!Array.isArray(message) || !(message[0] instanceof Uint8Array)) return;
+      const chunk = new Uint8Array(message[0]);
+      this.chunks.push(chunk);
+      if (message[1] !== true) return;
+      const inflated = inflateSync(concatBytes(this.chunks));
+      queueMicrotask(() => this.onmessage?.({ data: [inflated, true] } as MessageEvent));
+    }
+
+    terminate(): void {
+      if (this.terminated) return;
+      this.terminated = true;
+      stats.active -= 1;
+    }
+  }
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: vi.fn(() => "blob:inflate-worker"),
+  });
+  vi.stubGlobal("Worker", InflateWorker);
+  return stats;
 }
 
 async function patchDeclaredSize(
@@ -176,6 +364,13 @@ async function mediaRecordCount(): Promise<number> {
   return count;
 }
 
+async function expectMalformedNestedSnapshot(value: ShortDramaProjectResponse): Promise<void> {
+  await expect(importProjectBackup(backupFile({ project: value })))
+    .rejects.toThrow(/metadata|invalid/i);
+  expect(await loadProjectSnapshot(value.project.id)).toBeNull();
+  expect(await mediaRecordCount()).toBe(0);
+}
+
 async function deleteLocalDb() {
   resetLocalDbForTests();
   await new Promise<void>((resolve, reject) => {
@@ -188,6 +383,17 @@ async function deleteLocalDb() {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  if (originalCreateObjectUrl) {
+    Object.defineProperty(URL, "createObjectURL", originalCreateObjectUrl);
+  } else {
+    delete (URL as { createObjectURL?: typeof URL.createObjectURL }).createObjectURL;
+  }
+  if (originalStorage) {
+    Object.defineProperty(Navigator.prototype, "storage", originalStorage);
+  } else {
+    delete (Navigator.prototype as { storage?: StorageManager }).storage;
+  }
   await deleteLocalDb();
 });
 
@@ -213,6 +419,40 @@ describe("exportProject", () => {
 
     const recent = await loadRecentProjectSnapshot();
     expect(recent?.snapshot.project.title).toBe("Rain Alley");
+  });
+
+  it("imports a legacy raw snapshot and derives its missing project type", async () => {
+    const legacy = snapshot(null, { id: "legacy" });
+    delete legacy.project.project_type;
+    legacy.continuity_plan = continuityPlan("mini_series");
+
+    const imported = await importProjectBackup(legacyBackupFile(legacy));
+
+    expect(imported.project.project_type).toBe("mini_series");
+    expect((await loadProjectSnapshot("legacy"))?.snapshot.project.project_type).toBe("mini_series");
+  });
+
+  it("defaults a legacy project without any project type to single video", async () => {
+    const legacy = snapshot(null, { id: "legacy-default" });
+    delete legacy.project.project_type;
+
+    const imported = await importProjectBackup(legacyBackupFile(legacy));
+
+    expect(imported.project.project_type).toBe("single_video");
+  });
+
+  it("exports an old local snapshot without project type as a versioned backup", async () => {
+    const oldLocal = snapshot(null, { id: "old-local" });
+    delete oldLocal.project.project_type;
+    oldLocal.continuity_plan = continuityPlan("long_series");
+    await saveProjectSnapshot(oldLocal);
+
+    const backup = await exportProjectBackup("old-local");
+    const archive = unzipSync(new Uint8Array(await blobToArrayBuffer(backup)));
+    const manifest = JSON.parse(strFromU8(archive["openmontage-project.json"]));
+
+    expect(manifest.version).toBe(1);
+    expect(manifest.project.project.project_type).toBe("long_series");
   });
 
   it("restores local media blobs referenced by the manifest", async () => {
@@ -283,6 +523,84 @@ describe("exportProject", () => {
       .rejects.toThrow(/metadata|invalid/i);
 
     expect(await loadProjectSnapshot("imported")).toBeNull();
+  });
+
+  it("rejects malformed nested character records", async () => {
+    const malformed = snapshot(null, { id: "bad-character" });
+    malformed.series_bible.characters = [{ id: "character-1" }] as never;
+
+    await expectMalformedNestedSnapshot(malformed);
+  });
+
+  it("rejects malformed nested asset media arrays", async () => {
+    const malformed = snapshot(null, { id: "bad-asset" });
+    malformed.series_bible.assets = [{
+      id: "asset-1",
+      kind: "scene",
+      label: "Alley",
+      reference_images: "not-an-array",
+    }] as never;
+
+    await expectMalformedNestedSnapshot(malformed);
+  });
+
+  it("rejects malformed shot language and revision records", async () => {
+    const malformed = snapshot(null, { id: "bad-shot-nested" });
+    malformed.storyboard.shots[0].shot_language = { lens_mm: 13 } as never;
+    malformed.storyboard.shots[0].history = [{ version: 1, source: "unknown" }] as never;
+
+    await expectMalformedNestedSnapshot(malformed);
+  });
+
+  it("rejects malformed consistency issues", async () => {
+    const malformed = snapshot(null, { id: "bad-consistency" });
+    malformed.consistency_report.issues = [{
+      shot_id: null,
+      severity: "fatal",
+      code: "bad",
+      message: "bad",
+    }] as never;
+
+    await expectMalformedNestedSnapshot(malformed);
+  });
+
+  it("rejects malformed continuity episodes and story state", async () => {
+    const malformed = snapshot(null, { id: "bad-continuity" });
+    malformed.continuity_plan = {
+      ...continuityPlan("mini_series"),
+      episodes: [{
+        ...continuityPlan("mini_series").episodes[0],
+        locked: "yes",
+      }],
+      story_state: {
+        ...continuityPlan("mini_series").story_state,
+        current_locations: "Alley",
+      },
+    } as never;
+
+    await expectMalformedNestedSnapshot(malformed);
+  });
+
+  it("rejects malformed workflow artifacts", async () => {
+    const malformed = snapshot(null, { id: "bad-workflow" });
+    malformed.workflow_artifacts = [{ name: "storyboard.json", path: 7, exists: true }] as never;
+
+    await expectMalformedNestedSnapshot(malformed);
+  });
+
+  it("rejects malformed render reports", async () => {
+    const malformed = snapshot(null, { id: "bad-render" });
+    malformed.render_report = {
+      version: "2.0",
+      outputs: [{
+        path: "render.mp4",
+        format: "mp4",
+        resolution: "1080p",
+        duration_seconds: Number.NaN,
+      }],
+    } as never;
+
+    await expectMalformedNestedSnapshot(malformed);
   });
 
   it("rejects unresolved local media references before writing a project", async () => {
@@ -410,6 +728,30 @@ describe("exportProject", () => {
     expect(existingBlob ? await blobToText(existingBlob) : null).toBe("existing");
   });
 
+  it("atomically rejects a project created by another connection during media staging", async () => {
+    const opfs = installDelayedOpfs();
+    const ref = "local://media/imported" as LocalMediaRef;
+    const importing = importProjectBackup(backupFile({
+      project: snapshot(ref, { id: "raced", title: "Imported" }),
+      media: [{
+        ref,
+        file: "media/imported",
+        contentType: "video/mp4",
+        sourcePath: "assets/video/imported.mp4",
+      }],
+      mediaFiles: { "media/imported": strToU8("imported") },
+    }));
+    await opfs.writeStarted;
+
+    await saveThroughSecondConnection(snapshot(null, { id: "raced", title: "Concurrent" }));
+    opfs.releaseClose();
+
+    await expect(importing).rejects.toBeInstanceOf(ProjectImportConflictError);
+    expect((await loadProjectSnapshot("raced"))?.snapshot.project.title).toBe("Concurrent");
+    expect(await mediaRecordCount()).toBe(0);
+    expect(opfs.files.size).toBe(0);
+  });
+
   it("overwrites an existing project only with explicit permission", async () => {
     await saveProjectSnapshot(snapshot(null, { title: "Existing" }));
 
@@ -494,6 +836,24 @@ describe("exportProject", () => {
     await expect(importProjectBackup(backup)).rejects.toThrow(/archive.*large|archive.*limit/i);
   });
 
+  it("rejects export when the actual project manifest exceeds its JSON limit", async () => {
+    const oversized = snapshot(null, { id: "oversized-export" });
+    oversized.project.title = "x".repeat(8 * 1024 * 1024);
+    await saveProjectSnapshot(oversized);
+
+    await expect(exportProjectBackup("oversized-export")).rejects.toThrow(/manifest.*limit/i);
+  });
+
+  it("rejects an actually decompressed project manifest over its JSON limit", async () => {
+    const oversized = snapshot(null, { id: "oversized-import" });
+    oversized.project.title = "x".repeat(8 * 1024 * 1024);
+
+    await expect(importProjectBackup(backupFile({ project: oversized }))).rejects.toThrow(
+      /manifest.*limit/i,
+    );
+    expect(await loadProjectSnapshot("oversized-import")).toBeNull();
+  });
+
   it("rejects archives with too many entries", async () => {
     const mediaFiles = Object.fromEntries(
       Array.from({ length: 513 }, (_, index) => [`extra/${index}`, new Uint8Array(0)]),
@@ -538,5 +898,73 @@ describe("exportProject", () => {
 
     await expect(importProjectBackup(backup)).rejects.toThrow(/total.*large|total.*limit/i);
     expect(await loadProjectSnapshot("imported")).toBeNull();
+  });
+
+  it("falls back to bounded synchronous inflate when Worker construction is blocked", async () => {
+    installInflateWorker({ constructionError: new DOMException("Blocked by CSP", "SecurityError") });
+
+    const imported = await importProjectBackup(backupFile({
+      project: snapshot(null, { id: "csp-fallback" }),
+    }));
+
+    expect(imported.project.id).toBe("csp-fallback");
+  });
+
+  it("does not create a Worker for every small deflated archive entry", async () => {
+    const workerStats = installInflateWorker();
+    const mediaFiles = Object.fromEntries(
+      Array.from({ length: 20 }, (_, index) => [`extra/small-${index}`, strToU8(`small-${index}`)]),
+    );
+
+    await importProjectBackup(backupFile({
+      project: snapshot(null, { id: "small-entries" }),
+      mediaFiles,
+    }));
+
+    expect(workerStats.created).toBe(1);
+    expect(workerStats.maxActive).toBe(1);
+  });
+
+  it("uses at most two concurrent Workers for large deflated entries", async () => {
+    const workerStats = installInflateWorker();
+    const mediaFiles = Object.fromEntries(
+      Array.from({ length: 3 }, (_, index) => [
+        `extra/large-${index}`,
+        incompressibleBytes(400_000, index + 1),
+      ]),
+    );
+    const backup = backupFile({
+      project: snapshot(null, { id: "large-entries" }),
+      mediaFiles,
+    });
+    const archiveBytes = new Uint8Array(await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error ?? new Error("Unable to read test archive"));
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.readAsArrayBuffer(backup);
+    }));
+    Object.defineProperty(backup, "stream", {
+      configurable: true,
+      value: () => {
+        let read = false;
+        return {
+          getReader: () => ({
+            read: async () => {
+              if (read) return { done: true, value: undefined };
+              read = true;
+              return { done: false, value: archiveBytes };
+            },
+            cancel: async () => {
+              read = true;
+            },
+          }),
+        };
+      },
+    });
+
+    await importProjectBackup(backup);
+
+    expect(workerStats.created).toBe(4);
+    expect(workerStats.maxActive).toBeLessThanOrEqual(2);
   });
 });

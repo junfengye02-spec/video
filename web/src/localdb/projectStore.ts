@@ -11,6 +11,16 @@ import type {
 
 const LOCAL_MEDIA_PREFIX = "local://media/";
 
+export class ProjectImportConflictError extends Error {
+  readonly projectId: string;
+
+  constructor(projectId: string) {
+    super(`Project ${projectId} already exists; explicit overwrite permission is required`);
+    this.name = "ProjectImportConflictError";
+    this.projectId = projectId;
+  }
+}
+
 function cleanupError(message: string, causes: unknown[]): Error {
   const error = new Error(message) as Error & { causes: unknown[] };
   error.causes = causes;
@@ -79,6 +89,31 @@ export async function saveProjectSnapshot(snapshot: ShortDramaProjectResponse): 
   await transactionDone(tx);
 }
 
+export async function saveImportedProjectSnapshot(
+  snapshot: ShortDramaProjectResponse,
+  options: { overwrite: boolean },
+): Promise<void> {
+  const db = await openLocalDb();
+  const tx = db.transaction([LOCAL_STORES.projects, LOCAL_STORES.settings], "readwrite");
+  const done = transactionDone(tx);
+  const projectStore = tx.objectStore(LOCAL_STORES.projects);
+  const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
+    projectStore.get(snapshot.project.id),
+  );
+  if (existing && !options.overwrite) {
+    tx.abort();
+    await done.catch(() => undefined);
+    throw new ProjectImportConflictError(snapshot.project.id);
+  }
+
+  projectStore.put(toLocalProjectSnapshot(snapshot));
+  tx.objectStore(LOCAL_STORES.settings).put({
+    key: "recentProjectId",
+    value: snapshot.project.id,
+  } satisfies LocalSettingsRecord);
+  await done;
+}
+
 export async function setRecentProjectId(projectId: string | null): Promise<void> {
   const db = await openLocalDb();
   const tx = db.transaction(LOCAL_STORES.settings, "readwrite");
@@ -142,14 +177,19 @@ export async function deleteProject(projectId: string): Promise<void> {
     ),
   ]);
 
-  const sharedRefs = new Set<LocalMediaRef>();
+  const sharedRefOwners = new Map<LocalMediaRef, string>();
   for (const project of projects) {
     if (project.id !== projectId) {
-      collectLocalMediaRefs(project.snapshot, sharedRefs);
+      for (const ref of collectLocalMediaRefs(project.snapshot)) {
+        if (!sharedRefOwners.has(ref)) sharedRefOwners.set(ref, project.id);
+      }
     }
   }
   const removableMedia = projectMedia.filter(
-    (record) => !sharedRefs.has(`${LOCAL_MEDIA_PREFIX}${record.id}` as LocalMediaRef),
+    (record) => !sharedRefOwners.has(`${LOCAL_MEDIA_PREFIX}${record.id}` as LocalMediaRef),
+  );
+  const reassignedMedia = projectMedia.filter(
+    (record) => sharedRefOwners.has(`${LOCAL_MEDIA_PREFIX}${record.id}` as LocalMediaRef),
   );
 
   projectStore.delete(projectId);
@@ -164,6 +204,10 @@ export async function deleteProject(projectId: string): Promise<void> {
     if (media.storage === "indexeddb") {
       mediaStore.delete(media.id);
     }
+  }
+  for (const media of reassignedMedia) {
+    const ref = `${LOCAL_MEDIA_PREFIX}${media.id}` as LocalMediaRef;
+    mediaStore.put({ ...media, projectId: sharedRefOwners.get(ref)! });
   }
   await done;
 
