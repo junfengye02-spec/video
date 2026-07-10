@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import EmailStr, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +17,17 @@ class AppSettings(BaseSettings):
     session_idle_seconds: int = 7 * 24 * 60 * 60
     session_absolute_seconds: int = 30 * 24 * 60 * 60
     auth_hmac_secret: str = Field(min_length=32)
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_from_address: EmailStr | None = None
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_tls_mode: Literal["ssl", "starttls"] = "starttls"
+
+    @field_validator("smtp_host", "smtp_from_address", "smtp_username", "smtp_password", mode="before")
+    @classmethod
+    def empty_smtp_values_are_unset(cls, value):
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def validate_production(self):
