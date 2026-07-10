@@ -1,0 +1,132 @@
+import { AlertTriangle, Link2, Unlink, X } from "lucide-react";
+import type { AssetRecord, ConsistencyReport, Shot } from "../../domain/types";
+import { getStrings, type UIStrings } from "../../i18n";
+import { countLinkedShots } from "./assetLibrary";
+
+export interface AssetDetailDrawerProps {
+  asset: AssetRecord;
+  binding: boolean;
+  bindingError: string | null;
+  consistencyReport: ConsistencyReport | null;
+  currentShotId: string | null;
+  shots: Shot[];
+  strings?: UIStrings["resources"];
+  onBind: (bind: boolean) => void;
+  onClose: () => void;
+}
+
+function isVideoUrl(url: string): boolean {
+  return /\.(?:mp4|mov|webm)(?:[?#]|$)/i.test(url);
+}
+
+export function AssetDetailDrawer({
+  asset,
+  binding,
+  bindingError,
+  consistencyReport,
+  currentShotId,
+  shots,
+  strings = getStrings("zh").resources,
+  onBind,
+  onClose,
+}: AssetDetailDrawerProps) {
+  const currentShot = shots.find((shot) => shot.id === currentShotId) ?? null;
+  const boundToCurrentShot = Boolean(currentShot?.asset_ids.includes(asset.id));
+  const linkedShotIds = new Set(
+    shots.filter((shot) => shot.asset_ids.includes(asset.id)).map((shot) => shot.id),
+  );
+  const relevantIssues = consistencyReport?.issues.filter(
+    (issue) => Boolean(issue.shot_id && linkedShotIds.has(issue.shot_id)),
+  ) ?? [];
+
+  return (
+    <dialog open aria-labelledby="resource-detail-title">
+      <div className="section-heading">
+        <h2 id="resource-detail-title">{strings.detailDialogTitle}</h2>
+        <button
+          type="button"
+          aria-label={strings.closeDetailAction}
+          disabled={binding}
+          onClick={onClose}
+        >
+          <X aria-hidden="true" size={16} />
+        </button>
+      </div>
+
+      <h3>{asset.label}</h3>
+      {asset.description ? <p>{asset.description}</p> : null}
+      <section aria-labelledby="resource-prompt-title">
+        <h4 id="resource-prompt-title">{strings.promptLabel}</h4>
+        <p>{asset.prompt || strings.noPrompt}</p>
+      </section>
+      <p>{strings.linkedShotCount(countLinkedShots(asset.id, shots))}</p>
+
+      {asset.reference_images.length > 0 ? (
+        <section aria-labelledby="resource-references-title">
+          <h4 id="resource-references-title">{strings.referencesTitle}</h4>
+          <div className="asset-list">
+            {asset.reference_images.map((url, index) => (
+              <img
+                key={`${url}-${index}`}
+                src={url}
+                alt={`${asset.label} ${strings.referenceImageLabel(index + 1)}`}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {asset.media_urls?.length ? (
+        <section aria-labelledby="resource-media-title">
+          <h4 id="resource-media-title">{strings.mediaTitle}</h4>
+          <div className="asset-list">
+            {asset.media_urls.map((url, index) => (
+              isVideoUrl(url) ? (
+                <video
+                  key={`${url}-${index}`}
+                  src={url}
+                  controls
+                  aria-label={`${asset.label} ${strings.mediaItemLabel(index + 1)}`}
+                />
+              ) : (
+                <img
+                  key={`${url}-${index}`}
+                  src={url}
+                  alt={`${asset.label} ${strings.mediaItemLabel(index + 1)}`}
+                />
+              )
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {relevantIssues.length > 0 ? (
+        <section aria-labelledby="resource-consistency-title">
+          <h4 id="resource-consistency-title">{strings.consistencyIssuesTitle}</h4>
+          <ul className="issue-list">
+            {relevantIssues.map((issue, index) => (
+              <li key={`${issue.code}-${issue.shot_id}-${index}`}>
+                <AlertTriangle aria-hidden="true" size={15} />
+                <span>{issue.message}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {bindingError ? <p role="alert">{bindingError}</p> : null}
+      <button
+        type="button"
+        disabled={!currentShot || binding}
+        onClick={() => onBind(!boundToCurrentShot)}
+      >
+        {boundToCurrentShot ? <Unlink aria-hidden="true" size={16} /> : <Link2 aria-hidden="true" size={16} />}
+        {binding
+          ? strings.bindingAction
+          : boundToCurrentShot
+            ? strings.unbindAction
+            : strings.bindAction}
+      </button>
+    </dialog>
+  );
+}

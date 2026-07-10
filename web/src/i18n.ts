@@ -250,13 +250,38 @@ export interface UIStrings {
   resources: {
     title: string;
     emptyState: string;
+    filterLabel: string;
+    allKindsLabel: string;
+    searchLabel: string;
+    searchPlaceholder: string;
     kindLabel: string;
+    kindLabels: Record<"character" | "scene" | "prop", string>;
     labelLabel: string;
     descriptionLabel: string;
     promptLabel: string;
     fileLabel: string;
     uploadAction: string;
     uploadingAction: string;
+    uploadResourceAction: string;
+    viewAsset: (label: string) => string;
+    detailDialogTitle: string;
+    uploadDialogTitle: string;
+    closeDetailAction: string;
+    closeUploadAction: string;
+    linkedShotCount: (count: number) => string;
+    referencesTitle: string;
+    referenceImageLabel: (index: number) => string;
+    mediaTitle: string;
+    mediaItemLabel: (index: number) => string;
+    consistencyIssuesTitle: string;
+    noPrompt: string;
+    bindAction: string;
+    unbindAction: string;
+    bindingAction: string;
+    bindError: string;
+    submitUploadAction: string;
+    uploadingResourceAction: string;
+    uploadError: string;
   };
 }
 
@@ -574,13 +599,42 @@ const STRINGS: Record<Locale, UIStrings> = {
     resources: {
       title: "Resource Library",
       emptyState: "No saved resources yet.",
+      filterLabel: "Resource filter",
+      allKindsLabel: "All resources",
+      searchLabel: "Search resources",
+      searchPlaceholder: "Search names, descriptions, and prompts",
       kindLabel: "Resource type",
+      kindLabels: {
+        character: "Character",
+        scene: "Scene",
+        prop: "Prop",
+      },
       labelLabel: "Name",
       descriptionLabel: "Description",
       promptLabel: "Prompt",
       fileLabel: "Reference image",
       uploadAction: "Upload reference",
       uploadingAction: "Uploading reference",
+      uploadResourceAction: "Upload resource",
+      viewAsset: (label) => `View resource ${label}`,
+      detailDialogTitle: "Resource details",
+      uploadDialogTitle: "Upload resource",
+      closeDetailAction: "Close resource details",
+      closeUploadAction: "Close resource upload",
+      linkedShotCount: (count) => `Linked to ${count} shots`,
+      referencesTitle: "Reference images",
+      referenceImageLabel: (index) => `reference image ${index}`,
+      mediaTitle: "Media",
+      mediaItemLabel: (index) => `media ${index}`,
+      consistencyIssuesTitle: "Related consistency issues",
+      noPrompt: "No prompt saved.",
+      bindAction: "Bind to current shot",
+      unbindAction: "Unbind from current shot",
+      bindingAction: "Updating binding",
+      bindError: "Unable to update the resource binding.",
+      submitUploadAction: "Submit upload",
+      uploadingResourceAction: "Uploading",
+      uploadError: "Unable to upload the resource.",
     },
   },
   zh: {
@@ -904,13 +958,42 @@ const STRINGS: Record<Locale, UIStrings> = {
     resources: {
       title: "\u8d44\u6e90\u5e93",
       emptyState: "\u5c1a\u672a\u4fdd\u5b58\u8d44\u6e90\u3002",
+      filterLabel: "\u8d44\u6e90\u7b5b\u9009",
+      allKindsLabel: "\u5168\u90e8\u8d44\u6e90",
+      searchLabel: "\u641c\u7d22\u8d44\u6e90",
+      searchPlaceholder: "\u641c\u7d22\u540d\u79f0\u3001\u63cf\u8ff0\u548c\u63d0\u793a\u8bcd",
       kindLabel: "\u8d44\u6e90\u7c7b\u578b",
+      kindLabels: {
+        character: "\u89d2\u8272",
+        scene: "\u573a\u666f",
+        prop: "\u9053\u5177",
+      },
       labelLabel: "\u540d\u79f0",
       descriptionLabel: "\u63cf\u8ff0",
       promptLabel: "\u63d0\u793a\u8bcd",
       fileLabel: "\u53c2\u8003\u56fe",
       uploadAction: "\u4e0a\u4f20\u53c2\u8003",
       uploadingAction: "\u6b63\u5728\u4e0a\u4f20\u53c2\u8003",
+      uploadResourceAction: "\u4e0a\u4f20\u8d44\u6e90",
+      viewAsset: (label) => `\u67e5\u770b\u8d44\u6e90 ${label}`,
+      detailDialogTitle: "\u8d44\u6e90\u8be6\u60c5",
+      uploadDialogTitle: "\u4e0a\u4f20\u8d44\u6e90",
+      closeDetailAction: "\u5173\u95ed\u8d44\u6e90\u8be6\u60c5",
+      closeUploadAction: "\u5173\u95ed\u4e0a\u4f20\u8d44\u6e90",
+      linkedShotCount: (count) => `\u5df2\u5173\u8054 ${count} \u4e2a\u5206\u955c`,
+      referencesTitle: "\u53c2\u8003\u56fe",
+      referenceImageLabel: (index) => `\u53c2\u8003\u56fe ${index}`,
+      mediaTitle: "\u5a92\u4f53",
+      mediaItemLabel: (index) => `\u5a92\u4f53 ${index}`,
+      consistencyIssuesTitle: "\u76f8\u5173\u4e00\u81f4\u6027\u95ee\u9898",
+      noPrompt: "\u5c1a\u672a\u4fdd\u5b58\u63d0\u793a\u8bcd\u3002",
+      bindAction: "\u7ed1\u5b9a\u5230\u5f53\u524d\u5206\u955c",
+      unbindAction: "\u4ece\u5f53\u524d\u5206\u955c\u89e3\u7ed1",
+      bindingAction: "\u6b63\u5728\u7ed1\u5b9a",
+      bindError: "\u65e0\u6cd5\u66f4\u65b0\u8d44\u6e90\u7ed1\u5b9a\u3002",
+      submitUploadAction: "\u63d0\u4ea4\u4e0a\u4f20",
+      uploadingResourceAction: "\u6b63\u5728\u4e0a\u4f20",
+      uploadError: "\u65e0\u6cd5\u4e0a\u4f20\u8d44\u6e90\u3002",
     },
   },
 };
