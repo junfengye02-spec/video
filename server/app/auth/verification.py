@@ -68,9 +68,9 @@ end
 
 local failures = redis.call('INCR', KEYS[2])
 if failures == 1 then
-    local code_ttl = redis.call('TTL', KEYS[1])
-    if code_ttl > 0 then
-        redis.call('EXPIRE', KEYS[2], code_ttl)
+    local code_pttl = redis.call('PTTL', KEYS[1])
+    if code_pttl > 0 then
+        redis.call('PEXPIRE', KEYS[2], code_pttl)
     end
 end
 if failures >= tonumber(ARGV[2]) then

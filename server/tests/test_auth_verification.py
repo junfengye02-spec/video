@@ -76,6 +76,22 @@ def test_fifth_failed_attempt_invalidates_code(redis_client, store):
         store.consume("person@example.com", code, purpose="register", now=102)
 
 
+def test_failed_attempt_counter_expires_with_subsecond_code_lifetime(redis_client, store):
+    store.issue("person@example.com", purpose="register", now=100)
+    code_key = f"{PREFIX}verification:register:person@example.com"
+    attempts_key = f"{code_key}:attempts"
+    redis_client.pexpire(code_key, 500)
+
+    with pytest.raises(InvalidCode):
+        store.consume("person@example.com", "wrong", purpose="register", now=101)
+
+    code_pttl = redis_client.pttl(code_key)
+    attempts_pttl = redis_client.pttl(attempts_key)
+    assert 0 < code_pttl <= 500
+    assert 0 < attempts_pttl <= 500
+    assert abs(attempts_pttl - code_pttl) <= 50
+
+
 def test_expired_code_is_rejected(redis_client, store):
     code = store.issue("person@example.com", purpose="register", now=100)
     redis_client.delete(f"{PREFIX}verification:register:person@example.com")
