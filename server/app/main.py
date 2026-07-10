@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from server.app.artifact_sync import read_workflow_settings, rewrite_workflow_artifacts, sync_asset_shot_ids
+from server.app.auth.router import router as auth_router
 from server.app.consistency import apply_consistency_scores, evaluate_storyboard_consistency
 from server.app.events import EventBus
 from server.app.key_validation import validate_gateway_models
@@ -236,6 +237,7 @@ def create_app(
     projects_root: str | Path = DEFAULT_PROJECTS_ROOT,
 ) -> FastAPI:
     app = FastAPI(title="OpenMontage Short Drama Workbench")
+    app.include_router(auth_router)
     store = WorkbenchStore(db_path=Path(db_path), projects_root=Path(projects_root))
     events = EventBus()
     app.state.store = store
