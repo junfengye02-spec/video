@@ -15,9 +15,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(238, 243, 245, 0.96)),
-    #eef3f5;
+  background: #eef3f5;
 }
 
 .sr-only {
@@ -41,33 +39,6 @@ textarea {
 
 button {
   border: 0;
-}
-
-.app-shell {
-  display: grid;
-  grid-template-columns: minmax(260px, 300px) minmax(420px, 1fr) minmax(280px, 360px);
-  gap: 18px;
-  min-height: 100vh;
-  padding: 18px;
-}
-
-.left-rail,
-.right-panel,
-.workspace {
-  min-width: 0;
-}
-
-.left-rail,
-.right-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.workspace {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 14px;
 }
 
 .brand-block,
@@ -147,33 +118,6 @@ h3 {
   padding: 14px;
 }
 
-.studio-nav {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.studio-nav-button {
-  display: inline-flex;
-  min-height: 38px;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  border: 1px solid #c9d4db;
-  border-radius: 6px;
-  background: #fbfcfd;
-  color: #344653;
-  cursor: pointer;
-  font-size: 0.86rem;
-  font-weight: 800;
-}
-
-.studio-nav-button.is-active {
-  border-color: #168a8f;
-  background: #168a8f;
-  color: #fff;
-}
-
 .project-type-selector {
   display: grid;
   gap: 10px;
@@ -222,36 +166,6 @@ h3 {
   border-color: #17202a;
   background: #17202a;
   color: #fff;
-}
-
-.continuity-panel,
-.resource-library {
-  display: grid;
-  gap: 14px;
-}
-
-.continuity-grid,
-.resource-form {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.continuity-grid label,
-.resource-form label {
-  display: grid;
-  gap: 6px;
-}
-
-.continuity-subsection {
-  display: grid;
-  gap: 12px;
-}
-
-.continuity-subsection h3 {
-  margin: 2px 0 0;
-  color: #17202a;
-  font-size: 1rem;
 }
 
 .episode-actions,
@@ -319,7 +233,7 @@ h3 {
 .workflow-missing {
   display: inline-flex;
   width: fit-content;
-  border-radius: 999px;
+  border-radius: 4px;
   padding: 5px 9px;
   font-size: 0.78rem;
   font-weight: 800;
@@ -476,6 +390,12 @@ textarea:focus {
   font-weight: 600;
 }
 
+.rail-action {
+  width: 100%;
+  gap: 7px;
+  margin-top: 10px;
+}
+
 .token-list {
   display: flex;
   flex-wrap: wrap;
@@ -486,7 +406,7 @@ textarea:focus {
   max-width: 100%;
   padding: 5px 8px;
   overflow-wrap: anywhere;
-  border-radius: 999px;
+  border-radius: 4px;
   background: #e4f2f2;
   color: #0c6165;
   font-size: 0.78rem;
@@ -674,13 +594,18 @@ textarea:focus {
 
 .shot-card {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 38px;
+  grid-template-columns: 44px minmax(0, 1fr) 36px;
   gap: 12px;
   align-items: start;
   padding: 12px;
   border: 1px solid #d8e0e5;
   border-radius: 8px;
   background: #fbfcfd;
+}
+
+.shot-card.is-selected {
+  border-color: #168a8f;
+  box-shadow: 0 0 0 3px rgba(22, 138, 143, 0.12);
 }
 
 .shot-index {
@@ -716,7 +641,7 @@ textarea:focus {
 
 .status-pill {
   padding: 4px 7px;
-  border-radius: 999px;
+  border-radius: 4px;
   background: #ecf1f3;
   color: #344653;
   font-size: 0.72rem;
@@ -755,6 +680,11 @@ textarea:focus {
   color: #61717c;
   font-size: 0.76rem;
   font-weight: 700;
+}
+
+.shot-actions {
+  display: grid;
+  gap: 8px;
 }
 
 .icon-button {
@@ -917,43 +847,16 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 1120px) {
-  .app-shell {
-    grid-template-columns: 260px minmax(0, 1fr);
-  }
-
-  .right-panel {
-    grid-column: 1 / -1;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .render-button {
-    grid-column: 1 / -1;
-  }
+.final-download-button {
+  width: 100%;
+  gap: 7px;
 }
 
-@media (max-width: 760px) {
-  .app-shell {
-    grid-template-columns: 1fr;
-    padding: 12px;
-  }
-
-  .right-panel {
-    display: flex;
-  }
-
-  .shot-list {
-    max-height: none;
-    overflow: visible;
-  }
-
-  .shot-card {
-    grid-template-columns: 40px minmax(0, 1fr);
-  }
-
-  .shot-card .icon-button {
-    grid-column: 2;
-    justify-self: start;
-  }
+.final-video {
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  max-height: 320px;
+  border-radius: 8px;
+  background: #111827;
+  object-fit: contain;
 }

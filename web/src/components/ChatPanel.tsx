@@ -47,7 +47,7 @@ export function ChatPanel({
       </div>
       <div className="chat-actions">
         <button
-          className="primary-button"
+          className="primary-button async-action"
           type="button"
           disabled={creating}
           onClick={onCreateStoryboard}

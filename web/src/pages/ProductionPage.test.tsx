@@ -67,6 +67,8 @@ describe("ProductionPage", () => {
     );
 
     expect(screen.getByRole("heading", { name: "制作进度" })).toBeInTheDocument();
+    expect(screen.getByLabelText("成片制作").querySelector(".production-layout"))
+      .toBeInTheDocument();
     expect(screen.getByText("storyboard.json")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "一致性检查" })).toBeInTheDocument();
     expect(screen.getByLabelText("最终成片预览")).toHaveAttribute("src", "blob:final");
@@ -108,6 +110,7 @@ describe("ProductionPage", () => {
 
     rerender(<ProductionPage {...productionProps} rendering />);
     expect(screen.getByRole("button", { name: "正在生成最终成片" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在生成最终成片" })).toHaveClass("async-action");
   });
 
   it("uses finalPath for diagnostics and download availability without inventing a preview", () => {
@@ -147,6 +150,7 @@ describe("ProductionPage", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "正在准备下载" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在准备下载" })).toHaveClass("async-action");
   });
 
   it("shows every workflow artifact name, path and existence state truthfully", () => {

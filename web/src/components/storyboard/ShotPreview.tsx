@@ -18,6 +18,7 @@ export function ShotPreview({ shot, mediaUrl }: ShotPreviewProps) {
       {!shot ? <p className="empty-state">{strings.noSelectedShot}</p> : null}
       {shot && mediaUrl ? (
         <video
+          className="shot-preview-media"
           controls
           preload="metadata"
           src={mediaUrl}

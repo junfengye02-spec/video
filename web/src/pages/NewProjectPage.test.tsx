@@ -88,6 +88,7 @@ describe("NewProjectPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
     expect(screen.getByRole("button", { name: "正在规划分镜..." })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在规划分镜..." })).toHaveClass("async-action");
 
     rejectCreate(new Error("AI 规划失败"));
 

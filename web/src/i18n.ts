@@ -176,8 +176,13 @@ export interface UIStrings {
   storyboardPage: {
     shotListLabel: string;
     previewLabel: string;
+    previewTabLabel: string;
     orderLabel: string;
     inspectorLabel: string;
+    viewControlLabel: string;
+    tabletPanelsLabel: string;
+    openShotListLabel: string;
+    openInspectorLabel: string;
     emptyShots: string;
     noSelectedShot: string;
     noPreviewMedia: string;
@@ -552,8 +557,13 @@ const STRINGS: Record<Locale, UIStrings> = {
     storyboardPage: {
       shotListLabel: "Shot list",
       previewLabel: "Shot preview",
+      previewTabLabel: "Preview",
       orderLabel: "Shot order",
       inspectorLabel: "Shot inspector",
+      viewControlLabel: "Storyboard views",
+      tabletPanelsLabel: "Storyboard side panels",
+      openShotListLabel: "Open shot list",
+      openInspectorLabel: "Open shot inspector",
       emptyShots: "No shots generated.",
       noSelectedShot: "Select or create a shot to preview it.",
       noPreviewMedia: "No preview media is available for this shot yet.",
@@ -948,8 +958,13 @@ const STRINGS: Record<Locale, UIStrings> = {
     storyboardPage: {
       shotListLabel: "\u5206\u955c\u5217\u8868",
       previewLabel: "\u5206\u955c\u9884\u89c8",
+      previewTabLabel: "\u9884\u89c8",
       orderLabel: "\u5206\u955c\u987a\u5e8f",
       inspectorLabel: "\u5206\u955c\u68c0\u67e5\u5668",
+      viewControlLabel: "\u5206\u955c\u89c6\u56fe",
+      tabletPanelsLabel: "\u5206\u955c\u4fa7\u680f",
+      openShotListLabel: "\u6253\u5f00\u5206\u955c\u5217\u8868",
+      openInspectorLabel: "\u6253\u5f00\u5206\u955c\u68c0\u67e5\u5668",
       emptyShots: "\u5c1a\u672a\u751f\u6210\u5206\u955c\u3002",
       noSelectedShot: "\u8bf7\u9009\u62e9\u6216\u521b\u5efa\u5206\u955c\u4ee5\u8fdb\u884c\u9884\u89c8\u3002",
       noPreviewMedia: "\u5f53\u524d\u5206\u955c\u5c1a\u65e0\u9884\u89c8\u5a92\u4f53",

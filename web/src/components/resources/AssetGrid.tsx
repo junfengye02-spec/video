@@ -7,7 +7,7 @@ export interface AssetGridProps {
   disabled: boolean;
   shots: Shot[];
   strings?: UIStrings["resources"];
-  onSelect: (assetId: string) => void;
+  onSelect: (assetId: string, opener: HTMLButtonElement) => void;
 }
 
 export function AssetGrid({
@@ -22,7 +22,7 @@ export function AssetGrid({
   }
 
   return (
-    <div className="asset-list">
+    <div className="asset-grid">
       {assets.map((asset) => {
         const thumbnail = asset.media_urls?.find((url) => !/\.(?:mp4|mov|webm)(?:[?#]|$)/i.test(url))
           ?? asset.reference_images[0];
@@ -34,7 +34,7 @@ export function AssetGrid({
             key={asset.id}
             aria-label={strings.viewAsset(asset.label)}
             disabled={disabled}
-            onClick={() => onSelect(asset.id)}
+            onClick={(event) => onSelect(asset.id, event.currentTarget)}
           >
             {thumbnail ? <img src={thumbnail} alt="" /> : null}
             <strong>{asset.label}</strong>

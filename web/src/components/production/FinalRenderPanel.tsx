@@ -61,7 +61,7 @@ export function FinalRenderPanel({
         </p>
       ) : null}
       <button
-        className="secondary-button final-download-button"
+        className="secondary-button final-download-button async-action"
         type="button"
         disabled={downloadDisabled}
         onClick={handleDownload}

@@ -1,5 +1,5 @@
 import { Download, FilePlus2, FolderOpen, Trash2, Upload } from "lucide-react";
-import { useEffect, useState, type ChangeEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { projectRoutes } from "../app/routes";
 import { getStrings } from "../i18n";
@@ -22,6 +22,7 @@ export function ProjectsPage() {
   const [deleting, setDeleting] = useState(false);
   const [exportingId, setExportingId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -55,6 +56,29 @@ export function ProjectsPage() {
       setError(errorMessage(deleteError, strings.deleteError));
     } finally {
       setDeleting(false);
+    }
+  }
+
+  function openDeleteDialog(
+    event: MouseEvent<HTMLButtonElement>,
+    project: LocalProjectSummary,
+  ) {
+    deleteOpenerRef.current = event.currentTarget;
+    setDeleteTarget(project);
+  }
+
+  function closeDeleteDialog() {
+    if (deleting) {
+      return;
+    }
+    setDeleteTarget(null);
+    window.queueMicrotask(() => deleteOpenerRef.current?.focus());
+  }
+
+  function handleDeleteDialogKeyDown(event: KeyboardEvent<HTMLDialogElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDeleteDialog();
     }
   }
 
@@ -97,7 +121,7 @@ export function ProjectsPage() {
           <p>{strings.localStorageNote}</p>
         </div>
         <div className="page-actions">
-          <label className="button-like">
+          <label className="button-like async-action">
             <Upload aria-hidden="true" size={16} />
             {importing ? strings.importingAction : strings.importAction}
             <input
@@ -123,7 +147,7 @@ export function ProjectsPage() {
       {!loading && projects.length > 0 ? (
         <ul className="project-list">
           {projects.map((project) => (
-            <li key={project.id} className="project-list-item">
+            <li key={project.id} className="project-list-item project-item">
               <div>
                 <h2>{project.title}</h2>
                 <p>{strings.shotCount(project.shotCount)}</p>
@@ -141,6 +165,7 @@ export function ProjectsPage() {
                   {strings.openAction}
                 </Link>
                 <button
+                  className="async-action"
                   type="button"
                   aria-label={strings.exportProject(project.title)}
                   disabled={exportingId === project.id}
@@ -152,7 +177,7 @@ export function ProjectsPage() {
                 <button
                   type="button"
                   aria-label={strings.deleteProject(project.title)}
-                  onClick={() => setDeleteTarget(project)}
+                  onClick={(event) => openDeleteDialog(event, project)}
                 >
                   <Trash2 aria-hidden="true" size={16} />
                   {strings.deleteAction}
@@ -164,14 +189,23 @@ export function ProjectsPage() {
       ) : null}
 
       {deleteTarget ? (
-        <dialog open aria-labelledby="delete-project-title">
+        <dialog
+          open
+          aria-modal="true"
+          aria-labelledby="delete-project-title"
+          onCancel={(event) => {
+            event.preventDefault();
+            closeDeleteDialog();
+          }}
+          onKeyDown={handleDeleteDialogKeyDown}
+        >
           <h2 id="delete-project-title">{strings.deleteDialogTitle}</h2>
           <p>{strings.deleteDialogBody(deleteTarget.title)}</p>
           <div>
-            <button type="button" disabled={deleting} onClick={() => setDeleteTarget(null)}>
+            <button type="button" autoFocus disabled={deleting} onClick={closeDeleteDialog}>
               {strings.cancelAction}
             </button>
-            <button type="button" disabled={deleting} onClick={() => void handleDelete()}>
+            <button className="async-action" type="button" disabled={deleting} onClick={() => void handleDelete()}>
               {deleting ? strings.deletingAction : strings.confirmDeleteAction}
             </button>
           </div>

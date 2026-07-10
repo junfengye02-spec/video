@@ -88,19 +88,21 @@ export function GlobalSettingsPage({
   };
 
   return (
-    <section className="storyboard-panel continuity-panel" aria-labelledby="global-settings-title">
+    <section className="global-settings-page" aria-labelledby="global-settings-title">
       <div className="section-heading">
         <h1 id="global-settings-title">{pageStrings.title}</h1>
       </div>
       <p>{pageStrings.notice}</p>
       {error ? <p role="alert">{error}</p> : null}
-      <ContinuityEditor
-        plan={draft}
-        resetVersion={planGenerationRef.current}
-        strings={strings}
-        onChange={setDraft}
-      />
-      <button className="primary-button" type="button" disabled={saving || !dirty} onClick={handleSave}>
+      <div className="settings-grid">
+        <ContinuityEditor
+          plan={draft}
+          resetVersion={planGenerationRef.current}
+          strings={strings}
+          onChange={setDraft}
+        />
+      </div>
+      <button className="primary-button async-action" type="button" disabled={saving || !dirty} onClick={handleSave}>
         {saving ? pageStrings.saving : pageStrings.save}
       </button>
     </section>

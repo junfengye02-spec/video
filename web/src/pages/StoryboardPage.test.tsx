@@ -60,6 +60,58 @@ describe("StoryboardPage", () => {
     expect(screen.queryByText("音频轨")).not.toBeInTheDocument();
   });
 
+  it("switches mobile views without unmounting a dirty shot draft", () => {
+    render(<StoryboardPage {...storyboardProps} />);
+
+    const controls = screen.getByRole("tablist", { name: "分镜视图" });
+    const listTab = within(controls).getByRole("tab", { name: "分镜列表" });
+    const previewTab = within(controls).getByRole("tab", { name: "预览" });
+    const inspectorTab = within(controls).getByRole("tab", { name: "分镜检查器" });
+    expect(previewTab).toHaveAttribute("aria-selected", "true");
+    expect(listTab).toHaveAttribute("aria-selected", "false");
+    expect(inspectorTab).toHaveAttribute("aria-selected", "false");
+
+    const prompt = screen.getByLabelText("分镜提示词");
+    fireEvent.change(prompt, { target: { value: "切换后仍保留的草稿" } });
+    fireEvent.click(listTab);
+
+    expect(screen.getByRole("navigation", { name: "分镜列表" }).closest(".storyboard-list-panel"))
+      .toHaveClass("is-panel-open");
+    expect(screen.getByRole("region", { name: "分镜检查器" }).closest(".storyboard-inspector-panel"))
+      .not.toHaveClass("is-panel-open");
+
+    fireEvent.click(inspectorTab);
+
+    expect(inspectorTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("分镜提示词")).toBe(prompt);
+    expect(screen.getByLabelText("分镜提示词")).toHaveValue("切换后仍保留的草稿");
+  });
+
+  it("opens the tablet list and inspector panels separately", () => {
+    render(<StoryboardPage {...storyboardProps} />);
+
+    const controls = screen.getByRole("group", { name: "分镜侧栏" });
+    fireEvent.click(within(controls).getByRole("button", { name: "打开分镜列表" }));
+    expect(screen.getByRole("navigation", { name: "分镜列表" }).closest(".storyboard-list-panel"))
+      .toHaveClass("is-panel-open");
+    expect(screen.getByRole("region", { name: "分镜检查器" }).closest(".storyboard-inspector-panel"))
+      .not.toHaveClass("is-panel-open");
+
+    fireEvent.click(within(controls).getByRole("button", { name: "打开分镜检查器" }));
+    expect(screen.getByRole("navigation", { name: "分镜列表" }).closest(".storyboard-list-panel"))
+      .not.toHaveClass("is-panel-open");
+    expect(screen.getByRole("region", { name: "分镜检查器" }).closest(".storyboard-inspector-panel"))
+      .toHaveClass("is-panel-open");
+  });
+
+  it("renders visible shot status text and stable async editor actions", () => {
+    render(<StoryboardPage {...storyboardProps} optimizingShotId="shot-1" />);
+
+    const list = screen.getByRole("navigation", { name: "分镜列表" });
+    expect(within(list).getAllByText("就绪").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "正在优化提示词" })).toHaveClass("async-action");
+  });
+
   it("changes the current shot from the shot list without regenerating", () => {
     const onSelectShot = vi.fn();
     render(<StoryboardPage {...storyboardProps} onSelectShot={onSelectShot} />);
@@ -100,6 +152,7 @@ describe("StoryboardPage", () => {
     ]);
     expect(screen.getByRole("heading", { name: "分镜 1" })).toBeInTheDocument();
     expect(screen.getByLabelText("分镜 1 预览媒体")).toHaveAttribute("src", "/media/shot-1.mp4");
+    expect(screen.getByLabelText("分镜 1 预览媒体")).toHaveClass("shot-preview-media");
     expect(resolveShotMedia).toHaveBeenCalledTimes(1);
     expect(resolveShotMedia).toHaveBeenCalledWith(expect.objectContaining({ id: "shot-1" }));
   });

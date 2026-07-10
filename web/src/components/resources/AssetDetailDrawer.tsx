@@ -1,4 +1,5 @@
 import { AlertTriangle, Link2, Unlink, X } from "lucide-react";
+import type { KeyboardEvent } from "react";
 import type { AssetRecord, ConsistencyReport, Shot } from "../../domain/types";
 import { getStrings, type UIStrings } from "../../i18n";
 import { countLinkedShots } from "./assetLibrary";
@@ -41,12 +42,34 @@ export function AssetDetailDrawer({
     (issue) => Boolean(issue.shot_id && linkedShotIds.has(issue.shot_id)),
   ) ?? [];
 
+  const handleKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (!panelLocked) {
+        onClose();
+      }
+    }
+  };
+
   return (
-    <dialog open aria-labelledby="resource-detail-title">
+    <dialog
+      open
+      aria-modal="true"
+      aria-labelledby="resource-detail-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!panelLocked) {
+          onClose();
+        }
+      }}
+      onKeyDown={handleKeyDown}
+    >
       <div className="section-heading">
         <h2 id="resource-detail-title">{strings.detailDialogTitle}</h2>
         <button
           type="button"
+          autoFocus
+          title={strings.closeDetailAction}
           aria-label={strings.closeDetailAction}
           disabled={panelLocked}
           onClick={onClose}
@@ -118,6 +141,7 @@ export function AssetDetailDrawer({
 
       {bindingError ? <p role="alert">{bindingError}</p> : null}
       <button
+        className="async-action"
         type="button"
         disabled={!currentShot || panelLocked}
         onClick={() => onBind(!boundToCurrentShot)}

@@ -147,7 +147,7 @@ export function KeyGate({
         onChange={(event) => onBaseUrlChange(event.target.value)}
       />
 
-      <button className="primary-button" type="submit" disabled={saving}>
+      <button className="primary-button async-action" type="submit" disabled={saving}>
         <ShieldCheck aria-hidden="true" size={16} />
         {submitLabel}
       </button>

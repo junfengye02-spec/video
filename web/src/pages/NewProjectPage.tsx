@@ -107,7 +107,7 @@ export function NewProjectPage({
           </button>
         ) : null}
 
-        <button type="submit" disabled={!providerReady || creating}>
+        <button className="async-action" type="submit" disabled={!providerReady || creating}>
           <Sparkles aria-hidden="true" size={16} />
           {creating ? strings.creatingAction : strings.createAction}
         </button>

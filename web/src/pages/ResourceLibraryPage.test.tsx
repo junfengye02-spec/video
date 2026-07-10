@@ -44,15 +44,46 @@ afterEach(() => {
 describe("ResourceLibraryPage", () => {
   it("never shows asset detail and upload drawers at the same time", () => {
     render(<ResourceLibraryPage {...resourceProps} />);
-    fireEvent.click(screen.getByRole("button", { name: "查看资源 玛拉" }));
+    const asset = screen.getByRole("button", { name: "查看资源 玛拉" });
+    expect(asset.closest(".resource-layout")).toBeInTheDocument();
+    expect(asset.closest(".asset-grid")).toBeInTheDocument();
+    fireEvent.click(asset);
     const detail = screen.getByRole("dialog", { name: "资源详情" });
     expect(detail).toBeInTheDocument();
-    expect(detail).not.toHaveAttribute("aria-modal", "true");
+    expect(detail).toHaveAttribute("aria-modal", "true");
     fireEvent.click(screen.getByRole("button", { name: "上传资源" }));
     expect(screen.queryByRole("dialog", { name: "资源详情" })).not.toBeInTheDocument();
     const upload = screen.getByRole("dialog", { name: "上传资源" });
     expect(upload).toBeInTheDocument();
-    expect(upload).not.toHaveAttribute("aria-modal", "true");
+    expect(upload).toHaveAttribute("aria-modal", "true");
+  });
+
+  it("manages initial focus, Escape and opener focus for both resource drawers", async () => {
+    render(<ResourceLibraryPage {...resourceProps} />);
+
+    const assetOpener = screen.getByRole("button", { name: "查看资源 玛拉" });
+    fireEvent.click(assetOpener);
+    const detail = screen.getByRole("dialog", { name: "资源详情" });
+    const closeDetail = within(detail).getByRole("button", { name: "关闭资源详情" });
+    expect(closeDetail).toHaveAttribute("title", "关闭资源详情");
+    await waitFor(() => expect(closeDetail).toHaveFocus());
+
+    fireEvent.keyDown(detail, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "资源详情" })).not.toBeInTheDocument();
+    await waitFor(() => expect(assetOpener).toHaveFocus());
+
+    const uploadOpener = screen.getByRole("button", { name: "上传资源" });
+    fireEvent.click(uploadOpener);
+    const upload = screen.getByRole("dialog", { name: "上传资源" });
+    const closeUpload = within(upload).getByRole("button", { name: "关闭上传资源" });
+    expect(closeUpload).toHaveAttribute("title", "关闭上传资源");
+    await waitFor(() => expect(closeUpload).toHaveFocus());
+
+    fireEvent.keyDown(upload, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "上传资源" })).not.toBeInTheDocument();
+    await waitFor(() => expect(uploadOpener).toHaveFocus());
   });
 
   it("binds the selected resource through the current shot save contract", async () => {
@@ -137,6 +168,7 @@ describe("ResourceLibraryPage", () => {
 
     expect(onBindAsset).toHaveBeenCalledWith("shot-1", "asset-char-1", false);
     expect(screen.getByRole("button", { name: "正在更新绑定" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在更新绑定" })).toHaveClass("async-action");
     const otherAsset = screen.getByRole("button", { name: "查看资源 信封" });
     const upload = screen.getByRole("button", { name: "上传资源" });
     const close = screen.getByRole("button", { name: "关闭资源详情" });
@@ -147,6 +179,7 @@ describe("ResourceLibraryPage", () => {
     fireEvent.click(otherAsset);
     fireEvent.click(upload);
     fireEvent.click(close);
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "资源详情" }), { key: "Escape" });
     const detail = screen.getByRole("dialog", { name: "资源详情" });
     expect(within(detail).getByRole("heading", { name: "玛拉" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "上传资源" })).not.toBeInTheDocument();
@@ -246,7 +279,8 @@ describe("ResourceLibraryPage", () => {
         onUploadReferenceImage={onUploadReferenceImage}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "上传资源" }));
+    const opener = screen.getByRole("button", { name: "上传资源" });
+    fireEvent.click(opener);
     fireEvent.change(screen.getByLabelText("资源类型"), { target: { value: "scene" } });
     fireEvent.change(screen.getByLabelText("名称"), { target: { value: "  雨巷  " } });
     fireEvent.change(screen.getByLabelText("描述"), { target: { value: "  夜雨旧城  " } });
@@ -266,6 +300,7 @@ describe("ResourceLibraryPage", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "上传资源" })).not.toBeInTheDocument();
     });
+    await waitFor(() => expect(opener).toHaveFocus());
   });
 
   it("retains the upload panel and form values when upload rejects", async () => {
@@ -307,6 +342,7 @@ describe("ResourceLibraryPage", () => {
 
     expect(onUploadReferenceImage).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "正在上传" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "正在上传" })).toHaveClass("async-action");
     const otherAsset = screen.getByRole("button", { name: "查看资源 信封" });
     const upload = screen.getByRole("button", { name: "上传资源" });
     const close = screen.getByRole("button", { name: "关闭上传资源" });
@@ -317,6 +353,7 @@ describe("ResourceLibraryPage", () => {
     fireEvent.click(otherAsset);
     fireEvent.click(upload);
     fireEvent.click(close);
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "上传资源" }), { key: "Escape" });
     expect(screen.getByRole("dialog", { name: "上传资源" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "资源详情" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("名称")).toHaveValue("保留的雨巷");

@@ -56,18 +56,20 @@ export function ProductionPage({
 
   return (
     <section className="storyboard-panel production-page" aria-label={strings.pageLabel}>
-      <JobProgress events={events} strings={strings.jobProgress} />
-      <WorkflowArtifacts artifacts={workflowArtifacts} strings={strings.workflowArtifacts} />
-      <ConsistencyPanel report={consistencyReport} strings={strings.consistency} />
-      <FinalRenderPanel
-        downloading={downloading}
-        finalPath={finalPath}
-        finalRenderUrl={finalRenderUrl}
-        strings={strings.finalRender}
-        onDownload={onDownload}
-      />
+      <div className="production-layout">
+        <JobProgress events={events} strings={strings.jobProgress} />
+        <WorkflowArtifacts artifacts={workflowArtifacts} strings={strings.workflowArtifacts} />
+        <ConsistencyPanel report={consistencyReport} strings={strings.consistency} />
+        <FinalRenderPanel
+          downloading={downloading}
+          finalPath={finalPath}
+          finalRenderUrl={finalRenderUrl}
+          strings={strings.finalRender}
+          onDownload={onDownload}
+        />
+      </div>
       <button
-        className="render-button"
+        className="render-button async-action"
         type="button"
         disabled={renderDisabled}
         onClick={handleRender}

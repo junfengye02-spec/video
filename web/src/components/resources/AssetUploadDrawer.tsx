@@ -1,5 +1,5 @@
 import { Upload, X } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ReferenceImageUploadRequest } from "../../domain/types";
 import { getStrings, type UIStrings } from "../../i18n";
 
@@ -40,12 +40,34 @@ export function AssetUploadDrawer({
     void onSubmit(payload);
   };
 
+  const handleKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (!busy) {
+        onClose();
+      }
+    }
+  };
+
   return (
-    <dialog open aria-labelledby="resource-upload-title">
+    <dialog
+      open
+      aria-modal="true"
+      aria-labelledby="resource-upload-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!busy) {
+          onClose();
+        }
+      }}
+      onKeyDown={handleKeyDown}
+    >
       <div className="section-heading">
         <h2 id="resource-upload-title">{strings.uploadDialogTitle}</h2>
         <button
           type="button"
+          autoFocus
+          title={strings.closeUploadAction}
           aria-label={strings.closeUploadAction}
           disabled={busy}
           onClick={onClose}
@@ -99,7 +121,7 @@ export function AssetUploadDrawer({
           />
         </label>
         {error ? <p role="alert">{error}</p> : null}
-        <button type="submit" disabled={busy || !file}>
+        <button className="async-action" type="submit" disabled={busy || !file}>
           <Upload aria-hidden="true" size={16} />
           {busy ? strings.uploadingResourceAction : strings.submitUploadAction}
         </button>

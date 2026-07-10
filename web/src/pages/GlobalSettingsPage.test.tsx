@@ -49,8 +49,16 @@ describe("GlobalSettingsPage", () => {
     expect(screen.getByRole("heading", { name: "故事核心" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "视觉规则" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "角色与关系" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "故事核心" }).closest(".settings-grid"))
+      .toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "分集规划" })).not.toBeInTheDocument();
     expect(screen.getByText("只影响后续优化和生成，不会修改已完成分镜")).toBeInTheDocument();
+  });
+
+  it("keeps the global save action width stable while saving", () => {
+    render(<GlobalSettingsPage plan={singleVideoPlan} saving onSave={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "正在保存全局设定" })).toHaveClass("async-action");
   });
 
   it("uses injected locale strings for both the page and continuity editor", () => {

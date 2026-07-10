@@ -11,14 +11,14 @@
   display: grid;
   grid-template-columns: minmax(140px, auto) minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 56px;
+  min-height: 64px;
   padding: 0 20px;
   border-bottom: 1px solid var(--om-border);
   background: var(--om-surface);
 }
 
 .workbench-brand {
-  color: var(--om-text);
+  color: var(--om-primary);
   font-size: 16px;
   font-weight: 700;
   text-decoration: none;
@@ -59,10 +59,15 @@
   color: var(--om-primary-hover);
 }
 
+.workbench-topbar-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .workbench-body {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  min-height: calc(100vh - 57px);
+  min-height: calc(100vh - 65px);
 }
 
 .project-navigation {
@@ -116,7 +121,7 @@
   box-shadow: var(--om-shadow);
 }
 
-.drawer-layer > button[aria-label="关闭接口配置"] {
+.drawer-layer > button:first-child {
   display: grid;
   width: 36px;
   height: 36px;
@@ -127,7 +132,6 @@
   background: var(--om-surface);
   color: var(--om-text);
   cursor: pointer;
-  font-size: 22px;
 }
 
 .toast-region {

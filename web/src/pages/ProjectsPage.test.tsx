@@ -55,6 +55,7 @@ describe("ProjectsPage", () => {
 
     expect(await screen.findByText("雨夜来信")).toBeInTheDocument();
     expect(screen.getByText("8 个分镜")).toBeInTheDocument();
+    expect(screen.getByText("雨夜来信").closest("li")).toHaveClass("project-item");
     expect(screen.getByRole("link", { name: "打开 雨夜来信" })).toHaveAttribute(
       "href",
       "/projects/p1/storyboard",
@@ -74,15 +75,32 @@ describe("ProjectsPage", () => {
     await waitFor(() => expect(screen.queryByText("雨夜来信")).not.toBeInTheDocument());
   });
 
-  it("closes delete confirmation without deleting", async () => {
+  it("closes delete confirmation from Escape or cancel without deleting", async () => {
     projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
-    fireEvent.click(await screen.findByRole("button", { name: "删除 雨夜来信" }));
+    const opener = await screen.findByRole("button", { name: "删除 雨夜来信" });
+    fireEvent.click(opener);
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "删除项目" }), { key: "Escape" });
+
+    expect(projectStoreMocks.deleteProject).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "删除项目" })).not.toBeInTheDocument();
+    await waitFor(() => expect(opener).toHaveFocus());
+
+    fireEvent.click(opener);
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
     expect(projectStoreMocks.deleteProject).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "删除项目" })).not.toBeInTheDocument();
+  });
+
+  it("uses a stable-width async action for project deletion", async () => {
+    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "删除 雨夜来信" }));
+
+    expect(screen.getByRole("button", { name: "确认删除" })).toHaveClass("async-action");
   });
 
   it("exports the selected project as an omproj backup", async () => {

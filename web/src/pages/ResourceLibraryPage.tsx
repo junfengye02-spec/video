@@ -1,5 +1,5 @@
 import { Boxes, Search, Upload } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AssetDetailDrawer } from "../components/resources/AssetDetailDrawer";
 import { AssetGrid } from "../components/resources/AssetGrid";
 import { AssetUploadDrawer } from "../components/resources/AssetUploadDrawer";
@@ -47,6 +47,8 @@ export function ResourceLibraryPage({
   const [bindingError, setBindingError] = useState<string | null>(null);
   const [uploadPending, setUploadPending] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const panelOpenerRef = useRef<HTMLElement | null>(null);
+  const previousPanelModeRef = useRef<ResourcePanelState["mode"]>("closed");
   const operationPending = binding || uploadPending || uploading;
 
   const filteredAssets = useMemo(
@@ -61,21 +63,30 @@ export function ResourceLibraryPage({
     ? supportedAssets.find((asset) => asset.id === panel.assetId) ?? null
     : null;
 
-  const openDetail = (assetId: string) => {
+  useEffect(() => {
+    if (panel.mode === "closed" && previousPanelModeRef.current !== "closed") {
+      panelOpenerRef.current?.focus();
+    }
+    previousPanelModeRef.current = panel.mode;
+  }, [panel.mode]);
+
+  const openDetail = (assetId: string, opener: HTMLButtonElement) => {
     if (operationPending) {
       return;
     }
     setBindingError(null);
     setUploadError(null);
+    panelOpenerRef.current = opener;
     setPanel({ mode: "detail", assetId });
   };
 
-  const openUpload = () => {
+  const openUpload = (opener: HTMLButtonElement) => {
     if (operationPending) {
       return;
     }
     setBindingError(null);
     setUploadError(null);
+    panelOpenerRef.current = opener;
     setPanel({ mode: "upload" });
   };
 
@@ -132,46 +143,52 @@ export function ResourceLibraryPage({
       <div className="section-heading">
         <Boxes aria-hidden="true" size={18} />
         <h1 id="resource-library-title">{strings.title}</h1>
-        <button type="button" disabled={operationPending} onClick={openUpload}>
+        <button
+          type="button"
+          disabled={operationPending}
+          onClick={(event) => openUpload(event.currentTarget)}
+        >
           <Upload aria-hidden="true" size={16} />
           {strings.uploadResourceAction}
         </button>
       </div>
 
-      <div className="resource-form">
-        <label>
-          <span>{strings.filterLabel}</span>
-          <select
-            value={kind}
-            onChange={(event) => setKind(event.target.value as AssetKindFilter)}
-          >
-            <option value="all">{strings.allKindsLabel}</option>
-            <option value="character">{strings.kindLabels.character}</option>
-            <option value="scene">{strings.kindLabels.scene}</option>
-            <option value="prop">{strings.kindLabels.prop}</option>
-          </select>
-        </label>
-        <label>
-          <span>{strings.searchLabel}</span>
-          <span>
-            <Search aria-hidden="true" size={16} />
-            <input
-              type="search"
-              value={query}
-              placeholder={strings.searchPlaceholder}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </span>
-        </label>
-      </div>
+      <div className="resource-layout">
+        <div className="resource-form">
+          <label>
+            <span>{strings.filterLabel}</span>
+            <select
+              value={kind}
+              onChange={(event) => setKind(event.target.value as AssetKindFilter)}
+            >
+              <option value="all">{strings.allKindsLabel}</option>
+              <option value="character">{strings.kindLabels.character}</option>
+              <option value="scene">{strings.kindLabels.scene}</option>
+              <option value="prop">{strings.kindLabels.prop}</option>
+            </select>
+          </label>
+          <label>
+            <span>{strings.searchLabel}</span>
+            <span>
+              <Search aria-hidden="true" size={16} />
+              <input
+                type="search"
+                value={query}
+                placeholder={strings.searchPlaceholder}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </span>
+          </label>
+        </div>
 
-      <AssetGrid
-        assets={filteredAssets}
-        disabled={operationPending}
-        shots={shots}
-        strings={strings}
-        onSelect={openDetail}
-      />
+        <AssetGrid
+          assets={filteredAssets}
+          disabled={operationPending}
+          shots={shots}
+          strings={strings}
+          onSelect={openDetail}
+        />
+      </div>
 
       {selectedAsset ? (
         <AssetDetailDrawer

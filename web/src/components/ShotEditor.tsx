@@ -363,7 +363,7 @@ export function ShotEditor({
       </div>
       <div className="chat-actions">
         <button
-          className="primary-button"
+          className="primary-button async-action"
           type="button"
           disabled={!shot || saving || optimizing}
           onClick={async () => {
@@ -403,7 +403,7 @@ export function ShotEditor({
           </button>
         ) : null}
         <button
-          className="primary-button"
+          className="primary-button async-action"
           type="button"
           disabled={!shot || saving}
           onClick={async () => {
@@ -450,7 +450,7 @@ export function ShotEditor({
           {saving ? strings.savingAction : strings.saveAction}
         </button>
         <button
-          className="primary-button"
+          className="primary-button async-action"
           type="button"
           disabled={!shot || saving || regenerating || draftIsDirty}
           onClick={() => {

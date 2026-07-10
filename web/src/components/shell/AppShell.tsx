@@ -1,5 +1,5 @@
-import { CreditCard, Settings2 } from "lucide-react";
-import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
+import { CreditCard, Settings2, X } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
 import type { Project } from "../../domain/types";
 import { projectRoutes } from "../../app/routes";
@@ -24,6 +24,8 @@ export function AppShell({
 }: AppShellProps) {
   const [localProviderOpen, setLocalProviderOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const providerOpenerRef = useRef<HTMLButtonElement>(null);
+  const providerWasOpenRef = useRef(false);
   const drawerOpen = providerOpen ?? localProviderOpen;
   const setDrawerOpen = onProviderOpenChange ?? setLocalProviderOpen;
 
@@ -38,6 +40,24 @@ export function AppShell({
     const timer = window.setTimeout(() => setToast(null), 2400);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (drawerOpen) {
+      providerWasOpenRef.current = true;
+      return;
+    }
+    if (providerWasOpenRef.current) {
+      providerWasOpenRef.current = false;
+      providerOpenerRef.current?.focus();
+    }
+  }, [drawerOpen]);
+
+  const handleDrawerKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setDrawerOpen(false);
+    }
+  };
 
   const links = project
     ? [
@@ -54,7 +74,7 @@ export function AppShell({
         <Link className="workbench-brand" to={projectRoutes.list} onClick={handleNavigate}>OpenMontage</Link>
         <span className="workbench-project-title">{project?.title ?? "项目工作台"}</span>
         <div className="workbench-topbar-actions">
-          <button type="button" onClick={() => setDrawerOpen(true)}>
+          <button ref={providerOpenerRef} type="button" onClick={() => setDrawerOpen(true)}>
             <Settings2 aria-hidden="true" size={16} />接口配置
           </button>
           <button type="button" onClick={() => setToast("功能开发中")}>
@@ -73,8 +93,22 @@ export function AppShell({
         <main className="workbench-content">{children}</main>
       </div>
       {drawerOpen ? (
-        <div className="drawer-layer" role="dialog" aria-modal="true" aria-label="接口配置">
-          <button type="button" aria-label="关闭接口配置" onClick={() => setDrawerOpen(false)}>×</button>
+        <div
+          className="drawer-layer"
+          role="dialog"
+          aria-modal="true"
+          aria-label="接口配置"
+          onKeyDown={handleDrawerKeyDown}
+        >
+          <button
+            type="button"
+            autoFocus
+            title="关闭接口配置"
+            aria-label="关闭接口配置"
+            onClick={() => setDrawerOpen(false)}
+          >
+            <X aria-hidden="true" size={18} />
+          </button>
           {providerPanel}
         </div>
       ) : null}

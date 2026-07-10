@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -73,5 +73,28 @@ describe("AppShell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "接口配置" }));
     expect(onOpenChange).toHaveBeenCalledWith(true);
+  });
+
+  it("focuses the provider drawer, closes it on Escape and restores its opener", async () => {
+    render(
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <AppShell project={null} providerPanel={<label>接口字段<input /></label>}>
+          <div>项目列表</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    const opener = screen.getByRole("button", { name: "接口配置" });
+    fireEvent.click(opener);
+
+    const drawer = screen.getByRole("dialog", { name: "接口配置" });
+    const close = within(drawer).getByRole("button", { name: "关闭接口配置" });
+    expect(close).toHaveAttribute("title", "关闭接口配置");
+    await waitFor(() => expect(close).toHaveFocus());
+
+    fireEvent.keyDown(drawer, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "接口配置" })).not.toBeInTheDocument();
+    await waitFor(() => expect(opener).toHaveFocus());
   });
 });
