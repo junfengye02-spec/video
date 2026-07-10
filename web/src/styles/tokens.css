@@ -1,0 +1,18 @@
+:root {
+  --om-bg: #f5f7fa;
+  --om-surface: #ffffff;
+  --om-surface-subtle: #f8fafc;
+  --om-text: #172033;
+  --om-text-muted: #667085;
+  --om-border: #d9e0ea;
+  --om-primary: #2563eb;
+  --om-primary-hover: #1d4ed8;
+  --om-success: #0f9f8f;
+  --om-warning: #b7791f;
+  --om-danger: #c2413b;
+  --om-focus: #60a5fa;
+  --om-radius: 6px;
+  --om-shadow: 0 8px 24px rgb(23 32 51 / 8%);
+  color: var(--om-text);
+  background: var(--om-bg);
+}

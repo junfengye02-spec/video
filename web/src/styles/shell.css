@@ -1,0 +1,152 @@
+.workbench-shell {
+  min-height: 100vh;
+  background: var(--om-bg);
+  color: var(--om-text);
+}
+
+.workbench-topbar {
+  position: sticky;
+  z-index: 20;
+  top: 0;
+  display: grid;
+  grid-template-columns: minmax(140px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 56px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--om-border);
+  background: var(--om-surface);
+}
+
+.workbench-brand {
+  color: var(--om-text);
+  font-size: 16px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.workbench-project-title {
+  overflow: hidden;
+  padding: 0 20px;
+  color: var(--om-text-muted);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workbench-topbar-actions button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  background: var(--om-surface);
+  color: var(--om-text);
+  cursor: pointer;
+  font: inherit;
+}
+
+.workbench-topbar-actions button:hover {
+  border-color: var(--om-primary);
+  color: var(--om-primary-hover);
+}
+
+.workbench-body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: calc(100vh - 57px);
+}
+
+.project-navigation {
+  display: flex;
+  width: 208px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--om-border);
+  background: var(--om-surface);
+}
+
+.project-navigation a {
+  padding: 9px 10px;
+  border-radius: var(--om-radius);
+  color: var(--om-text-muted);
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.project-navigation a:hover {
+  background: var(--om-surface-subtle);
+  color: var(--om-text);
+}
+
+.project-navigation a.active {
+  background: #e8f0fe;
+  color: var(--om-primary-hover);
+  font-weight: 600;
+}
+
+.workbench-content {
+  grid-column: 2;
+  min-width: 0;
+  padding: 24px;
+}
+
+.workbench-content:only-child {
+  grid-column: 1 / -1;
+}
+
+.drawer-layer {
+  position: fixed;
+  z-index: 40;
+  inset: 0 0 0 auto;
+  width: min(420px, 100%);
+  overflow-y: auto;
+  padding: 20px;
+  border-left: 1px solid var(--om-border);
+  background: var(--om-surface);
+  box-shadow: var(--om-shadow);
+}
+
+.drawer-layer > button[aria-label="关闭接口配置"] {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  margin: 0 0 16px auto;
+  place-items: center;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  background: var(--om-surface);
+  color: var(--om-text);
+  cursor: pointer;
+  font-size: 22px;
+}
+
+.toast-region {
+  position: fixed;
+  z-index: 50;
+  right: 24px;
+  bottom: 24px;
+  max-width: min(360px, calc(100vw - 48px));
+  padding: 10px 14px;
+  border: 1px solid var(--om-border);
+  border-radius: var(--om-radius);
+  background: var(--om-text);
+  box-shadow: var(--om-shadow);
+  color: var(--om-surface);
+  font-size: 14px;
+}
+
+.workbench-shell :focus-visible,
+.drawer-layer :focus-visible {
+  outline: 3px solid var(--om-focus);
+  outline-offset: 2px;
+}
