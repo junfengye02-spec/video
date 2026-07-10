@@ -62,6 +62,7 @@ NewAPI returns HTTP 200 without pre-consuming quota, creating a consume log, or 
   "cost_currency": "USD",
   "estimated_cost_amount_micro": 2898000,
   "pricing_version": "sha256:...",
+  "billing_fingerprint": "sha256:...",
   "other_ratios": {
     "seconds": 10,
     "resolution": 1
@@ -111,13 +112,13 @@ NewAPI persists quotes in its primary database so the flow works across process 
 - opaque random `quote_id` primary key;
 - authenticated `token_id` and fixed group;
 - method, route family, relay format, model, and internal selected channel ID;
-- estimated quota, integer quota-per-unit, integer estimated micro-USD, pricing version, and canonical `OtherRatios` JSON;
+- estimated quota, canonical decimal quota-per-unit snapshot, integer estimated micro-USD, pricing version, and canonical `OtherRatios` JSON;
 - billing fingerprint;
 - state `quoted|consuming|accepted|failed|expired`;
 - local NewAPI request ID and optional provider reference type/ID;
 - created, expiry, consumed, and updated timestamps.
 
-Quote execution lifetime is 120 seconds. Expired quotes cannot be used. `USAGE_QUOTE_RETENTION_SECONDS` defaults to `604800` (7 days), must be greater than the configured OpenMontage request/task reference recovery deadline, and controls when periodic cleanup may delete terminal or expired quote rows. NewAPI must reject startup configuration that violates that ordering.
+Quote execution lifetime is 120 seconds. Expired quotes cannot be used. `USAGE_QUOTE_RETENTION_SECONDS` defaults to `604800` (7 days) and controls when periodic cleanup may delete terminal or expired quote rows. `USAGE_QUOTE_REFERENCE_RECOVERY_SECONDS` defaults to `86400`, is deployed with the same value as OpenMontage `BILLING_REFERENCE_RECOVERY_SECONDS`, and lets NewAPI reject startup unless retention is greater than both execution lifetime and reference recovery.
 
 ## One-Time Consumption And Recovery
 
@@ -132,6 +133,21 @@ GET /api/usage/quote/{quote_id}
 ```
 
 returns quote state and its request/task reference. It uses the same retained-token historical authentication as receipt lookup. Another token receives 404. This lets OpenMontage recover a reference after a network timeout or process crash without exposing provider data.
+
+The external response uses `status`, while the database column may use `state`:
+
+```json
+{
+  "quote_id": "uq_01J...",
+  "status": "accepted",
+  "reference_type": "task",
+  "reference_id": "task_01J...",
+  "created_at": 1783389880,
+  "expires_at": 1783390000,
+  "consumed_at": 1783389900,
+  "updated_at": 1783389902
+}
+```
 
 ## Relay Integration
 
@@ -171,7 +187,9 @@ For each billable child call:
 
 OpenMontage stores quote ID, quote expiry, estimated quota, estimated provider micro-USD, quota-per-unit, pricing version, `OtherRatios`, and billing fingerprint on the child job. It does not store NewAPI token keys.
 
-If the real call returns `quote_stale`, OpenMontage requests a new quote, locks the job/hold/wallet, resizes the active hold transactionally, updates the job quote snapshot, and retries. No upstream call occurred for the stale quote.
+If the real call returns `quote_stale` or its response is ambiguous, OpenMontage first queries the old quote status. `consuming` or `accepted` with a request/task reference means it binds that reference and polls the final receipt without replaying the provider request. Only `quoted`, `expired`, or an explicit pre-acceptance `failed` state permits a new quote. Missing or malformed status enters reference recovery and never guesses by resubmitting.
+
+After an old quote is confirmed unconsumed, OpenMontage requests a new quote, locks the job/hold/wallet, resizes the active hold transactionally, updates the job quote snapshot, and retries. A fingerprint/pricing mismatch returned while the quote remains `quoted` caused no upstream call.
 
 If the fresh quote requires a larger hold and the wallet has insufficient available units, the resize transaction leaves the original hold active, stores the fresh quote snapshot, sets the child job to `payment_required_quote`, and returns a payment-required response. OpenMontage does not send the real NewAPI request until a later retry can resize the hold successfully; the ordinary hold/reference deadline eventually releases an abandoned hold.
 
@@ -196,7 +214,7 @@ GET /api/usage/receipt/task/{task_id}
 - Fresh quote exceeds the funds available for hold growth: OpenMontage enters `payment_required_quote`, retains the original active hold until retry/deadline, and performs no real NewAPI call.
 - Quote issued but OpenMontage crashes before hold: quote expires with no cost.
 - Hold created but NewAPI rejects before upstream: OpenMontage releases or resizes the hold.
-- Ambiguous real-call timeout: OpenMontage queries quote status, then the recovered receipt reference.
+- `quote_stale` or ambiguous real-call timeout: OpenMontage queries quote status first; an accepted/consuming reference is recovered and never resubmitted.
 - Missing final receipt: OpenMontage releases at the receipt deadline and opens reconciliation; it never charges from the quote.
 
 ## Security
@@ -221,6 +239,7 @@ NewAPI tests must cover:
 - cross-token quote lookup is 404;
 - expired quotes cannot execute;
 - accepted request/task references are recoverable;
+- a lost accepted response followed by `quote_stale`/timeout recovers one reference and produces exactly one upstream call;
 - SQLite, MySQL, and PostgreSQL-compatible queries and migrations.
 
 OpenMontage tests must cover:
@@ -230,6 +249,7 @@ OpenMontage tests must cover:
 - no local model, duration, resolution, or adapter pricing table exists;
 - actual calls carry the quote ID and final settlement ignores quote cost;
 - ambiguous timeouts recover request/task references through quote status;
+- consumed stale quotes recover their references and are never re-quoted/resubmitted;
 - receipt overrun enters `payment_required` without negative balance;
 - refunded, refund-pending, missing-receipt, and rejected-quote paths release the correct hold.
 
