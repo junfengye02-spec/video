@@ -118,7 +118,7 @@ NewAPI persists quotes in its primary database so the flow works across process 
 - local NewAPI request ID and optional provider reference type/ID;
 - created, expiry, consumed, and updated timestamps.
 
-Quote execution lifetime is 120 seconds. Expired quotes cannot be used. `USAGE_QUOTE_RETENTION_SECONDS` defaults to `604800` (7 days) and controls when periodic cleanup may delete terminal or expired quote rows. `USAGE_QUOTE_REFERENCE_RECOVERY_SECONDS` defaults to `86400`, is deployed with the same value as OpenMontage `BILLING_REFERENCE_RECOVERY_SECONDS`, and lets NewAPI reject startup unless retention is greater than both execution lifetime and reference recovery.
+Quote execution lifetime is 120 seconds. Expired quotes cannot be used. `USAGE_QUOTE_RETENTION_SECONDS` defaults to `604800` (7 days) and controls cleanup. Cleanup first persists expired `quoted` rows as `expired`, deletes terminal/expired rows older than retention, and may delete an indeterminate `consuming` row only after its consumption timestamp is older than retention; it never converts `consuming` to replay-permitting `failed`. `USAGE_QUOTE_REFERENCE_RECOVERY_SECONDS` defaults to `86400`, is deployed with the same value as OpenMontage `BILLING_REFERENCE_RECOVERY_SECONDS`, and lets NewAPI reject startup unless retention is greater than both execution lifetime and reference recovery.
 
 ## One-Time Consumption And Recovery
 
