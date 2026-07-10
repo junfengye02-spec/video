@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConsistencyPanel } from "../components/ConsistencyPanel";
 import { JobProgress } from "../components/JobProgress";
@@ -30,6 +30,23 @@ const event: JobEvent = {
   message: "Encoding final video",
   created_at: "2026-07-10T08:00:00Z",
 };
+const completedEvent: JobEvent = {
+  ...event,
+  id: "event-2",
+  stage: "package",
+  status: "complete",
+  message: "Final video ready",
+  created_at: "2026-07-10T08:01:00Z",
+};
+const zh = getStrings("zh").production;
+
+function createDeferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -103,6 +120,13 @@ describe("ProductionPage", () => {
     expect(screen.getByRole("button", { name: "下载最终成片" })).toBeEnabled();
   });
 
+  it("uses a URL-only final render for preview without enabling download", () => {
+    render(<ProductionPage {...productionProps} finalRenderUrl="blob:url-only" />);
+
+    expect(screen.getByLabelText(zh.finalRender.previewLabel)).toHaveAttribute("src", "blob:url-only");
+    expect(screen.getByRole("button", { name: zh.finalRender.downloadAction })).toBeDisabled();
+  });
+
   it("requires a final path for download and reflects external download progress", () => {
     const onDownload = vi.fn().mockResolvedValue(undefined);
     const { rerender } = render(
@@ -160,7 +184,7 @@ describe("ProductionPage", () => {
     render(
       <ProductionPage
         {...productionProps}
-        events={[event]}
+        events={[event, completedEvent]}
         consistencyReport={{
           score: 45,
           issues: [{
@@ -174,9 +198,15 @@ describe("ProductionPage", () => {
     );
 
     const progress = screen.getByRole("region", { name: "制作进度" });
-    expect(progress).toHaveTextContent("compose");
-    expect(progress).toHaveTextContent("running");
-    expect(progress).toHaveTextContent("Encoding final video");
+    const eventItems = within(progress).getAllByRole("listitem");
+    expect(eventItems).toHaveLength(2);
+    expect(eventItems[0]).toHaveTextContent("compose");
+    expect(eventItems[0]).toHaveTextContent("running");
+    expect(eventItems[0]).toHaveTextContent("Encoding final video");
+    expect(eventItems[1]).toHaveTextContent("package");
+    expect(eventItems[1]).toHaveTextContent("complete");
+    expect(eventItems[1]).toHaveTextContent("Final video ready");
+    expect(screen.getByRole("region", { name: "一致性检查" })).toHaveTextContent("45");
     const issue = screen.getByRole("listitem", { name: /错误 continuity/ });
     expect(issue).toHaveTextContent("Wardrobe changed");
     expect(issue).toHaveAttribute("data-severity", "error");
@@ -211,5 +241,105 @@ describe("ProductionPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "生成最终成片" }));
     await waitFor(() => expect(onRender).toHaveBeenCalledTimes(1));
     expect(onDownload).not.toHaveBeenCalled();
+  });
+
+  it("guards render immediately and releases the guard when the callback settles", async () => {
+    const deferred = createDeferred();
+    const onRender = vi.fn().mockReturnValue(deferred.promise);
+    const onDownload = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProductionPage
+        {...productionProps}
+        onRender={onRender}
+        onDownload={onDownload}
+      />,
+    );
+    const renderAction = screen.getByRole("button", { name: zh.renderAction });
+
+    fireEvent.click(renderAction);
+    fireEvent.click(renderAction);
+    expect(onRender).toHaveBeenCalledTimes(1);
+    expect(onDownload).not.toHaveBeenCalled();
+
+    await act(async () => {
+      deferred.resolve();
+      await deferred.promise;
+    });
+    fireEvent.click(renderAction);
+    expect(onRender).toHaveBeenCalledTimes(2);
+    expect(onDownload).not.toHaveBeenCalled();
+  });
+
+  it("guards download immediately and releases the guard when the callback settles", async () => {
+    const deferred = createDeferred();
+    const onRender = vi.fn().mockResolvedValue(undefined);
+    const onDownload = vi.fn().mockReturnValue(deferred.promise);
+    render(
+      <ProductionPage
+        {...productionProps}
+        finalPath="renders/final.mp4"
+        onRender={onRender}
+        onDownload={onDownload}
+      />,
+    );
+    const downloadAction = screen.getByRole("button", { name: zh.finalRender.downloadAction });
+
+    fireEvent.click(downloadAction);
+    fireEvent.click(downloadAction);
+    expect(onDownload).toHaveBeenCalledTimes(1);
+    expect(onRender).not.toHaveBeenCalled();
+
+    await act(async () => {
+      deferred.resolve();
+      await deferred.promise;
+    });
+    fireEvent.click(downloadAction);
+    expect(onDownload).toHaveBeenCalledTimes(2);
+    expect(onRender).not.toHaveBeenCalled();
+  });
+
+  it("contains a synchronous render throw and releases the guard for retry", () => {
+    const onRender = vi.fn(() => {
+      throw new Error("synchronous render failure");
+    });
+    const onDownload = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProductionPage
+        {...productionProps}
+        onRender={onRender}
+        onDownload={onDownload}
+      />,
+    );
+    const renderAction = screen.getByRole("button", { name: zh.renderAction });
+
+    expect(() => fireEvent.click(renderAction)).not.toThrow();
+    expect(onRender).toHaveBeenCalledTimes(1);
+    expect(onDownload).not.toHaveBeenCalled();
+    expect(() => fireEvent.click(renderAction)).not.toThrow();
+    expect(onRender).toHaveBeenCalledTimes(2);
+    expect(onDownload).not.toHaveBeenCalled();
+  });
+
+  it("contains a synchronous download throw and releases the guard for retry", () => {
+    const onRender = vi.fn().mockResolvedValue(undefined);
+    const onDownload = vi.fn(() => {
+      throw new Error("synchronous download failure");
+    });
+    render(
+      <ProductionPage
+        {...productionProps}
+        finalPath="renders/final.mp4"
+        onRender={onRender}
+        onDownload={onDownload}
+      />,
+    );
+    const downloadAction = screen.getByRole("button", { name: zh.finalRender.downloadAction });
+
+    expect(() => fireEvent.click(downloadAction)).not.toThrow();
+    expect(onDownload).toHaveBeenCalledTimes(1);
+    expect(onRender).not.toHaveBeenCalled();
+    expect(() => fireEvent.click(downloadAction)).not.toThrow();
+    expect(onDownload).toHaveBeenCalledTimes(2);
+    expect(onRender).not.toHaveBeenCalled();
   });
 });

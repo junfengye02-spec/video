@@ -1,4 +1,5 @@
 import { Download, Film } from "lucide-react";
+import { useRef } from "react";
 import { getStrings, type UIStrings } from "../../i18n";
 
 export interface FinalRenderPanelProps {
@@ -17,12 +18,20 @@ export function FinalRenderPanel({
   onDownload,
 }: FinalRenderPanelProps) {
   const downloadDisabled = !finalPath || downloading;
+  const downloadInFlightRef = useRef(false);
 
-  const handleDownload = () => {
-    if (downloadDisabled) {
+  const handleDownload = async () => {
+    if (downloadDisabled || downloadInFlightRef.current) {
       return;
     }
-    void onDownload().catch(() => undefined);
+    downloadInFlightRef.current = true;
+    try {
+      await onDownload();
+    } catch {
+      // The callback owner publishes operation errors.
+    } finally {
+      downloadInFlightRef.current = false;
+    }
   };
 
   return (

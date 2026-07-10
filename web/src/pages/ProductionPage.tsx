@@ -1,4 +1,5 @@
 import { Film } from "lucide-react";
+import { useRef } from "react";
 import { ConsistencyPanel } from "../components/ConsistencyPanel";
 import { JobProgress } from "../components/JobProgress";
 import { FinalRenderPanel } from "../components/production/FinalRenderPanel";
@@ -37,12 +38,20 @@ export function ProductionPage({
 }: ProductionPageProps) {
   const strings = getStrings("zh").production;
   const renderDisabled = shotCount === 0 || rendering;
+  const renderInFlightRef = useRef(false);
 
-  const handleRender = () => {
-    if (renderDisabled) {
+  const handleRender = async () => {
+    if (renderDisabled || renderInFlightRef.current) {
       return;
     }
-    void onRender().catch(() => undefined);
+    renderInFlightRef.current = true;
+    try {
+      await onRender();
+    } catch {
+      // The callback owner publishes operation errors.
+    } finally {
+      renderInFlightRef.current = false;
+    }
   };
 
   return (
