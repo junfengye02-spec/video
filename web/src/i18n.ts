@@ -233,6 +233,20 @@ export interface UIStrings {
     characterStatus: string;
     currentLocations: string;
   };
+  globalSettings: {
+    title: string;
+    storyCoreTitle: string;
+    visualRulesTitle: string;
+    charactersRelationshipsTitle: string;
+    storyStateTitle: string;
+    episodePlanningTitle: string;
+    notice: string;
+    save: string;
+    saving: string;
+    saveError: string;
+    episodeHeading: (episodeNumber: number, title: string) => string;
+    episodeFieldLabel: (episodeNumber: number, field: string) => string;
+  };
   resources: {
     title: string;
     emptyState: string;
@@ -542,6 +556,20 @@ const STRINGS: Record<Locale, UIStrings> = {
       propState: "Prop state",
       characterStatus: "Character status",
       currentLocations: "Current locations",
+    },
+    globalSettings: {
+      title: "Global Settings",
+      storyCoreTitle: "Story Core",
+      visualRulesTitle: "Visual Rules",
+      charactersRelationshipsTitle: "Characters and Relationships",
+      storyStateTitle: "Story State",
+      episodePlanningTitle: "Episode Planning",
+      notice: "Only affects future optimization and generation; completed storyboards will not be changed.",
+      save: "Save global settings",
+      saving: "Saving global settings",
+      saveError: "Unable to save global settings.",
+      episodeHeading: (episodeNumber, title) => `Episode ${episodeNumber}${title ? `: ${title}` : ""}`,
+      episodeFieldLabel: (episodeNumber, field) => `Episode ${episodeNumber} ${field}`,
     },
     resources: {
       title: "Resource Library",
@@ -857,6 +885,21 @@ const STRINGS: Record<Locale, UIStrings> = {
       propState: "\u9053\u5177\u72b6\u6001",
       characterStatus: "\u89d2\u8272\u72b6\u6001",
       currentLocations: "\u5f53\u524d\u4f4d\u7f6e",
+    },
+    globalSettings: {
+      title: "\u5168\u5c40\u8bbe\u5b9a",
+      storyCoreTitle: "\u6545\u4e8b\u6838\u5fc3",
+      visualRulesTitle: "\u89c6\u89c9\u89c4\u5219",
+      charactersRelationshipsTitle: "\u89d2\u8272\u4e0e\u5173\u7cfb",
+      storyStateTitle: "\u6545\u4e8b\u72b6\u6001",
+      episodePlanningTitle: "\u5206\u96c6\u89c4\u5212",
+      notice: "\u53ea\u5f71\u54cd\u540e\u7eed\u4f18\u5316\u548c\u751f\u6210\uff0c\u4e0d\u4f1a\u4fee\u6539\u5df2\u5b8c\u6210\u5206\u955c",
+      save: "\u4fdd\u5b58\u5168\u5c40\u8bbe\u5b9a",
+      saving: "\u6b63\u5728\u4fdd\u5b58\u5168\u5c40\u8bbe\u5b9a",
+      saveError: "\u65e0\u6cd5\u4fdd\u5b58\u5168\u5c40\u8bbe\u5b9a\u3002",
+      episodeHeading: (episodeNumber, title) =>
+        `\u7b2c ${episodeNumber} \u96c6${title ? `\uff1a${title}` : ""}`,
+      episodeFieldLabel: (episodeNumber, field) => `\u7b2c ${episodeNumber} \u96c6${field}`,
     },
     resources: {
       title: "\u8d44\u6e90\u5e93",
