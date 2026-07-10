@@ -283,6 +283,40 @@ export interface UIStrings {
     uploadingResourceAction: string;
     uploadError: string;
   };
+  production: {
+    pageLabel: string;
+    jobProgress: {
+      regionLabel: string;
+      title: string;
+      emptyState: string;
+    };
+    workflowArtifacts: {
+      regionLabel: string;
+      title: string;
+      emptyState: string;
+      existsStatus: string;
+      missingStatus: string;
+      pathLabel: string;
+    };
+    consistency: {
+      regionLabel: string;
+      title: string;
+      noReport: string;
+      noIssues: string;
+      severityLabels: Record<"info" | "warning" | "error", string>;
+    };
+    finalRender: {
+      regionLabel: string;
+      title: string;
+      previewLabel: string;
+      noPreview: string;
+      pathLabel: string;
+      downloadAction: string;
+      downloadingAction: string;
+    };
+    renderAction: string;
+    renderingAction: string;
+  };
 }
 
 const STRINGS: Record<Locale, UIStrings> = {
@@ -635,6 +669,44 @@ const STRINGS: Record<Locale, UIStrings> = {
       submitUploadAction: "Submit upload",
       uploadingResourceAction: "Uploading",
       uploadError: "Unable to upload the resource.",
+    },
+    production: {
+      pageLabel: "Production",
+      jobProgress: {
+        regionLabel: "Production progress",
+        title: "Production progress",
+        emptyState: "No active jobs.",
+      },
+      workflowArtifacts: {
+        regionLabel: "Workflow artifacts",
+        title: "Workflow artifacts",
+        emptyState: "No workflow artifacts yet.",
+        existsStatus: "Available",
+        missingStatus: "Missing",
+        pathLabel: "Path",
+      },
+      consistency: {
+        regionLabel: "Consistency check",
+        title: "Consistency check",
+        noReport: "No report yet.",
+        noIssues: "No issues found",
+        severityLabels: {
+          info: "Info",
+          warning: "Warning",
+          error: "Error",
+        },
+      },
+      finalRender: {
+        regionLabel: "Final render",
+        title: "Final render",
+        previewLabel: "Final render preview",
+        noPreview: "No final render preview yet.",
+        pathLabel: "Path",
+        downloadAction: "Download final render",
+        downloadingAction: "Preparing download",
+      },
+      renderAction: "Generate final render",
+      renderingAction: "Generating final render",
     },
   },
   zh: {
@@ -994,6 +1066,44 @@ const STRINGS: Record<Locale, UIStrings> = {
       submitUploadAction: "\u63d0\u4ea4\u4e0a\u4f20",
       uploadingResourceAction: "\u6b63\u5728\u4e0a\u4f20",
       uploadError: "\u65e0\u6cd5\u4e0a\u4f20\u8d44\u6e90\u3002",
+    },
+    production: {
+      pageLabel: "\u6210\u7247\u5236\u4f5c",
+      jobProgress: {
+        regionLabel: "\u5236\u4f5c\u8fdb\u5ea6",
+        title: "\u5236\u4f5c\u8fdb\u5ea6",
+        emptyState: "\u6682\u65e0\u8fdb\u884c\u4e2d\u7684\u4efb\u52a1",
+      },
+      workflowArtifacts: {
+        regionLabel: "\u5de5\u4f5c\u6d41\u4ea7\u7269",
+        title: "\u5de5\u4f5c\u6d41\u4ea7\u7269",
+        emptyState: "\u6682\u65e0\u5de5\u4f5c\u6d41\u4ea7\u7269",
+        existsStatus: "\u5df2\u751f\u6210",
+        missingStatus: "\u7f3a\u5931",
+        pathLabel: "\u8def\u5f84",
+      },
+      consistency: {
+        regionLabel: "\u4e00\u81f4\u6027\u68c0\u67e5",
+        title: "\u4e00\u81f4\u6027\u68c0\u67e5",
+        noReport: "\u6682\u65e0\u62a5\u544a",
+        noIssues: "\u672a\u53d1\u73b0\u95ee\u9898",
+        severityLabels: {
+          info: "\u4fe1\u606f",
+          warning: "\u8b66\u544a",
+          error: "\u9519\u8bef",
+        },
+      },
+      finalRender: {
+        regionLabel: "\u6700\u7ec8\u6210\u7247",
+        title: "\u6700\u7ec8\u6210\u7247",
+        previewLabel: "\u6700\u7ec8\u6210\u7247\u9884\u89c8",
+        noPreview: "\u6682\u65e0\u6700\u7ec8\u6210\u7247\u9884\u89c8",
+        pathLabel: "\u8def\u5f84",
+        downloadAction: "\u4e0b\u8f7d\u6700\u7ec8\u6210\u7247",
+        downloadingAction: "\u6b63\u5728\u51c6\u5907\u4e0b\u8f7d",
+      },
+      renderAction: "\u751f\u6210\u6700\u7ec8\u6210\u7247",
+      renderingAction: "\u6b63\u5728\u751f\u6210\u6700\u7ec8\u6210\u7247",
     },
   },
 };
