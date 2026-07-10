@@ -1,5 +1,5 @@
 import { List, PanelRight } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { ShotEditor } from "../components/ShotEditor";
 import { ShotList } from "../components/storyboard/ShotList";
 import { ShotOrderStrip } from "../components/storyboard/ShotOrderStrip";
@@ -89,9 +89,10 @@ export function StoryboardPage({
   const listOpenerRef = useRef<HTMLButtonElement>(null);
   const inspectorOpenerRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    onDirtyChange?.(dirty);
-  }, [dirty, onDirtyChange]);
+  const handleDirtyChange = useCallback((nextDirty: boolean) => {
+    setDirty(nextDirty);
+    onDirtyChange?.(nextDirty);
+  }, [onDirtyChange]);
 
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
@@ -241,7 +242,7 @@ export function StoryboardPage({
             ...strings.shotEditor,
             regionLabel: strings.storyboardPage.inspectorLabel,
           }}
-          onDirtyChange={setDirty}
+          onDirtyChange={handleDirtyChange}
           onPanelKeyDown={(event) => handleTabletPanelKeyDown(event, "inspector")}
           onOptimizePrompt={onOptimizePrompt}
           onSaveShot={onSaveShot}

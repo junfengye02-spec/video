@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import type { ShortDramaProjectResponse } from "../domain/types";
@@ -83,6 +84,16 @@ function cloneProjectResponse(
 function renderAppAt(path: string) {
   window.history.pushState({}, "", path);
   return render(<App />);
+}
+
+function commitTextEdit(element: HTMLTextAreaElement, value: string) {
+  const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  if (!setValue) throw new Error("HTMLTextAreaElement value setter is unavailable");
+
+  flushSync(() => {
+    setValue.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
 }
 
 async function enterProviderCredentials() {
@@ -320,7 +331,7 @@ describe("App routes", () => {
     expect(await screen.findByText("Project Two")).toBeInTheDocument();
   });
 
-  it("guards dirty storyboard navigation and preserves the draft when cancelled", async () => {
+  it("guards dirty storyboard navigation immediately after the edit commits", async () => {
     localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
       id: "p1",
       title: "Rain Alley",
@@ -329,11 +340,16 @@ describe("App routes", () => {
     });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     renderAppAt("/projects/p1/storyboard");
-    const prompt = await screen.findByLabelText(zh.shotEditor.promptLabel);
-    fireEvent.change(prompt, { target: { value: "\u672a\u4fdd\u5b58\u5206\u955c\u8349\u7a3f" } });
+    const prompt = await screen.findByLabelText<HTMLTextAreaElement>(zh.shotEditor.promptLabel);
+    const resourcesLink = screen.getByRole("link", { name: zh.resources.title });
+    const unload = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      commitTextEdit(prompt, "\u672a\u4fdd\u5b58\u5206\u955c\u8349\u7a3f");
+      window.dispatchEvent(unload);
+      resourcesLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    });
 
-    fireEvent.click(screen.getByRole("link", { name: zh.resources.title }));
-
+    expect(unload.defaultPrevented).toBe(true);
     expect(confirm).toHaveBeenCalledWith(zh.storyboardPage.discardChangesConfirm);
     expect(window.location.pathname).toBe("/projects/p1/storyboard");
     expect(screen.getByLabelText(zh.shotEditor.promptLabel)).toHaveValue("\u672a\u4fdd\u5b58\u5206\u955c\u8349\u7a3f");

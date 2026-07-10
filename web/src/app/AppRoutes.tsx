@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Link,
   Navigate,
@@ -125,7 +125,7 @@ function ProjectLayout() {
     }
   }, [location.key]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!dirty) return;
 
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {

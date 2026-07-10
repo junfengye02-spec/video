@@ -1,5 +1,5 @@
 import { Check, Images, RefreshCw, Sparkles, Undo2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEventHandler, type Ref } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEventHandler, type Ref } from "react";
 import type { AssetRecord, Character, PromptOptimizeResponse, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
 import type { UIStrings } from "../i18n";
 import {
@@ -135,7 +135,7 @@ export function ShotEditor({
     selectedReferenceCount > 0 ? strings.imageToVideoMode(selectedReferenceCount) : strings.textToVideoMode;
   const draftIsDirty = shotDraftIsDirty(draftState);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onDirtyChange?.(draftIsDirty);
   }, [draftIsDirty, onDirtyChange]);
 
