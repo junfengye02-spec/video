@@ -18,6 +18,17 @@ function ruleBody(source: string, selector: string): string {
 }
 
 describe("responsive CSS contracts", () => {
+  it("does not transition tablet panel visibility while focus moves into an opening panel", () => {
+    const tabletCss = responsiveCss.slice(
+      responsiveCss.indexOf("@media (max-width: 1179px)"),
+      responsiveCss.indexOf("@media (max-width: 767px)"),
+    );
+    const fixedPanels = ruleBody(tabletCss, ".storyboard-shot-list,");
+
+    expect(fixedPanels).toContain("transition: transform 160ms ease;");
+    expect(fixedPanels).not.toContain("visibility 160ms ease");
+  });
+
   it("gives the mobile shell a content-height navigation row and a remaining-space content row", () => {
     const mobileCss = responsiveCss.slice(responsiveCss.indexOf("@media (max-width: 767px)"));
     const workbenchBody = ruleBody(mobileCss, ".workbench-body");

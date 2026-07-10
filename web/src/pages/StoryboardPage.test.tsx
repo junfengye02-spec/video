@@ -40,6 +40,15 @@ function useTabletViewport() {
   } satisfies MediaQueryList)));
 }
 
+function clickLikeBrowser(button: HTMLElement) {
+  fireEvent.pointerDown(button, { button: 0 });
+  fireEvent.mouseDown(button, { button: 0 });
+  button.focus();
+  fireEvent.pointerUp(button, { button: 0 });
+  fireEvent.mouseUp(button, { button: 0 });
+  fireEvent.click(button, { button: 0 });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -110,17 +119,17 @@ describe("StoryboardPage", () => {
 
     const controls = screen.getByRole("group", { name: "分镜侧栏" });
     const opener = within(controls).getByRole("button", { name: "打开分镜列表" });
-    opener.focus();
-    fireEvent.click(opener);
+    clickLikeBrowser(opener);
 
     const dialog = screen.getByRole("dialog", { name: "分镜列表" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    const firstControl = within(dialog).getByRole("button", { name: "选择分镜 1" });
     await waitFor(() => {
-      expect(within(dialog).getByRole("button", { name: "选择分镜 1" })).toHaveFocus();
+      expect(firstControl).toHaveFocus();
     });
 
-    fireEvent.keyDown(dialog, { key: "Escape" });
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
 
     expect(screen.queryByRole("dialog", { name: "分镜列表" })).not.toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "分镜列表" })).toBeInTheDocument();
@@ -134,16 +143,17 @@ describe("StoryboardPage", () => {
     const controls = screen.getByRole("group", { name: "分镜侧栏" });
     const listOpener = within(controls).getByRole("button", { name: "打开分镜列表" });
     const inspectorOpener = within(controls).getByRole("button", { name: "打开分镜检查器" });
-    fireEvent.click(listOpener);
-    fireEvent.click(inspectorOpener);
+    clickLikeBrowser(listOpener);
+    clickLikeBrowser(inspectorOpener);
 
     const dialog = screen.getByRole("dialog", { name: "分镜检查器" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
     expect(screen.queryByRole("dialog", { name: "分镜列表" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    await waitFor(() => expect(within(dialog).getByLabelText("分镜提示词")).toHaveFocus());
+    const firstControl = within(dialog).getByLabelText("分镜提示词");
+    await waitFor(() => expect(firstControl).toHaveFocus());
 
-    fireEvent.keyDown(dialog, { key: "Escape" });
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
 
     expect(screen.queryByRole("dialog", { name: "分镜检查器" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "分镜检查器" })).toBeInTheDocument();

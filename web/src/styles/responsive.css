@@ -60,9 +60,7 @@
     z-index: 30;
     background: var(--om-surface);
     box-shadow: var(--om-shadow);
-    transition:
-      transform 160ms ease,
-      visibility 160ms ease;
+    transition: transform 160ms ease;
   }
 
   .storyboard-shot-list {
@@ -81,6 +79,9 @@
   .storyboard-inspector-panel:not(.is-panel-open) .shot-editor {
     visibility: hidden;
     pointer-events: none;
+    transition:
+      transform 160ms ease,
+      visibility 0s linear 160ms;
   }
 
   .storyboard-list-panel.is-panel-open .storyboard-shot-list,
