@@ -166,10 +166,12 @@ export interface UIStrings {
     imageToVideoMode: (count: number) => string;
     optimizeAction: string;
     optimizingAction: string;
+    undoOptimizationAction: string;
     saveAction: string;
     savingAction: string;
     regenerateAction: string;
     regeneratingAction: string;
+    saveBeforeRegenerateHint: string;
   };
   storyboardWaterfall: {
     regionLabel: string;
@@ -450,12 +452,14 @@ const STRINGS: Record<Locale, UIStrings> = {
       noSavedReferenceAssetsYet: "No saved reference assets yet.",
       textToVideoMode: "Text-to-video: no saved reference image selected",
       imageToVideoMode: (count) => `Image-to-video: ${count} reference image${count === 1 ? "" : "s"} selected`,
-      optimizeAction: "Optimize shot",
-      optimizingAction: "Optimizing shot",
-      saveAction: "Save shot",
-      savingAction: "Saving shot",
-      regenerateAction: "Regenerate selected shot",
-      regeneratingAction: "Regenerating selected shot",
+      optimizeAction: "AI optimize prompt",
+      optimizingAction: "Optimizing prompt",
+      undoOptimizationAction: "Undo optimization",
+      saveAction: "Save changes",
+      savingAction: "Saving changes",
+      regenerateAction: "Regenerate",
+      regeneratingAction: "Regenerating",
+      saveBeforeRegenerateHint: "Save changes first",
     },
     storyboardWaterfall: {
       regionLabel: "Storyboard waterfall",
@@ -667,12 +671,12 @@ const STRINGS: Record<Locale, UIStrings> = {
       title: "\u955c\u5934\u7f16\u8f91",
       regionLabel: "\u955c\u5934\u7f16\u8f91",
       emptyState: "\u8bf7\u5148\u521b\u5efa\u6545\u4e8b\u677f\uff0c\u518d\u7f16\u8f91\u955c\u5934\u5143\u6570\u636e\u3002",
-      promptLabel: "\u955c\u5934\u63d0\u793a\u8bcd",
+      promptLabel: "\u5206\u955c\u63d0\u793a\u8bcd",
       locationLabel: "\u573a\u666f",
       charactersLabel: "\u89d2\u8272",
       propsLabel: "\u9053\u5177",
       intentLabel: "\u955c\u5934\u610f\u56fe",
-      shotSizeLabel: "\u955c\u5934\u666f\u522b",
+      shotSizeLabel: "\u666f\u522b",
       cameraMovementLabel: "\u8fd0\u955c\u65b9\u5f0f",
       lensLabel: "\u955c\u5934\u7126\u6bb5",
       lightingLabel: "\u6253\u5149",
@@ -748,12 +752,14 @@ const STRINGS: Record<Locale, UIStrings> = {
       noSavedReferenceAssetsYet: "\u5c1a\u672a\u4fdd\u5b58\u53c2\u8003\u8d44\u6e90\u3002",
       textToVideoMode: "\u6587\u751f\u89c6\u9891\uff1a\u5f53\u524d\u672a\u9009\u4e2d\u53c2\u8003\u56fe",
       imageToVideoMode: (count) => `\u56fe\u751f\u89c6\u9891\uff1a\u5df2\u9009 ${count} \u5f20\u53c2\u8003\u56fe`,
-      optimizeAction: "\u4f18\u5316\u955c\u5934",
-      optimizingAction: "\u6b63\u5728\u4f18\u5316\u955c\u5934",
-      saveAction: "\u4fdd\u5b58\u955c\u5934",
-      savingAction: "\u6b63\u5728\u4fdd\u5b58\u955c\u5934",
-      regenerateAction: "\u91cd\u65b0\u751f\u6210\u5f53\u524d\u955c\u5934",
-      regeneratingAction: "\u6b63\u5728\u91cd\u65b0\u751f\u6210\u5f53\u524d\u955c\u5934",
+      optimizeAction: "AI \u4f18\u5316\u63d0\u793a\u8bcd",
+      optimizingAction: "\u6b63\u5728\u4f18\u5316\u63d0\u793a\u8bcd",
+      undoOptimizationAction: "\u64a4\u9500\u4f18\u5316",
+      saveAction: "\u4fdd\u5b58\u4fee\u6539",
+      savingAction: "\u6b63\u5728\u4fdd\u5b58\u4fee\u6539",
+      regenerateAction: "\u91cd\u65b0\u751f\u6210",
+      regeneratingAction: "\u6b63\u5728\u91cd\u65b0\u751f\u6210",
+      saveBeforeRegenerateHint: "\u8bf7\u5148\u4fdd\u5b58\u4fee\u6539",
     },
     storyboardWaterfall: {
       regionLabel: "\u5206\u955c\u7011\u5e03",
