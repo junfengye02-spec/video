@@ -176,6 +176,10 @@
     min-inline-size: 0;
   }
 
+  .project-actions .async-action {
+    min-inline-size: 9.75rem;
+  }
+
   .settings-grid,
   .resource-layout,
   .production-layout {

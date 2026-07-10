@@ -34,10 +34,10 @@ export interface StoryboardPageProps {
 type StoryboardView = "list" | "preview" | "inspector";
 const TABLET_MEDIA_QUERY = "(min-width: 768px) and (max-width: 1179px)";
 const FOCUSABLE_CONTROL_SELECTOR = [
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
+  "button:not(:disabled)",
+  "input:not(:disabled)",
+  "select:not(:disabled)",
+  "textarea:not(:disabled)",
   "[href]",
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
@@ -115,7 +115,8 @@ export function StoryboardPage({
     window.queueMicrotask(() => {
       if (cancelled) return;
       const panel = activeView === "list" ? listPanelRef.current : inspectorPanelRef.current;
-      panel?.querySelector<HTMLElement>(FOCUSABLE_CONTROL_SELECTOR)?.focus();
+      const firstControl = panel?.querySelector<HTMLElement>(FOCUSABLE_CONTROL_SELECTOR);
+      (firstControl ?? panel)?.focus();
     });
     return () => {
       cancelled = true;

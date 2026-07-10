@@ -76,10 +76,10 @@ describe("StoryboardPage", () => {
   it("renders a selectable shot list, central preview, read-only order strip and inspector", () => {
     render(<StoryboardPage {...storyboardProps} />);
 
-    expect(screen.getByRole("navigation", { name: "分镜列表" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "分镜列表" })).not.toHaveAttribute("tabindex");
     expect(screen.getByRole("region", { name: "分镜预览" })).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "分镜顺序" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "分镜检查器" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "分镜检查器" })).not.toHaveAttribute("tabindex");
     expect(screen.queryByText("视频轨")).not.toBeInTheDocument();
     expect(screen.queryByText("音频轨")).not.toBeInTheDocument();
   });
@@ -158,6 +158,42 @@ describe("StoryboardPage", () => {
     expect(screen.queryByRole("dialog", { name: "分镜检查器" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "分镜检查器" })).toBeInTheDocument();
     await waitFor(() => expect(inspectorOpener).toHaveFocus());
+  });
+
+  it("focuses the empty tablet shot-list dialog root and closes it from Escape", async () => {
+    useTabletViewport();
+    render(<StoryboardPage {...storyboardProps} selectedShotId={null} shots={[]} />);
+
+    const controls = screen.getByRole("group", { name: "分镜侧栏" });
+    const opener = within(controls).getByRole("button", { name: "打开分镜列表" });
+    clickLikeBrowser(opener);
+
+    const dialog = screen.getByRole("dialog", { name: "分镜列表" });
+    expect(dialog).toHaveAttribute("tabindex", "-1");
+    await waitFor(() => expect(dialog).toHaveFocus());
+
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "分镜列表" })).not.toBeInTheDocument();
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it("focuses the all-disabled tablet inspector root and closes it from Escape", async () => {
+    useTabletViewport();
+    render(<StoryboardPage {...storyboardProps} selectedShotId={null} shots={[]} />);
+
+    const controls = screen.getByRole("group", { name: "分镜侧栏" });
+    const opener = within(controls).getByRole("button", { name: "打开分镜检查器" });
+    clickLikeBrowser(opener);
+
+    const dialog = screen.getByRole("dialog", { name: "分镜检查器" });
+    expect(dialog).toHaveAttribute("tabindex", "-1");
+    await waitFor(() => expect(dialog).toHaveFocus());
+
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog", { name: "分镜检查器" })).not.toBeInTheDocument();
+    await waitFor(() => expect(opener).toHaveFocus());
   });
 
   it("renders visible shot status text and stable async editor actions", () => {

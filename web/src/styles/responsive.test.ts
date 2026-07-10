@@ -37,6 +37,15 @@ describe("responsive CSS contracts", () => {
     expect(workbenchBody).toContain("grid-template-rows: auto minmax(0, 1fr);");
   });
 
+  it("keeps mobile async project actions stable while ordinary actions can shrink", () => {
+    const mobileCss = responsiveCss.slice(responsiveCss.indexOf("@media (max-width: 767px)"));
+    const projectActions = ruleBody(mobileCss, ".project-actions a,");
+    const asyncProjectActions = ruleBody(mobileCss, ".project-actions .async-action");
+
+    expect(projectActions).toContain("min-inline-size: 0;");
+    expect(asyncProjectActions).toContain("min-inline-size: 9.75rem;");
+  });
+
   it("keeps async label changes within a stable inline-size contract", () => {
     const asyncAction = ruleBody(pagesCss, ".async-action");
 

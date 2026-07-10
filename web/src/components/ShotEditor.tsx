@@ -153,6 +153,7 @@ export function ShotEditor({
       role={modal ? "dialog" : undefined}
       aria-modal={modal ? "true" : undefined}
       aria-label={strings.regionLabel}
+      tabIndex={modal ? -1 : undefined}
       onKeyDown={onPanelKeyDown}
     >
       <div className="section-heading">

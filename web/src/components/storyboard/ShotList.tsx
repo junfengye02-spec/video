@@ -28,6 +28,7 @@ export function ShotList({
       role={modal ? "dialog" : undefined}
       aria-modal={modal ? "true" : undefined}
       aria-label={strings.storyboardPage.shotListLabel}
+      tabIndex={modal ? -1 : undefined}
       onKeyDown={onPanelKeyDown}
     >
       <div className="section-heading">
