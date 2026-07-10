@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PromptOptimizeResponse } from "../domain/types";
+import type { PromptOptimizeResponse, Shot, ShotSaveRequest } from "../domain/types";
 import { getStrings } from "../i18n";
 import { createShot } from "../test/fixtures";
 import { ShotEditor, type ShotEditorProps } from "./ShotEditor";
@@ -15,6 +15,18 @@ const optimizedResponse: PromptOptimizeResponse = {
   shot_language: { shot_size: "close_up" },
 };
 
+function savedShotFromPayload(payload: ShotSaveRequest): Shot {
+  return createShot({
+    prompt: payload.prompt ?? sampleShot.prompt,
+    characters: payload.characters ?? sampleShot.characters,
+    location: payload.location ?? sampleShot.location,
+    props: payload.props ?? sampleShot.props,
+    asset_ids: payload.asset_ids ?? sampleShot.asset_ids,
+    shot_intent: payload.shot_intent ?? sampleShot.shot_intent,
+    shot_language: payload.shot_language ?? sampleShot.shot_language,
+  });
+}
+
 function renderEditor(overrides: Partial<ShotEditorProps> = {}) {
   const props: ShotEditorProps = {
     assets: [],
@@ -26,7 +38,7 @@ function renderEditor(overrides: Partial<ShotEditorProps> = {}) {
     strings: getStrings("zh").shotEditor,
     onOptimizePrompt: vi.fn().mockResolvedValue(optimizedResponse),
     onRegenerateShot: vi.fn().mockResolvedValue(undefined),
-    onSaveShot: vi.fn().mockResolvedValue(undefined),
+    onSaveShot: vi.fn().mockImplementation(async (_shotId, payload) => savedShotFromPayload(payload)),
     ...overrides,
   };
   return { ...render(<ShotEditor {...props} />), props };
@@ -37,9 +49,28 @@ afterEach(() => {
 });
 
 describe("ShotEditor", () => {
+  it("keeps a trailing prop separator editable and normalizes props only when saving", async () => {
+    const onSaveShot = vi.fn().mockImplementation(async (_shotId, payload) => savedShotFromPayload(payload));
+    renderEditor({ shot: createShot({ props: [] }), onSaveShot });
+    const propsInput = screen.getByLabelText("\u9053\u5177");
+
+    fireEvent.change(propsInput, { target: { value: "umbrella" } });
+    fireEvent.change(propsInput, { target: { value: "umbrella," } });
+
+    expect(propsInput).toHaveValue("umbrella,");
+
+    fireEvent.change(propsInput, { target: { value: "umbrella, letter, " } });
+    fireEvent.click(screen.getByRole("button", { name: "\u4fdd\u5b58\u4fee\u6539" }));
+
+    await waitFor(() => expect(onSaveShot).toHaveBeenCalledWith(
+      sampleShot.id,
+      expect.objectContaining({ props: ["umbrella", "letter"] }),
+    ));
+  });
+
   it("keeps optimization local until the user saves", async () => {
     const onOptimizePrompt = vi.fn().mockResolvedValue(optimizedResponse);
-    const onSaveShot = vi.fn().mockResolvedValue(undefined);
+    const onSaveShot = vi.fn().mockImplementation(async (_shotId, payload) => savedShotFromPayload(payload));
     const onRegenerateShot = vi.fn().mockResolvedValue(undefined);
     renderEditor({ onOptimizePrompt, onSaveShot, onRegenerateShot });
 
@@ -101,6 +132,60 @@ describe("ShotEditor", () => {
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
   });
 
+  it("uses the authoritative server shot as the saved draft and baseline", async () => {
+    const serverShot = createShot({
+      prompt: "Server-normalized prompt",
+      location: "Server-normalized location",
+    });
+    const onDirtyChange = vi.fn();
+    const onSaveShot = vi.fn().mockResolvedValue(serverShot);
+    renderEditor({ onDirtyChange, onSaveShot });
+    fireEvent.change(screen.getByLabelText("\u5206\u955c\u63d0\u793a\u8bcd"), {
+      target: { value: "Submitted prompt" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "\u4fdd\u5b58\u4fee\u6539" }));
+
+    await waitFor(() => expect(screen.getByLabelText("\u5206\u955c\u63d0\u793a\u8bcd")).toHaveValue(
+      "Server-normalized prompt",
+    ));
+    expect(screen.getByLabelText("\u573a\u666f")).toHaveValue("Server-normalized location");
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("keeps pending edits over an authoritative server-shot baseline", async () => {
+    let resolveSave: ((shot: Shot) => void) | undefined;
+    const onSaveShot = vi.fn().mockReturnValue(new Promise<Shot>((resolve) => {
+      resolveSave = resolve;
+    }));
+    renderEditor({ onSaveShot });
+    fireEvent.change(screen.getByLabelText("\u5206\u955c\u63d0\u793a\u8bcd"), {
+      target: { value: "Submitted prompt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "\u4fdd\u5b58\u4fee\u6539" }));
+    await waitFor(() => expect(onSaveShot).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByLabelText("\u573a\u666f"), {
+      target: { value: "Edit made while saving" },
+    });
+    await act(async () => resolveSave?.(createShot({
+      prompt: "Server-normalized prompt",
+      location: "Server-normalized location",
+    })));
+
+    expect(screen.getByLabelText("\u5206\u955c\u63d0\u793a\u8bcd")).toHaveValue("Submitted prompt");
+    expect(screen.getByLabelText("\u573a\u666f")).toHaveValue("Edit made while saving");
+    expect(screen.getByRole("button", { name: "\u91cd\u65b0\u751f\u6210" })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("\u5206\u955c\u63d0\u793a\u8bcd"), {
+      target: { value: "Server-normalized prompt" },
+    });
+    fireEvent.change(screen.getByLabelText("\u573a\u666f"), {
+      target: { value: "Server-normalized location" },
+    });
+    expect(screen.getByRole("button", { name: "\u91cd\u65b0\u751f\u6210" })).toBeEnabled();
+  });
+
   it("does not save automatically when regenerate is clicked", async () => {
     const onSaveShot = vi.fn();
     const onRegenerateShot = vi.fn().mockResolvedValue(undefined);
@@ -148,8 +233,8 @@ describe("ShotEditor", () => {
   });
 
   it("clears undo and dirty state only after save succeeds", async () => {
-    let resolveSave: (() => void) | undefined;
-    const onSaveShot = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+    let resolveSave: ((shot: Shot) => void) | undefined;
+    const onSaveShot = vi.fn().mockReturnValue(new Promise<Shot>((resolve) => {
       resolveSave = resolve;
     }));
     renderEditor({ onSaveShot });
@@ -159,7 +244,7 @@ describe("ShotEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
 
     expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();
-    resolveSave?.();
+    resolveSave?.(createShot({ prompt: optimizedResponse.optimized_text }));
 
     await waitFor(() => expect(screen.getByRole("button", { name: "重新生成" })).toBeEnabled());
     expect(screen.queryByRole("button", { name: "撤销优化" })).not.toBeInTheDocument();
@@ -178,8 +263,8 @@ describe("ShotEditor", () => {
   });
 
   it("preserves edits made while a save is pending", async () => {
-    let resolveSave: (() => void) | undefined;
-    const onSaveShot = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+    let resolveSave: ((shot: Shot) => void) | undefined;
+    const onSaveShot = vi.fn().mockReturnValue(new Promise<Shot>((resolve) => {
       resolveSave = resolve;
     }));
     renderEditor({ onSaveShot });
@@ -188,7 +273,7 @@ describe("ShotEditor", () => {
     await waitFor(() => expect(onSaveShot).toHaveBeenCalledTimes(1));
 
     fireEvent.change(screen.getByLabelText("场景"), { target: { value: "提交后的新场景" } });
-    await act(async () => resolveSave?.());
+    await act(async () => resolveSave?.(sampleShot));
 
     expect(screen.getByLabelText("分镜提示词")).toHaveValue("已提交的提示词");
     expect(screen.getByLabelText("场景")).toHaveValue("提交后的新场景");
@@ -196,8 +281,8 @@ describe("ShotEditor", () => {
   });
 
   it("clears a saved optimization undo while preserving later edits", async () => {
-    let resolveSave: (() => void) | undefined;
-    const onSaveShot = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+    let resolveSave: ((shot: Shot) => void) | undefined;
+    const onSaveShot = vi.fn().mockReturnValue(new Promise<Shot>((resolve) => {
       resolveSave = resolve;
     }));
     renderEditor({ onSaveShot });
@@ -211,7 +296,7 @@ describe("ShotEditor", () => {
     ));
 
     fireEvent.change(screen.getByLabelText("场景"), { target: { value: "保存提交后的新场景" } });
-    await act(async () => resolveSave?.());
+    await act(async () => resolveSave?.(createShot({ prompt: optimizedResponse.optimized_text })));
 
     expect(screen.getByLabelText("分镜提示词")).toHaveValue(optimizedResponse.optimized_text);
     expect(screen.getByLabelText("场景")).toHaveValue("保存提交后的新场景");
@@ -221,11 +306,11 @@ describe("ShotEditor", () => {
 
   it("keeps a later optimization dirty and undoable when an earlier save resolves", async () => {
     let resolveOptimize: ((response: PromptOptimizeResponse) => void) | undefined;
-    let resolveSave: (() => void) | undefined;
+    let resolveSave: ((shot: Shot) => void) | undefined;
     const onOptimizePrompt = vi.fn().mockReturnValue(new Promise<PromptOptimizeResponse>((resolve) => {
       resolveOptimize = resolve;
     }));
-    const onSaveShot = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+    const onSaveShot = vi.fn().mockReturnValue(new Promise<Shot>((resolve) => {
       resolveSave = resolve;
     }));
     renderEditor({ onOptimizePrompt, onSaveShot });
@@ -237,7 +322,7 @@ describe("ShotEditor", () => {
 
     await act(async () => resolveOptimize?.(optimizedResponse));
     expect(await screen.findByRole("button", { name: "撤销优化" })).toBeInTheDocument();
-    await act(async () => resolveSave?.());
+    await act(async () => resolveSave?.(sampleShot));
 
     expect(screen.getByLabelText("分镜提示词")).toHaveValue(optimizedResponse.optimized_text);
     expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();
@@ -264,8 +349,8 @@ describe("ShotEditor", () => {
   });
 
   it("ignores an old save after the selection cycles back to the same shot", async () => {
-    let resolveSave: (() => void) | undefined;
-    const onSaveShot = vi.fn().mockReturnValue(new Promise<void>((resolve) => {
+    let resolveSave: ((shot: Shot) => void) | undefined;
+    const onSaveShot = vi.fn().mockReturnValue(new Promise<Shot>((resolve) => {
       resolveSave = resolve;
     }));
     const secondShot = createShot({ id: "shot-2", prompt: "第二个分镜" });
@@ -277,7 +362,7 @@ describe("ShotEditor", () => {
     rerender(<ShotEditor {...props} shot={secondShot} />);
     rerender(<ShotEditor {...props} shot={sampleShot} />);
     fireEvent.change(screen.getByLabelText("分镜提示词"), { target: { value: "重新选择后的未保存内容" } });
-    await act(async () => resolveSave?.());
+    await act(async () => resolveSave?.(sampleShot));
 
     expect(screen.getByLabelText("分镜提示词")).toHaveValue("重新选择后的未保存内容");
     expect(screen.getByRole("button", { name: "重新生成" })).toBeDisabled();

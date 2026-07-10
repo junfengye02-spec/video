@@ -1,18 +1,53 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStrings } from "../i18n";
 import { createProjectResponse } from "../test/fixtures";
-import { NewProjectPage } from "./NewProjectPage";
+import { NewProjectPage, type NewProjectPageProps } from "./NewProjectPage";
+
+function renderPage(props: NewProjectPageProps) {
+  return render(
+    <MemoryRouter>
+      <NewProjectPage {...props} />
+    </MemoryRouter>,
+  );
+}
 
 afterEach(() => {
   cleanup();
 });
 
 describe("NewProjectPage", () => {
+  it("navigates back to projects through the React Router session", async () => {
+    render(
+      <MemoryRouter initialEntries={["/projects/new"]}>
+        <Routes>
+          <Route
+            path="/projects/new"
+            element={(
+              <NewProjectPage
+                providerReady
+                onCreate={vi.fn()}
+                onCreated={vi.fn()}
+              />
+            )}
+          />
+          <Route path="/projects" element={<h1>Projects destination</h1>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("link", {
+      name: getStrings("zh").newProjectPage.backToProjects,
+    }));
+
+    expect(await screen.findByRole("heading", { name: "Projects destination" })).toBeInTheDocument();
+  });
+
   it("submits title, project type and master prompt without a shot count", async () => {
     const onCreate = vi.fn().mockResolvedValue(createProjectResponse({ shotCount: 2 }));
     const onCreated = vi.fn();
-    render(<NewProjectPage providerReady onCreate={onCreate} onCreated={onCreated} />);
+    renderPage({ providerReady: true, onCreate, onCreated });
 
     fireEvent.change(screen.getByLabelText("项目标题"), { target: { value: "雨夜来信" } });
     fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "一封信改变两个人的命运" } });
@@ -30,7 +65,7 @@ describe("NewProjectPage", () => {
 
   it("uses a trimmed prompt and an untitled fallback", async () => {
     const onCreate = vi.fn().mockResolvedValue(createProjectResponse());
-    render(<NewProjectPage providerReady onCreate={onCreate} onCreated={vi.fn()} />);
+    renderPage({ providerReady: true, onCreate, onCreated: vi.fn() });
 
     fireEvent.change(screen.getByLabelText("项目标题"), { target: { value: "   " } });
     fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "  雨夜追踪  " } });
@@ -46,14 +81,12 @@ describe("NewProjectPage", () => {
 
   it("gates AI creation on provider readiness", () => {
     const onOpenProvider = vi.fn();
-    render(
-      <NewProjectPage
-        providerReady={false}
-        onOpenProvider={onOpenProvider}
-        onCreate={vi.fn()}
-        onCreated={vi.fn()}
-      />,
-    );
+    renderPage({
+      providerReady: false,
+      onOpenProvider,
+      onCreate: vi.fn(),
+      onCreated: vi.fn(),
+    });
 
     expect(screen.getByRole("button", { name: "AI 规划分镜" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "打开接口配置" }));
@@ -64,7 +97,7 @@ describe("NewProjectPage", () => {
 
   it("rejects an empty trimmed prompt with an accessible error", async () => {
     const onCreate = vi.fn();
-    render(<NewProjectPage providerReady onCreate={onCreate} onCreated={vi.fn()} />);
+    renderPage({ providerReady: true, onCreate, onCreated: vi.fn() });
     fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "   " } });
 
     fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
@@ -80,7 +113,7 @@ describe("NewProjectPage", () => {
     const onCreate = vi.fn().mockReturnValue(new Promise((_, reject) => {
       rejectCreate = reject;
     }));
-    render(<NewProjectPage providerReady onCreate={onCreate} onCreated={vi.fn()} />);
+    renderPage({ providerReady: true, onCreate, onCreated: vi.fn() });
 
     fireEvent.change(screen.getByLabelText("故事与画面要求"), {
       target: { value: "雨夜追踪" },

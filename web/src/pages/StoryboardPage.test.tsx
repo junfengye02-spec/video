@@ -23,7 +23,7 @@ const storyboardProps: StoryboardPageProps = {
     optimized_text: "优化后的画面提示词",
     notes: [],
   }),
-  onSaveShot: vi.fn().mockResolvedValue(undefined),
+  onSaveShot: vi.fn().mockResolvedValue(project.storyboard.shots[0]),
   onRegenerateShot: vi.fn().mockResolvedValue(undefined),
 };
 

@@ -456,6 +456,57 @@ describe("App routes", () => {
     ))).toBe(true);
   });
 
+  it.each([
+    {
+      label: "backend-relative",
+      reference: "assets/images/character/reference.png",
+      resolved: "/api/projects/p1/media/assets/images/character/reference.png",
+    },
+    {
+      label: "browser-local",
+      reference: "local://media/reference-image",
+      resolved: "blob:reference-image",
+    },
+  ])("resolves and deduplicates $label asset references for grid and detail UI", async ({
+    reference,
+    resolved,
+  }) => {
+    const snapshot = cloneProjectResponse();
+    snapshot.series_bible.assets = [{
+      id: "asset-reference",
+      kind: "character",
+      label: "Reference asset",
+      description: "A saved character reference",
+      prompt: "Character reference",
+      reference_images: [reference],
+      media_urls: [reference],
+      shot_ids: [],
+      version: 1,
+    }];
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: "Rain Alley",
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot,
+    });
+    localMediaUrlMocks.resolveLocalMediaUrl.mockImplementation((value: string) => (
+      Promise.resolve(value === reference ? resolved : null)
+    ));
+
+    renderAppAt("/projects/p1/resources");
+
+    const opener = await screen.findByRole("button", {
+      name: zh.resources.viewAsset("Reference asset"),
+    });
+    await waitFor(() => expect(opener.querySelector("img")).toHaveAttribute("src", resolved));
+    fireEvent.click(opener);
+
+    const detail = screen.getByRole("dialog", { name: zh.resources.detailDialogTitle });
+    const detailImages = Array.from(detail.querySelectorAll("img"));
+    expect(detailImages).toHaveLength(1);
+    expect(detailImages[0]).toHaveAttribute("src", resolved);
+  });
+
   it("routes a created project to its storyboard and reports the AI shot count", async () => {
     renderAppAt("/projects/new");
 

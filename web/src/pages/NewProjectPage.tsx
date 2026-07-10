@@ -1,5 +1,6 @@
 import { ArrowLeft, Settings2, Sparkles } from "lucide-react";
 import { useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { projectRoutes } from "../app/routes";
 import type { CreateProjectInput } from "../app/workbench/types";
 import type { ProjectType, ShortDramaProjectResponse } from "../domain/types";
@@ -58,10 +59,10 @@ export function NewProjectPage({
   return (
     <section className="new-project-page" aria-labelledby="new-project-title">
       <div className="page-heading">
-        <a href={projectRoutes.list}>
+        <Link to={projectRoutes.list}>
           <ArrowLeft aria-hidden="true" size={16} />
           {strings.backToProjects}
-        </a>
+        </Link>
         <h1 id="new-project-title">{strings.title}</h1>
       </div>
 

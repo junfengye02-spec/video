@@ -20,9 +20,10 @@ export function ProjectsPage() {
   const [error, setError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<LocalProjectSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [exportingId, setExportingId] = useState<string | null>(null);
+  const [exportingIds, setExportingIds] = useState<Set<string>>(() => new Set());
   const [importing, setImporting] = useState(false);
   const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const exportingIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
     let active = true;
@@ -83,7 +84,9 @@ export function ProjectsPage() {
   }
 
   async function handleExport(project: LocalProjectSummary) {
-    setExportingId(project.id);
+    if (exportingIdsRef.current.has(project.id)) return;
+    exportingIdsRef.current.add(project.id);
+    setExportingIds(new Set(exportingIdsRef.current));
     setError(null);
 
     try {
@@ -92,7 +95,8 @@ export function ProjectsPage() {
     } catch (exportError) {
       setError(errorMessage(exportError, strings.exportError));
     } finally {
-      setExportingId(null);
+      exportingIdsRef.current.delete(project.id);
+      setExportingIds(new Set(exportingIdsRef.current));
     }
   }
 
@@ -168,11 +172,11 @@ export function ProjectsPage() {
                   className="async-action"
                   type="button"
                   aria-label={strings.exportProject(project.title)}
-                  disabled={exportingId === project.id}
+                  disabled={exportingIds.has(project.id)}
                   onClick={() => void handleExport(project)}
                 >
                   <Download aria-hidden="true" size={16} />
-                  {exportingId === project.id ? strings.exportingAction : strings.exportAction}
+                  {exportingIds.has(project.id) ? strings.exportingAction : strings.exportAction}
                 </button>
                 <button
                   type="button"

@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getStrings } from "../i18n";
 import { createProjectResponse } from "../test/fixtures";
 import { ProjectsPage } from "./ProjectsPage";
 
@@ -31,6 +32,15 @@ const summary = {
 };
 
 const routerFuture = { v7_relativeSplatPath: true, v7_startTransition: true } as const;
+const strings = getStrings("zh").projectsPage;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 function LocationProbe() {
   return <output aria-label="当前路径">{useLocation().pathname}</output>;
@@ -119,6 +129,55 @@ describe("ProjectsPage", () => {
     expect(projectBackupMocks.exportProjectBackup.mock.invocationCallOrder[0]).toBeLessThan(
       downloadMocks.downloadBlob.mock.invocationCallOrder[0],
     );
+  });
+
+  it("guards repeated export clicks before the pending state renders", async () => {
+    const pending = deferred<Blob>();
+    const project = { ...summary, title: "Project One" };
+    projectStoreMocks.listProjectSummaries.mockResolvedValue([project]);
+    projectBackupMocks.exportProjectBackup.mockReturnValue(pending.promise);
+    render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
+    const exportButton = await screen.findByRole("button", {
+      name: strings.exportProject(project.title),
+    });
+
+    act(() => {
+      exportButton.click();
+      exportButton.click();
+    });
+
+    expect(projectBackupMocks.exportProjectBackup).toHaveBeenCalledTimes(1);
+  });
+
+  it("tracks two overlapping project exports independently", async () => {
+    const first = deferred<Blob>();
+    const second = deferred<Blob>();
+    const firstProject = { ...summary, title: "Project One" };
+    const secondProject = { ...summary, id: "p2", title: "Project Two" };
+    projectStoreMocks.listProjectSummaries.mockResolvedValue([firstProject, secondProject]);
+    projectBackupMocks.exportProjectBackup.mockImplementation((projectId: string) => (
+      projectId === firstProject.id ? first.promise : second.promise
+    ));
+    render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
+    const firstButton = await screen.findByRole("button", {
+      name: strings.exportProject(firstProject.title),
+    });
+    const secondButton = screen.getByRole("button", {
+      name: strings.exportProject(secondProject.title),
+    });
+
+    fireEvent.click(firstButton);
+    fireEvent.click(secondButton);
+
+    expect(firstButton).toBeDisabled();
+    expect(secondButton).toBeDisabled();
+
+    await act(async () => second.resolve(new Blob(["second"])));
+    await waitFor(() => expect(secondButton).toBeEnabled());
+    expect(firstButton).toBeDisabled();
+
+    await act(async () => first.resolve(new Blob(["first"])));
+    await waitFor(() => expect(firstButton).toBeEnabled());
   });
 
   it("imports a backup before navigating to its storyboard", async () => {

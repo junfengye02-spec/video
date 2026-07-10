@@ -4,7 +4,7 @@ export interface ShotDraftFields {
   prompt: string;
   characters: string[];
   location: string;
-  props: string[];
+  props: string;
   assetIds: string[];
   shotIntent: string;
   shotLanguage: ShotLanguage;
@@ -21,7 +21,6 @@ function cloneFields(value: ShotDraftFields): ShotDraftFields {
   return {
     ...value,
     characters: [...value.characters],
-    props: [...value.props],
     assetIds: [...value.assetIds],
     shotLanguage: { ...value.shotLanguage },
   };
@@ -32,7 +31,7 @@ export function fieldsFromShot(shot: Shot | null): ShotDraftFields {
     prompt: shot?.prompt ?? "",
     characters: [...(shot?.characters ?? [])],
     location: shot?.location ?? "",
-    props: [...(shot?.props ?? [])],
+    props: (shot?.props ?? []).join(", "),
     assetIds: [...(shot?.asset_ids ?? [])],
     shotIntent: shot?.shot_intent ?? "",
     shotLanguage: { ...(shot?.shot_language ?? {}) },
@@ -76,7 +75,10 @@ export function toShotSaveRequest(draft: ShotDraftFields): ShotSaveRequest {
     prompt: draft.prompt,
     characters: draft.characters,
     location: draft.location.trim() || null,
-    props: draft.props,
+    props: draft.props
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
     asset_ids: draft.assetIds,
     shot_intent: draft.shotIntent.trim() || null,
     shot_language: draft.shotLanguage,

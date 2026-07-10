@@ -23,7 +23,7 @@ export interface ShotEditorProps {
   strings: UIStrings["shotEditor"];
   onOptimizePrompt: (shot: Shot, prompt: string) => Promise<PromptOptimizeResponse>;
   onRegenerateShot: (shot: Shot) => Promise<void>;
-  onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
+  onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<Shot>;
   onDirtyChange?: (dirty: boolean) => void;
   onPanelKeyDown?: KeyboardEventHandler<HTMLElement>;
 }
@@ -76,13 +76,6 @@ const LIGHTING_KEYS = [
 ] as const;
 const DEPTH_VALUES = ["shallow", "medium", "deep"] as const;
 const COLOR_TEMPERATURES = ["cool", "neutral", "warm", "mixed"] as const;
-
-function splitList(value: string): string[] {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
 
 export function ShotEditor({
   assets,
@@ -207,9 +200,9 @@ export function ShotEditor({
         <label>
           <span>{strings.propsLabel}</span>
           <input
-            value={draftState.draft.props.join(", ")}
+            value={draftState.draft.props}
             disabled={!shot}
-            onChange={(event) => updateDraft((draft) => ({ ...draft, props: splitList(event.target.value) }))}
+            onChange={(event) => updateDraft((draft) => ({ ...draft, props: event.target.value }))}
           />
         </label>
         <label className="prompt-field">
@@ -429,17 +422,7 @@ export function ShotEditor({
             const optimizationRevision = optimizationRevisionRef.current;
             const selectionRevision = selectionRevisionRef.current;
             try {
-              await onSaveShot(shot.id, payload);
-              const savedShot: Shot = {
-                ...shot,
-                prompt: payload.prompt ?? "",
-                characters: payload.characters ?? [],
-                location: payload.location ?? null,
-                props: payload.props ?? [],
-                asset_ids: payload.asset_ids ?? [],
-                shot_intent: payload.shot_intent ?? null,
-                shot_language: payload.shot_language ?? {},
-              };
+              const savedShot = await onSaveShot(shot.id, payload);
               const savedState = createShotDraftState(savedShot);
               setDraftState((current) => {
                 if (current.shotId !== shot.id || selectionRevisionRef.current !== selectionRevision) {

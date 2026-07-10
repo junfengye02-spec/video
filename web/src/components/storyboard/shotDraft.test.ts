@@ -46,7 +46,7 @@ describe("shotDraft", () => {
     expect(state.baseline.shotLanguage.shot_size).toBe("medium_close");
 
     state.draft.characters.push("draft-character");
-    state.draft.props.push("draft-prop");
+    state.draft.props += ", draft-prop";
     state.draft.assetIds.push("draft-asset");
     state.draft.shotLanguage.camera_movement = "static";
 
@@ -60,7 +60,7 @@ describe("shotDraft", () => {
     ["prompt", (state) => { state.draft.prompt = "changed"; }],
     ["characters", (state) => { state.draft.characters.push("char-2"); }],
     ["location", (state) => { state.draft.location = "changed"; }],
-    ["props", (state) => { state.draft.props.push("prop-2"); }],
+    ["props", (state) => { state.draft.props += ", prop-2"; }],
     ["asset ids", (state) => { state.draft.assetIds.push("asset-2"); }],
     ["shot intent", (state) => { state.draft.shotIntent = "changed"; }],
     ["shot language", (state) => { state.draft.shotLanguage.lens_mm = 85; }],

@@ -27,7 +27,7 @@ export interface StoryboardPageProps {
   onSelectShot: (shotId: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onOptimizePrompt: (shot: Shot, sourceText: string) => Promise<PromptOptimizeResponse>;
-  onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
+  onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<Shot>;
   onRegenerateShot: (shot: Shot) => Promise<void>;
 }
 

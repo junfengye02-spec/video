@@ -50,7 +50,7 @@ export interface WorkbenchContextValue {
   ) => void;
   selectShot: (shotId: string) => void;
   optimizeShotPrompt: (shot: Shot, sourceText: string) => Promise<PromptOptimizeResponse>;
-  saveShotChanges: (shotId: string, payload: ShotSaveRequest) => Promise<void>;
+  saveShotChanges: (shotId: string, payload: ShotSaveRequest) => Promise<Shot>;
   regenerateSelectedShot: (shot: Shot) => Promise<void>;
   saveContinuity: (plan: ContinuityPlan) => Promise<void>;
   uploadReference: (payload: ReferenceImageUploadRequest) => Promise<void>;

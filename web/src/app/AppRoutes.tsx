@@ -247,14 +247,30 @@ function decorateAssets(
   projectId: string,
   localMediaUrls: Partial<Record<LocalMediaRef, string>>,
 ): AssetRecord[] {
-  return assets.map((asset) => ({
-    ...asset,
-    media_urls: Array.from(new Set(
-      [...(asset.media_urls ?? []), ...(asset.reference_images ?? [])]
-        .map((path) => isLocalMediaRef(path) ? localMediaUrls[path] ?? null : mediaUrl(path, projectId))
+  const resolveUrl = (path: string) => (
+    isLocalMediaRef(path) ? localMediaUrls[path] ?? null : mediaUrl(path, projectId)
+  );
+
+  return assets.map((asset) => {
+    const referenceImages = Array.from(new Set(
+      asset.reference_images
+        .map(resolveUrl)
         .filter((url): url is string => Boolean(url)),
-    )),
-  }));
+    ));
+    const referenceImageUrls = new Set(referenceImages);
+    const mediaUrls = Array.from(new Set(
+      (asset.media_urls ?? [])
+        .map(resolveUrl)
+        .filter((url): url is string => Boolean(url))
+        .filter((url) => !referenceImageUrls.has(url)),
+    ));
+
+    return {
+      ...asset,
+      reference_images: referenceImages,
+      media_urls: mediaUrls,
+    };
+  });
 }
 
 function useDecoratedAssets() {

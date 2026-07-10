@@ -686,9 +686,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   );
 
   const saveShotChanges = useCallback(
-    async (shotId: string, payload: ShotSaveRequest): Promise<void> => {
+    async (shotId: string, payload: ShotSaveRequest): Promise<Shot> => {
       const current = snapshotRef.current;
-      if (!current) return;
+      if (!current) throw new Error(strings.errors.saveShotFallback);
       const projectId = current.project.id;
       const token = beginProjectOperation("saveShot", projectId);
       const isCurrent = () => isProjectOperationCurrent(token);
@@ -696,9 +696,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       setError(null);
       try {
         const result = await saveShot(projectId, shotId, payload);
-        if (!isCurrent()) return;
+        if (!isCurrent()) return result.shot;
         const latest = snapshotRef.current;
-        if (!latest) return;
+        if (!latest) return result.shot;
         setSelectedShotId(shotId);
         setEvents((items) => appendUniqueEvent(items, result.event));
         await persistIfCurrent(projectId, {
@@ -708,6 +708,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
           render_report: null,
           final_path: null,
         }, isCurrent);
+        return result.shot;
       } catch (saveError) {
         const message = errorMessage(saveError, strings.errors.saveShotFallback);
         if (isCurrent()) setError(message);
