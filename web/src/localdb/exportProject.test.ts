@@ -279,18 +279,26 @@ function incompressibleBytes(size: number, seed: number): Uint8Array {
   return result;
 }
 
-function installInflateWorker(options: { constructionError?: Error } = {}) {
+function installInflateWorker(options: {
+  constructionError?: Error;
+  hangAfterProbe?: boolean;
+  asyncErrorAfterProbe?: Error;
+} = {}) {
   const stats = { created: 0, active: 0, maxActive: 0 };
+  const workers = new Set<InflateWorker>();
   class InflateWorker {
     onmessage: ((event: MessageEvent) => void) | null = null;
     private readonly chunks: Uint8Array[] = [];
     private terminated = false;
+    private readonly ordinal: number;
 
     constructor() {
       if (options.constructionError) throw options.constructionError;
       stats.created += 1;
+      this.ordinal = stats.created;
       stats.active += 1;
       stats.maxActive = Math.max(stats.maxActive, stats.active);
+      workers.add(this);
     }
 
     postMessage(message: unknown): void {
@@ -298,6 +306,14 @@ function installInflateWorker(options: { constructionError?: Error } = {}) {
       const chunk = new Uint8Array(message[0]);
       this.chunks.push(chunk);
       if (message[1] !== true) return;
+      if (this.ordinal > 1 && options.hangAfterProbe) return;
+      if (this.ordinal > 1 && options.asyncErrorAfterProbe) {
+        const error = options.asyncErrorAfterProbe;
+        queueMicrotask(() => this.onmessage?.({
+          data: { $e$: [error.message, 0, error.stack] },
+        } as MessageEvent));
+        return;
+      }
       const inflated = inflateSync(concatBytes(this.chunks));
       queueMicrotask(() => this.onmessage?.({ data: [inflated, true] } as MessageEvent));
     }
@@ -306,6 +322,7 @@ function installInflateWorker(options: { constructionError?: Error } = {}) {
       if (this.terminated) return;
       this.terminated = true;
       stats.active -= 1;
+      workers.delete(this);
     }
   }
   Object.defineProperty(URL, "createObjectURL", {
@@ -313,7 +330,37 @@ function installInflateWorker(options: { constructionError?: Error } = {}) {
     value: vi.fn(() => "blob:inflate-worker"),
   });
   vi.stubGlobal("Worker", InflateWorker);
-  return stats;
+  return {
+    ...stats,
+    get created() { return stats.created; },
+    get active() { return stats.active; },
+    get maxActive() { return stats.maxActive; },
+    terminateAll: () => {
+      for (const worker of [...workers]) worker.terminate();
+    },
+  };
+}
+
+async function streamAsSingleChunk(file: File): Promise<void> {
+  const archiveBytes = new Uint8Array(await blobToArrayBuffer(file));
+  Object.defineProperty(file, "stream", {
+    configurable: true,
+    value: () => {
+      let read = false;
+      return {
+        getReader: () => ({
+          read: async () => {
+            if (read) return { done: true, value: undefined };
+            read = true;
+            return { done: false, value: archiveBytes };
+          },
+          cancel: async () => {
+            read = true;
+          },
+        }),
+      };
+    },
+  });
 }
 
 async function patchDeclaredSize(
@@ -382,6 +429,7 @@ async function deleteLocalDb() {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   if (originalCreateObjectUrl) {
@@ -430,6 +478,16 @@ describe("exportProject", () => {
 
     expect(imported.project.project_type).toBe("mini_series");
     expect((await loadProjectSnapshot("legacy"))?.snapshot.project.project_type).toBe("mini_series");
+  });
+
+  it("rejects a raw-shaped payload with an explicit unsupported version", async () => {
+    const rawVersioned = {
+      ...snapshot(null, { id: "raw-versioned" }),
+      version: 2,
+    };
+
+    await expect(importProjectBackup(legacyBackupFile(rawVersioned))).rejects.toThrow(/version/i);
+    expect(await loadProjectSnapshot("raw-versioned")).toBeNull();
   });
 
   it("defaults a legacy project without any project type to single video", async () => {
@@ -854,6 +912,21 @@ describe("exportProject", () => {
     expect(await loadProjectSnapshot("oversized-import")).toBeNull();
   });
 
+  it("uses a Worker for high-compression output and enforces the actual manifest limit", async () => {
+    const workerStats = installInflateWorker();
+    const oversized = snapshot(null, { id: "high-compression" });
+    oversized.project.title = "x".repeat(8 * 1024 * 1024);
+    const backup = await patchDeclaredSize(
+      backupFile({ project: oversized }),
+      "openmontage-project.json",
+      400_000,
+    );
+
+    await expect(importProjectBackup(backup)).rejects.toThrow(/manifest.*limit/i);
+    expect(workerStats.created).toBe(2);
+    expect(await loadProjectSnapshot("high-compression")).toBeNull();
+  });
+
   it("rejects archives with too many entries", async () => {
     const mediaFiles = Object.fromEntries(
       Array.from({ length: 513 }, (_, index) => [`extra/${index}`, new Uint8Array(0)]),
@@ -937,34 +1010,62 @@ describe("exportProject", () => {
       project: snapshot(null, { id: "large-entries" }),
       mediaFiles,
     });
-    const archiveBytes = new Uint8Array(await new Promise<ArrayBuffer>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onerror = () => reject(reader.error ?? new Error("Unable to read test archive"));
-      reader.onload = () => resolve(reader.result as ArrayBuffer);
-      reader.readAsArrayBuffer(backup);
-    }));
-    Object.defineProperty(backup, "stream", {
-      configurable: true,
-      value: () => {
-        let read = false;
-        return {
-          getReader: () => ({
-            read: async () => {
-              if (read) return { done: true, value: undefined };
-              read = true;
-              return { done: false, value: archiveBytes };
-            },
-            cancel: async () => {
-              read = true;
-            },
-          }),
-        };
-      },
-    });
+    await streamAsSingleChunk(backup);
 
     await importProjectBackup(backup);
 
     expect(workerStats.created).toBe(4);
     expect(workerStats.maxActive).toBeLessThanOrEqual(2);
+  });
+
+  it("rejects and releases all decoder slots when active Workers stop responding", async () => {
+    const workerStats = installInflateWorker({ hangAfterProbe: true });
+    const mediaFiles = Object.fromEntries(
+      Array.from({ length: 3 }, (_, index) => [
+        `extra/hang-${index}`,
+        incompressibleBytes(400_000, index + 11),
+      ]),
+    );
+    const backup = backupFile({
+      project: snapshot(null, { id: "worker-hang" }),
+      mediaFiles,
+    });
+    await streamAsSingleChunk(backup);
+    vi.useFakeTimers();
+
+    let outcome: "pending" | "resolved" | "rejected" = "pending";
+    void importProjectBackup(backup).then(
+      () => { outcome = "resolved"; },
+      () => { outcome = "rejected"; },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(workerStats.created).toBe(3);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const observedOutcome = outcome;
+    workerStats.terminateAll();
+
+    expect(observedOutcome).toBe("rejected");
+    expect(workerStats.active).toBe(0);
+  });
+
+  it("rejects an asynchronous Worker error before starting a queued decoder", async () => {
+    const workerStats = installInflateWorker({
+      asyncErrorAfterProbe: new Error("Worker inflate failed"),
+    });
+    const mediaFiles = Object.fromEntries(
+      Array.from({ length: 3 }, (_, index) => [
+        `extra/error-${index}`,
+        incompressibleBytes(400_000, index + 21),
+      ]),
+    );
+    const backup = backupFile({
+      project: snapshot(null, { id: "worker-error" }),
+      mediaFiles,
+    });
+    await streamAsSingleChunk(backup);
+
+    await expect(importProjectBackup(backup)).rejects.toThrow(/Worker inflate failed/i);
+    expect(workerStats.created).toBe(3);
+    expect(workerStats.active).toBe(0);
   });
 });

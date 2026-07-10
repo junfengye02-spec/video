@@ -188,7 +188,7 @@ describe("projectStore", () => {
     expect(await loadRecentProjectSnapshot()).toBeNull();
   });
 
-  it("migrates a version 1 media store with a projectId index", async () => {
+  it("migrates a version 1 database with media indexes and pending writes", async () => {
     await deleteLocalDb();
     const legacyRequest = indexedDB.open(LOCAL_DB_NAME, 1);
     legacyRequest.onupgradeneeded = () => {
@@ -207,8 +207,9 @@ describe("projectStore", () => {
     const db = await openLocalDb();
     const mediaStore = db.transaction("media", "readonly").objectStore("media");
 
-    expect(db.version).toBe(2);
+    expect(db.version).toBe(3);
     expect(mediaStore.indexNames.contains("projectId")).toBe(true);
+    expect(db.objectStoreNames.contains("mediaPending")).toBe(true);
   });
 
   it("deletes project-owned IndexedDB media without touching another project", async () => {

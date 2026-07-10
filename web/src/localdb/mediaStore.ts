@@ -1,5 +1,5 @@
 import { LOCAL_STORES, openLocalDb } from "./indexedDb";
-import type { LocalMediaRecord, LocalMediaRef } from "./types";
+import type { LocalMediaPendingRecord, LocalMediaRecord, LocalMediaRef } from "./types";
 
 type SaveMediaInput = {
   projectId: string;
@@ -18,6 +18,20 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
 
 const LOCAL_MEDIA_PREFIX = "local://media/";
 const OPFS_MEDIA_DIR = "openmontage-media";
+const PENDING_WRITE_EXPIRY_MS = 10 * 60 * 1000;
+let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+export class MediaCleanupIncompleteError extends Error {
+  readonly causes: unknown[];
+  readonly pendingMediaIds: string[];
+
+  constructor(message: string, causes: unknown[], pendingMediaIds: string[] = []) {
+    super(message);
+    this.name = "MediaCleanupIncompleteError";
+    this.causes = causes;
+    this.pendingMediaIds = pendingMediaIds;
+  }
+}
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -32,12 +46,6 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
     tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
     tx.oncomplete = () => resolve();
   });
-}
-
-function cleanupError(message: string, causes: unknown[]): Error {
-  const error = new Error(message) as Error & { causes: unknown[] };
-  error.causes = causes;
-  return error;
 }
 
 function mediaIdFromRef(ref: LocalMediaRef): string {
@@ -94,10 +102,28 @@ function isUsableBlob(value: unknown): value is Blob {
   );
 }
 
-async function saveRecord(record: LocalMediaRecord): Promise<void> {
+async function saveRecord(record: LocalMediaRecord, pendingId?: string): Promise<void> {
   const db = await openLocalDb();
-  const tx = db.transaction(LOCAL_STORES.media, "readwrite");
+  const stores = pendingId
+    ? [LOCAL_STORES.media, LOCAL_STORES.mediaPending]
+    : [LOCAL_STORES.media];
+  const tx = db.transaction(stores, "readwrite");
   tx.objectStore(LOCAL_STORES.media).put(record);
+  if (pendingId) tx.objectStore(LOCAL_STORES.mediaPending).delete(pendingId);
+  await transactionDone(tx);
+}
+
+async function savePendingRecord(record: LocalMediaPendingRecord): Promise<void> {
+  const db = await openLocalDb();
+  const tx = db.transaction(LOCAL_STORES.mediaPending, "readwrite");
+  tx.objectStore(LOCAL_STORES.mediaPending).put(record);
+  await transactionDone(tx);
+}
+
+async function deletePendingRecord(id: string): Promise<void> {
+  const db = await openLocalDb();
+  const tx = db.transaction(LOCAL_STORES.mediaPending, "readwrite");
+  tx.objectStore(LOCAL_STORES.mediaPending).delete(id);
   await transactionDone(tx);
 }
 
@@ -117,10 +143,38 @@ async function loadRecord(id: string): Promise<LocalMediaRecord | null> {
   return record ?? null;
 }
 
-async function loadAllRecords(): Promise<LocalMediaRecord[]> {
+async function loadStorageInventory(): Promise<{
+  records: LocalMediaRecord[];
+  pending: LocalMediaPendingRecord[];
+}> {
   const db = await openLocalDb();
-  const tx = db.transaction(LOCAL_STORES.media, "readonly");
-  return requestToPromise<LocalMediaRecord[]>(tx.objectStore(LOCAL_STORES.media).getAll());
+  const tx = db.transaction([LOCAL_STORES.media, LOCAL_STORES.mediaPending], "readonly");
+  const [records, pending] = await Promise.all([
+    requestToPromise<LocalMediaRecord[]>(tx.objectStore(LOCAL_STORES.media).getAll()),
+    requestToPromise<LocalMediaPendingRecord[]>(tx.objectStore(LOCAL_STORES.mediaPending).getAll()),
+  ]);
+  return { records, pending };
+}
+
+async function loadCurrentMediaState(id: string): Promise<{
+  record: LocalMediaRecord | null;
+  pending: LocalMediaPendingRecord | null;
+}> {
+  const db = await openLocalDb();
+  const tx = db.transaction([LOCAL_STORES.media, LOCAL_STORES.mediaPending], "readonly");
+  const [record, pending] = await Promise.all([
+    requestToPromise<LocalMediaRecord | undefined>(tx.objectStore(LOCAL_STORES.media).get(id)),
+    requestToPromise<LocalMediaPendingRecord | undefined>(
+      tx.objectStore(LOCAL_STORES.mediaPending).get(id),
+    ),
+  ]);
+  return { record: record ?? null, pending: pending ?? null };
+}
+
+function isFreshPendingWrite(pending: LocalMediaPendingRecord | null | undefined): boolean {
+  if (pending?.state !== "writing") return false;
+  const createdAt = Date.parse(pending.createdAt);
+  return Number.isFinite(createdAt) && Date.now() - createdAt < PENDING_WRITE_EXPIRY_MS;
 }
 
 async function writeBlobToOpfs(id: string, blob: Blob): Promise<string | null> {
@@ -195,7 +249,30 @@ export async function saveMediaBlob(input: SaveMediaInput): Promise<LocalMediaRe
   const id = createMediaId();
   const blob = normalizeBlob(input.blob, input.contentType);
   const createdAt = new Date().toISOString();
-  const opfsPath = await writeBlobToOpfs(id, blob);
+  const storage = navigator.storage as StorageWithOpfs | undefined;
+  const expectedOpfsPath = `${OPFS_MEDIA_DIR}/${id}`;
+  let pendingRegistered = false;
+  let opfsPath: string | null = null;
+  if (storage?.getDirectory) {
+    try {
+      await savePendingRecord({
+        id,
+        opfsPath: expectedOpfsPath,
+        createdAt,
+        state: "writing",
+      });
+      pendingRegistered = true;
+      opfsPath = await writeBlobToOpfs(id, blob);
+      if (!opfsPath) {
+        await deletePendingRecord(id);
+        pendingRegistered = false;
+      }
+    } catch {
+      if (pendingRegistered) await deletePendingRecord(id).catch(() => undefined);
+      opfsPath = null;
+      pendingRegistered = false;
+    }
+  }
   const blobBytes = opfsPath ? undefined : await compatibilityBlobBytes(blob);
 
   const record: LocalMediaRecord = opfsPath
@@ -222,15 +299,23 @@ export async function saveMediaBlob(input: SaveMediaInput): Promise<LocalMediaRe
       };
 
   try {
-    await saveRecord(record);
+    await saveRecord(record, opfsPath && pendingRegistered ? id : undefined);
   } catch (error) {
     if (opfsPath) {
       try {
         await deleteBlobFromOpfs(record);
+        await deletePendingRecord(id);
       } catch (opfsCleanupError) {
-        throw cleanupError(
+        await savePendingRecord({
+          id,
+          opfsPath,
+          createdAt,
+          state: "retryable",
+        }).catch(() => undefined);
+        throw new MediaCleanupIncompleteError(
           "Media persistence failed and OPFS cleanup was incomplete",
           [error, opfsCleanupError],
+          [id],
         );
       }
     }
@@ -274,11 +359,13 @@ export async function cleanupOrphanedOpfsMedia(): Promise<number> {
     throw new Error("OPFS is unavailable for orphan media cleanup");
   }
 
+  const inventory = await loadStorageInventory();
   const trackedFiles = new Set(
-    (await loadAllRecords())
+    inventory.records
       .filter((record) => record.storage === "opfs" && record.opfsPath?.startsWith(`${OPFS_MEDIA_DIR}/`))
       .map((record) => record.opfsPath!.slice(OPFS_MEDIA_DIR.length + 1)),
   );
+  const pendingById = new Map(inventory.pending.map((record) => [record.id, record]));
   const root = await storage.getDirectory();
   let mediaDir: IterableDirectoryHandle;
   try {
@@ -297,8 +384,13 @@ export async function cleanupOrphanedOpfsMedia(): Promise<number> {
   const errors: unknown[] = [];
   for await (const [name, handle] of mediaDir.entries()) {
     if (handle.kind !== "file" || trackedFiles.has(name)) continue;
+    const pending = pendingById.get(name);
+    if (isFreshPendingWrite(pending)) continue;
+    const current = await loadCurrentMediaState(name);
+    if (current.record?.storage === "opfs" || isFreshPendingWrite(current.pending)) continue;
     try {
       await mediaDir.removeEntry(name);
+      if (pending || current.pending) await deletePendingRecord(name);
       removed += 1;
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "NotFoundError")) {
@@ -307,9 +399,17 @@ export async function cleanupOrphanedOpfsMedia(): Promise<number> {
     }
   }
   if (errors.length > 0) {
-    throw cleanupError("OPFS orphan media cleanup was incomplete", errors);
+    throw new MediaCleanupIncompleteError("OPFS orphan media cleanup was incomplete", errors);
   }
   return removed;
+}
+
+function scheduleOrphanedOpfsCleanup(): void {
+  if (recoveryTimer !== null) return;
+  recoveryTimer = setTimeout(() => {
+    recoveryTimer = null;
+    void cleanupOrphanedOpfsMedia().catch(() => undefined);
+  }, 0);
 }
 
 export async function cacheRemoteMedia(
@@ -328,7 +428,11 @@ export async function cacheRemoteMedia(
       contentType: blob.type || response.headers.get("content-type") || "application/octet-stream",
       blob,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof MediaCleanupIncompleteError) {
+      scheduleOrphanedOpfsCleanup();
+      throw error;
+    }
     return null;
   }
 }

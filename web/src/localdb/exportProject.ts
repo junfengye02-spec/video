@@ -1,6 +1,5 @@
 import {
   AsyncInflate,
-  AsyncUnzipInflate,
   strFromU8,
   strToU8,
   Unzip,
@@ -36,6 +35,7 @@ const FALLBACK_READ_CHUNK_BYTES = 64 * 1024;
 const FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES = 320_000;
 const MAX_ACTIVE_INFLATE_WORKERS = 2;
 const WORKER_PROBE_TIMEOUT_MS = 2_000;
+const DECODER_IDLE_TIMEOUT_MS = 15_000;
 
 type MediaBackupEntry = {
   ref: LocalMediaRef;
@@ -63,18 +63,40 @@ type BackupBlobEntry = {
   blob: Blob;
 };
 
+function shouldUseAsyncInflate(size?: number, originalSize?: number): boolean {
+  return (
+    size === undefined ||
+    originalSize === undefined ||
+    size >= FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES ||
+    originalSize >= FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES
+  );
+}
+
 class ResilientUnzipInflate implements UnzipDecoder {
   static readonly compression = 8;
   ondata!: AsyncFlateStreamHandler;
   private readonly inflate: UnzipDecoder;
 
-  constructor(name: string, size?: number) {
+  constructor(_name: string, size?: number, originalSize?: number) {
     try {
-      this.inflate = new AsyncUnzipInflate(name, size);
+      if (!shouldUseAsyncInflate(size, originalSize)) {
+        this.inflate = new UnzipInflate();
+      } else {
+        const inflate = new AsyncInflate((error, data, final) => {
+          this.ondata(error, data, final);
+        });
+        this.inflate = {
+          ondata: this.ondata,
+          push: (chunk, final) => inflate.push(chunk.slice(), final),
+          terminate: () => inflate.terminate(),
+        };
+      }
     } catch {
       this.inflate = new UnzipInflate();
     }
-    this.inflate.ondata = (error, data, final) => this.ondata(error, data, final);
+    if (this.inflate instanceof UnzipInflate) {
+      this.inflate.ondata = (error, data, final) => this.ondata(error, data, final);
+    }
   }
 
   push(chunk: Uint8Array, final: boolean): void {
@@ -315,6 +337,12 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
     let settled = false;
     const queuedWorkerStarts: Array<(release: () => void) => void> = [];
     const inputGateResolvers: Array<() => void> = [];
+    const controls = new Set<{
+      file: UnzipFile;
+      done: boolean;
+      releaseWorkerSlot: (() => void) | null;
+      watchdog: ReturnType<typeof setTimeout> | null;
+    }>();
 
     const releaseInputGate = () => {
       if (!settled && queuedWorkerStarts.length > 0) return;
@@ -350,11 +378,22 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
     const fail = (error: unknown) => {
       if (settled) return;
       settled = true;
-      releaseInputGate();
-      void reader.cancel(error);
-      for (const activeFile of activeFiles) {
-        activeFile.terminate();
+      queuedWorkerStarts.splice(0);
+      for (const control of controls) {
+        control.done = true;
+        if (control.watchdog !== null) clearTimeout(control.watchdog);
+        try {
+          control.file.terminate();
+        } catch {
+          // The original decoder failure remains authoritative.
+        }
+        control.releaseWorkerSlot?.();
       }
+      controls.clear();
+      activeFiles.clear();
+      pendingEntries = 0;
+      releaseInputGate();
+      void reader.cancel(error).catch(() => undefined);
       reject(error);
     };
 
@@ -393,13 +432,36 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
 
       const chunks: Uint8Array[] = [];
       let entryBytes = 0;
-      let releaseWorkerSlot: (() => void) | null = null;
+      const needsWorkerSlot = (
+        workerSupported &&
+        archiveEntry.compression === 8 &&
+        shouldUseAsyncInflate(archiveEntry.size, archiveEntry.originalSize)
+      );
+      const control = {
+        file: archiveEntry,
+        done: false,
+        releaseWorkerSlot: null as (() => void) | null,
+        watchdog: null as ReturnType<typeof setTimeout> | null,
+      };
+      const clearWatchdog = () => {
+        if (control.watchdog === null) return;
+        clearTimeout(control.watchdog);
+        control.watchdog = null;
+      };
+      const armWatchdog = () => {
+        if (!needsWorkerSlot || settled || control.done) return;
+        clearWatchdog();
+        control.watchdog = setTimeout(() => {
+          if (settled || control.done) return;
+          fail(new Error(`Backup decoder timed out for ${archiveEntry.name}`));
+        }, DECODER_IDLE_TIMEOUT_MS);
+      };
       pendingEntries += 1;
       activeFiles.add(archiveEntry);
+      controls.add(control);
       archiveEntry.ondata = (error, data, final) => {
-        if (settled) return;
+        if (settled || control.done) return;
         if (error) {
-          releaseWorkerSlot?.();
           fail(error);
           return;
         }
@@ -415,33 +477,32 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
         }
         entryBytes = nextEntryBytes;
         actualTotal = nextActualTotal;
+        if (!final) armWatchdog();
         if (shouldRetainArchiveEntry(archiveEntry.name) && data.length > 0) {
           chunks.push(data);
         }
         if (final) {
+          control.done = true;
+          clearWatchdog();
           if (shouldRetainArchiveEntry(archiveEntry.name)) {
             files[archiveEntry.name] = concatChunks(chunks, entryBytes);
           }
           activeFiles.delete(archiveEntry);
+          controls.delete(control);
           pendingEntries -= 1;
-          releaseWorkerSlot?.();
+          control.releaseWorkerSlot?.();
           maybeResolve();
         }
       };
       const startEntry = (release?: () => void) => {
-        releaseWorkerSlot = release ?? null;
+        control.releaseWorkerSlot = release ?? null;
+        armWatchdog();
         try {
           archiveEntry.start();
         } catch (error) {
-          releaseWorkerSlot?.();
           fail(error);
         }
       };
-      const needsWorkerSlot = (
-        workerSupported &&
-        archiveEntry.compression === 8 &&
-        (archiveEntry.size === undefined || archiveEntry.size >= FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES)
-      );
       if (needsWorkerSlot) {
         queuedWorkerStarts.push(startEntry);
         drainWorkerStarts();
@@ -464,6 +525,7 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
           for (let offset = 0; offset < value.length && !settled; offset += FALLBACK_READ_CHUNK_BYTES) {
             const inputGate = waitForInputGate();
             if (inputGate) await inputGate;
+            if (settled) break;
             const chunk = value.subarray(offset, offset + FALLBACK_READ_CHUNK_BYTES);
             archivedBytesRead += chunk.length;
             if (archivedBytesRead > MAX_ARCHIVE_BYTES) {
@@ -555,11 +617,16 @@ function validateProjectEnvelope(value: unknown): ShortDramaProjectResponse {
   if (!isRecord(value)) {
     throw new Error("Backup format version is unsupported");
   }
-  const isLegacySnapshot = isRecord(value.project) && typeof value.project.id === "string";
-  if (!isLegacySnapshot && value.version !== 1) {
+  const hasExplicitVersion = Object.prototype.hasOwnProperty.call(value, "version");
+  if (!hasExplicitVersion) {
+    const isLegacySnapshot = isRecord(value.project) && typeof value.project.id === "string";
+    if (!isLegacySnapshot) throw new Error("Backup format version is unsupported");
+    return normalizeAndValidateSnapshot(value);
+  }
+  if (value.version !== 1) {
     throw new Error("Backup format version is unsupported");
   }
-  return normalizeAndValidateSnapshot(isLegacySnapshot ? value : value.project);
+  return normalizeAndValidateSnapshot(value.project);
 }
 
 function validateMediaManifest(

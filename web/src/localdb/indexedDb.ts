@@ -4,6 +4,7 @@ export const LOCAL_STORES = {
   projects: "projects",
   settings: "settings",
   media: "media",
+  mediaPending: "mediaPending",
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -30,6 +31,9 @@ export function openLocalDb(): Promise<IDBDatabase> {
         : db.createObjectStore(LOCAL_STORES.media, { keyPath: "id" });
       if (!mediaStore.indexNames.contains("projectId")) {
         mediaStore.createIndex("projectId", "projectId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(LOCAL_STORES.mediaPending)) {
+        db.createObjectStore(LOCAL_STORES.mediaPending, { keyPath: "id" });
       }
     };
 
