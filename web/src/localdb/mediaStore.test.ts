@@ -78,4 +78,19 @@ describe("mediaStore", () => {
       }),
     ).resolves.toBeNull();
   });
+
+  it("returns null when downloaded media cannot be persisted", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("image", { headers: { "content-type": "image/png" } })),
+    );
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+
+    await expect(cacheRemoteMedia("https://example.test/shot.png", {
+      projectId: "p1",
+      sourcePath: "assets/images/shot.png",
+    })).resolves.toBeNull();
+  });
 });

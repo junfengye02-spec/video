@@ -56,6 +56,10 @@ export interface UIStrings {
     cancelAction: string;
     confirmDeleteAction: string;
     deletingAction: string;
+    overwriteDialogTitle: string;
+    overwriteDialogBody: (title: string) => string;
+    confirmOverwriteAction: string;
+    overwritingAction: string;
     loadError: string;
     exportError: string;
     importError: string;
@@ -380,6 +384,11 @@ const STRINGS: Record<Locale, UIStrings> = {
       cancelAction: "Cancel",
       confirmDeleteAction: "Confirm delete",
       deletingAction: "Deleting...",
+      overwriteDialogTitle: "Overwrite existing project",
+      overwriteDialogBody: (title: string) =>
+        `A local project named "${title}" already exists. Replace it with this backup?`,
+      confirmOverwriteAction: "Confirm overwrite",
+      overwritingAction: "Overwriting...",
       loadError: "Unable to load local projects.",
       exportError: "Unable to export project.",
       importError: "Unable to import project.",
@@ -775,6 +784,11 @@ const STRINGS: Record<Locale, UIStrings> = {
       cancelAction: "\u53d6\u6d88",
       confirmDeleteAction: "\u786e\u8ba4\u5220\u9664",
       deletingAction: "\u6b63\u5728\u5220\u9664...",
+      overwriteDialogTitle: "\u8986\u76d6\u73b0\u6709\u9879\u76ee",
+      overwriteDialogBody: (title: string) =>
+        `\u672c\u5730\u9879\u76ee\u201c${title}\u201d\u5df2\u5b58\u5728\u3002\u786e\u5b9a\u4f7f\u7528\u6b64\u5907\u4efd\u8986\u76d6\u5417\uff1f`,
+      confirmOverwriteAction: "\u786e\u8ba4\u8986\u76d6",
+      overwritingAction: "\u6b63\u5728\u8986\u76d6...",
       loadError: "\u65e0\u6cd5\u52a0\u8f7d\u672c\u5730\u9879\u76ee\u3002",
       exportError: "\u65e0\u6cd5\u5bfc\u51fa\u9879\u76ee\u3002",
       importError: "\u65e0\u6cd5\u5bfc\u5165\u9879\u76ee\u3002",

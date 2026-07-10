@@ -3,7 +3,11 @@ import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type
 import { Link, useNavigate } from "react-router-dom";
 import { projectRoutes } from "../app/routes";
 import { getStrings } from "../i18n";
-import { exportProjectBackup, importProjectBackup } from "../localdb/exportProject";
+import {
+  exportProjectBackup,
+  importProjectBackup,
+  ProjectImportConflictError,
+} from "../localdb/exportProject";
 import { deleteProject, listProjectSummaries } from "../localdb/projectStore";
 import type { LocalProjectSummary } from "../localdb/types";
 import { downloadBlob } from "../utils/downloadBlob";
@@ -22,6 +26,10 @@ export function ProjectsPage() {
   const [deleting, setDeleting] = useState(false);
   const [exportingIds, setExportingIds] = useState<Set<string>>(() => new Set());
   const [importing, setImporting] = useState(false);
+  const [importConflict, setImportConflict] = useState<{
+    file: File;
+    projectId: string;
+  } | null>(null);
   const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
   const exportingIdsRef = useRef(new Set<string>());
 
@@ -100,21 +108,37 @@ export function ProjectsPage() {
     }
   }
 
-  async function handleImport(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  async function runImport(file: File, overwrite = false) {
     setImporting(true);
     setError(null);
     try {
-      const snapshot = await importProjectBackup(file);
+      const snapshot = overwrite
+        ? await importProjectBackup(file, { overwrite: true })
+        : await importProjectBackup(file);
       navigate(projectRoutes.storyboard(snapshot.project.id));
     } catch (importError) {
-      setError(errorMessage(importError, strings.importError));
+      if (importError instanceof ProjectImportConflictError && !overwrite) {
+        setImportConflict({ file, projectId: importError.projectId });
+      } else {
+        setError(errorMessage(importError, strings.importError));
+      }
     } finally {
-      event.target.value = "";
       setImporting(false);
     }
+  }
+
+  async function handleImport(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    event.target.value = "";
+    await runImport(file);
+  }
+
+  async function confirmOverwrite() {
+    if (!importConflict) return;
+    const { file } = importConflict;
+    setImportConflict(null);
+    await runImport(file, true);
   }
 
   return (
@@ -211,6 +235,44 @@ export function ProjectsPage() {
             </button>
             <button className="async-action" type="button" disabled={deleting} onClick={() => void handleDelete()}>
               {deleting ? strings.deletingAction : strings.confirmDeleteAction}
+            </button>
+          </div>
+        </dialog>
+      ) : null}
+
+      {importConflict ? (
+        <dialog
+          open
+          aria-modal="true"
+          aria-labelledby="overwrite-project-title"
+          onCancel={(event) => {
+            event.preventDefault();
+            if (!importing) setImportConflict(null);
+          }}
+        >
+          <h2 id="overwrite-project-title">{strings.overwriteDialogTitle}</h2>
+          <p>
+            {strings.overwriteDialogBody(
+              projects.find((project) => project.id === importConflict.projectId)?.title ??
+                importConflict.projectId,
+            )}
+          </p>
+          <div>
+            <button
+              type="button"
+              autoFocus
+              disabled={importing}
+              onClick={() => setImportConflict(null)}
+            >
+              {strings.cancelAction}
+            </button>
+            <button
+              className="async-action"
+              type="button"
+              disabled={importing}
+              onClick={() => void confirmOverwrite()}
+            >
+              {importing ? strings.overwritingAction : strings.confirmOverwriteAction}
             </button>
           </div>
         </dialog>

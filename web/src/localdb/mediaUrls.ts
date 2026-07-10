@@ -1,27 +1,47 @@
 import { loadMediaBlob } from "./mediaStore";
 import type { LocalMediaRef } from "./types";
 
-const objectUrls = new Map<LocalMediaRef, string>();
+const resolvedUrls = new Map<LocalMediaRef, string | null>();
+const inFlightResolutions = new Map<LocalMediaRef, Promise<string | null>>();
+let cacheGeneration = 0;
 
 export async function resolveLocalMediaUrl(ref: LocalMediaRef): Promise<string | null> {
-  const cached = objectUrls.get(ref);
-  if (cached) {
-    return cached;
+  if (resolvedUrls.has(ref)) {
+    return resolvedUrls.get(ref) ?? null;
   }
+  const inFlight = inFlightResolutions.get(ref);
+  if (inFlight) return inFlight;
 
-  const blob = await loadMediaBlob(ref);
-  if (!blob || typeof URL.createObjectURL !== "function") {
-    return null;
-  }
+  const generation = cacheGeneration;
+  const resolution = (async () => {
+    const blob = await loadMediaBlob(ref);
+    if (generation !== cacheGeneration) {
+      return null;
+    }
+    if (!blob || typeof URL.createObjectURL !== "function") {
+      resolvedUrls.set(ref, null);
+      return null;
+    }
 
-  const url = URL.createObjectURL(blob);
-  objectUrls.set(ref, url);
-  return url;
+    const url = URL.createObjectURL(blob);
+    resolvedUrls.set(ref, url);
+    return url;
+  })();
+  inFlightResolutions.set(ref, resolution);
+  const removeInFlight = () => {
+    if (inFlightResolutions.get(ref) === resolution) {
+      inFlightResolutions.delete(ref);
+    }
+  };
+  void resolution.then(removeInFlight, removeInFlight);
+  return resolution;
 }
 
 export function revokeLocalMediaUrls(): void {
-  for (const url of objectUrls.values()) {
-    URL.revokeObjectURL(url);
+  cacheGeneration += 1;
+  for (const url of resolvedUrls.values()) {
+    if (url) URL.revokeObjectURL(url);
   }
-  objectUrls.clear();
+  resolvedUrls.clear();
+  inFlightResolutions.clear();
 }

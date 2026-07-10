@@ -91,6 +91,13 @@ async function saveRecord(record: LocalMediaRecord): Promise<void> {
   await transactionDone(tx);
 }
 
+async function deleteRecord(id: string): Promise<void> {
+  const db = await openLocalDb();
+  const tx = db.transaction(LOCAL_STORES.media, "readwrite");
+  tx.objectStore(LOCAL_STORES.media).delete(id);
+  await transactionDone(tx);
+}
+
 async function loadRecord(id: string): Promise<LocalMediaRecord | null> {
   const db = await openLocalDb();
   const tx = db.transaction(LOCAL_STORES.media, "readonly");
@@ -143,6 +150,31 @@ async function readBlobFromOpfs(record: LocalMediaRecord): Promise<Blob | null> 
   }
 }
 
+async function deleteBlobFromOpfs(record: LocalMediaRecord): Promise<void> {
+  if (!record.opfsPath) {
+    return;
+  }
+  const storage = navigator.storage as StorageWithOpfs | undefined;
+  if (!storage?.getDirectory) {
+    throw new Error("OPFS is unavailable for media cleanup");
+  }
+
+  const [directory, fileName, ...extraSegments] = record.opfsPath.split("/");
+  if (directory !== OPFS_MEDIA_DIR || !fileName || extraSegments.length > 0) {
+    throw new Error("Stored OPFS media path is invalid");
+  }
+  const root = await storage.getDirectory();
+  const mediaDir = await root.getDirectoryHandle(OPFS_MEDIA_DIR);
+  try {
+    await mediaDir.removeEntry(fileName);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "NotFoundError") {
+      return;
+    }
+    throw error;
+  }
+}
+
 export async function saveMediaBlob(input: SaveMediaInput): Promise<LocalMediaRef> {
   const id = createMediaId();
   const blob = normalizeBlob(input.blob, input.contentType);
@@ -173,7 +205,18 @@ export async function saveMediaBlob(input: SaveMediaInput): Promise<LocalMediaRe
         blobBytes,
       };
 
-  await saveRecord(record);
+  try {
+    await saveRecord(record);
+  } catch (error) {
+    if (opfsPath) {
+      try {
+        await deleteBlobFromOpfs(record);
+      } catch {
+        // Preserve the original persistence error; the unindexed OPFS file is not addressable.
+      }
+    }
+    throw error;
+  }
   return `${LOCAL_MEDIA_PREFIX}${id}`;
 }
 
@@ -194,6 +237,18 @@ export async function loadMediaBlob(ref: LocalMediaRef): Promise<Blob | null> {
   return null;
 }
 
+export async function deleteMediaBlob(ref: LocalMediaRef): Promise<void> {
+  const id = mediaIdFromRef(ref);
+  const record = await loadRecord(id);
+  if (!record) {
+    return;
+  }
+  if (record.storage === "opfs") {
+    await deleteBlobFromOpfs(record);
+  }
+  await deleteRecord(id);
+}
+
 export async function cacheRemoteMedia(
   url: string,
   metadata: { projectId: string; sourcePath: string },
@@ -204,7 +259,7 @@ export async function cacheRemoteMedia(
       return null;
     }
     const blob = await response.blob();
-    return saveMediaBlob({
+    return await saveMediaBlob({
       projectId: metadata.projectId,
       sourcePath: metadata.sourcePath,
       contentType: blob.type || response.headers.get("content-type") || "application/octet-stream",

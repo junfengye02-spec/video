@@ -25,8 +25,11 @@ export function openLocalDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(LOCAL_STORES.settings)) {
         db.createObjectStore(LOCAL_STORES.settings, { keyPath: "key" });
       }
-      if (!db.objectStoreNames.contains(LOCAL_STORES.media)) {
-        db.createObjectStore(LOCAL_STORES.media, { keyPath: "id" });
+      const mediaStore = db.objectStoreNames.contains(LOCAL_STORES.media)
+        ? request.transaction!.objectStore(LOCAL_STORES.media)
+        : db.createObjectStore(LOCAL_STORES.media, { keyPath: "id" });
+      if (!mediaStore.indexNames.contains("projectId")) {
+        mediaStore.createIndex("projectId", "projectId", { unique: false });
       }
     };
 

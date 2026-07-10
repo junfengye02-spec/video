@@ -1,6 +1,21 @@
 import type { ShortDramaProjectResponse } from "../domain/types";
 import { LOCAL_STORES, openLocalDb } from "./indexedDb";
-import type { LocalProjectSnapshot, LocalProjectSummary, LocalSettingsRecord } from "./types";
+import { deleteMediaBlob } from "./mediaStore";
+import type {
+  LocalMediaRecord,
+  LocalMediaRef,
+  LocalProjectSnapshot,
+  LocalProjectSummary,
+  LocalSettingsRecord,
+} from "./types";
+
+const LOCAL_MEDIA_PREFIX = "local://media/";
+
+function cleanupError(message: string, causes: unknown[]): Error {
+  const error = new Error(message) as Error & { causes: unknown[] };
+  error.causes = causes;
+  return error;
+}
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -24,6 +39,24 @@ function toLocalProjectSnapshot(snapshot: ShortDramaProjectResponse): LocalProje
     updatedAt: new Date().toISOString(),
     snapshot,
   };
+}
+
+function isLocalMediaRef(value: unknown): value is LocalMediaRef {
+  return (
+    typeof value === "string" &&
+    /^local:\/\/media\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)
+  );
+}
+
+function collectLocalMediaRefs(value: unknown, refs = new Set<LocalMediaRef>()): Set<LocalMediaRef> {
+  if (isLocalMediaRef(value)) {
+    refs.add(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectLocalMediaRefs(item, refs);
+  } else if (value && typeof value === "object") {
+    for (const item of Object.values(value)) collectLocalMediaRefs(item, refs);
+  }
+  return refs;
 }
 
 async function loadRecentProjectId(): Promise<string | null> {
@@ -92,15 +125,60 @@ export async function listProjectSummaries(): Promise<LocalProjectSummary[]> {
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
-  const recentProjectId = await loadRecentProjectId();
   const db = await openLocalDb();
-  const tx = db.transaction([LOCAL_STORES.projects, LOCAL_STORES.settings], "readwrite");
-  tx.objectStore(LOCAL_STORES.projects).delete(projectId);
+  const tx = db.transaction(
+    [LOCAL_STORES.projects, LOCAL_STORES.settings, LOCAL_STORES.media],
+    "readwrite",
+  );
+  const done = transactionDone(tx);
+  const projectStore = tx.objectStore(LOCAL_STORES.projects);
+  const settingsStore = tx.objectStore(LOCAL_STORES.settings);
+  const mediaStore = tx.objectStore(LOCAL_STORES.media);
+  const [recentSetting, projects, projectMedia] = await Promise.all([
+    requestToPromise<LocalSettingsRecord | undefined>(settingsStore.get("recentProjectId")),
+    requestToPromise<LocalProjectSnapshot[]>(projectStore.getAll()),
+    requestToPromise<LocalMediaRecord[]>(
+      mediaStore.index("projectId").getAll(IDBKeyRange.only(projectId)),
+    ),
+  ]);
+
+  const sharedRefs = new Set<LocalMediaRef>();
+  for (const project of projects) {
+    if (project.id !== projectId) {
+      collectLocalMediaRefs(project.snapshot, sharedRefs);
+    }
+  }
+  const removableMedia = projectMedia.filter(
+    (record) => !sharedRefs.has(`${LOCAL_MEDIA_PREFIX}${record.id}` as LocalMediaRef),
+  );
+
+  projectStore.delete(projectId);
+  const recentProjectId = recentSetting?.value ?? null;
   if (recentProjectId === projectId) {
-    tx.objectStore(LOCAL_STORES.settings).put({
+    settingsStore.put({
       key: "recentProjectId",
       value: null,
     } satisfies LocalSettingsRecord);
   }
-  await transactionDone(tx);
+  for (const media of removableMedia) {
+    if (media.storage === "indexeddb") {
+      mediaStore.delete(media.id);
+    }
+  }
+  await done;
+
+  const cleanupResults = await Promise.allSettled(
+    removableMedia
+      .filter((media) => media.storage === "opfs")
+      .map((media) => deleteMediaBlob(`${LOCAL_MEDIA_PREFIX}${media.id}` as LocalMediaRef)),
+  );
+  const cleanupErrors = cleanupResults
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason);
+  if (cleanupErrors.length > 0) {
+    throw cleanupError(
+      "Project was deleted, but OPFS media cleanup was incomplete",
+      cleanupErrors,
+    );
+  }
 }

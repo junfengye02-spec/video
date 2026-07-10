@@ -10,10 +10,21 @@ const projectStoreMocks = vi.hoisted(() => ({
   deleteProject: vi.fn(),
 }));
 
-const projectBackupMocks = vi.hoisted(() => ({
-  exportProjectBackup: vi.fn(),
-  importProjectBackup: vi.fn(),
-}));
+const projectBackupMocks = vi.hoisted(() => {
+  class ProjectImportConflictError extends Error {
+    readonly projectId: string;
+
+    constructor(projectId: string) {
+      super(`Project ${projectId} already exists`);
+      this.projectId = projectId;
+    }
+  }
+  return {
+    exportProjectBackup: vi.fn(),
+    importProjectBackup: vi.fn(),
+    ProjectImportConflictError,
+  };
+});
 
 const downloadMocks = vi.hoisted(() => ({
   downloadBlob: vi.fn(),
@@ -194,6 +205,57 @@ describe("ProjectsPage", () => {
 
     await waitFor(() => expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledWith(file));
     expect(await screen.findByRole("status", { name: "当前路径" })).toHaveTextContent(
+      "/projects/p1/storyboard",
+    );
+  });
+
+  it("does not overwrite a conflicting import when confirmation is cancelled", async () => {
+    const file = new File(["backup"], "project.omproj", { type: "application/zip" });
+    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    projectBackupMocks.importProjectBackup.mockRejectedValue(
+      new projectBackupMocks.ProjectImportConflictError("p1"),
+    );
+    render(
+      <MemoryRouter future={routerFuture} initialEntries={["/projects"]}>
+        <ProjectsPage />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(screen.getByLabelText(strings.importAction), { target: { files: [file] } });
+    expect(await screen.findByRole("dialog", { name: "\u8986\u76d6\u73b0\u6709\u9879\u76ee" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: strings.cancelAction }));
+
+    expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledTimes(1);
+    expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledWith(file);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("/projects");
+  });
+
+  it("overwrites a conflicting import only after explicit confirmation", async () => {
+    const file = new File(["backup"], "project.omproj", { type: "application/zip" });
+    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    projectBackupMocks.importProjectBackup
+      .mockRejectedValueOnce(new projectBackupMocks.ProjectImportConflictError("p1"))
+      .mockResolvedValueOnce(createProjectResponse());
+    render(
+      <MemoryRouter future={routerFuture} initialEntries={["/projects"]}>
+        <ProjectsPage />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(screen.getByLabelText(strings.importAction), { target: { files: [file] } });
+    await screen.findByRole("dialog", { name: "\u8986\u76d6\u73b0\u6709\u9879\u76ee" });
+    fireEvent.click(screen.getByRole("button", { name: "\u786e\u8ba4\u8986\u76d6" }));
+
+    await waitFor(() => expect(projectBackupMocks.importProjectBackup).toHaveBeenLastCalledWith(
+      file,
+      { overwrite: true },
+    ));
+    expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("status")).toHaveTextContent(
       "/projects/p1/storyboard",
     );
   });

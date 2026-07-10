@@ -1,7 +1,7 @@
 import type { ShortDramaProjectResponse } from "../domain/types";
 
 export const LOCAL_DB_NAME = "openmontage-local";
-export const LOCAL_DB_VERSION = 1;
+export const LOCAL_DB_VERSION = 2;
 
 export type LocalMediaRef = `local://media/${string}`;
 export type LocalMediaStorage = "opfs" | "indexeddb";
