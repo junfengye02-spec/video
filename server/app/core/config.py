@@ -1,3 +1,4 @@
+import re
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
@@ -19,6 +20,8 @@ class AppSettings(BaseSettings):
         env_file=".env",
         extra="ignore",
         hide_input_in_errors=True,
+        populate_by_name=True,
+        env_ignore_empty=True,
     )
     environment: Literal["development", "test", "production"] = "development"
     database_url: str = "postgresql+psycopg://openmontage:openmontage@127.0.0.1:5432/openmontage"
@@ -39,6 +42,33 @@ class AppSettings(BaseSettings):
     epay_pay_address: str | None = None
     epay_id: str | None = None
     epay_key: SecretStr | None = None
+    newapi_base_url: str = "http://127.0.0.1:3000"
+    newapi_text_token_keys: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        validation_alias="NEWAPI_TEXT_TOKEN_KEYS_JSON",
+    )
+    newapi_text_current_token_alias: str | None = None
+    newapi_image_token_keys: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        validation_alias="NEWAPI_IMAGE_TOKEN_KEYS_JSON",
+    )
+    newapi_image_current_token_alias: str | None = None
+    newapi_video_token_keys: dict[str, SecretStr] = Field(
+        default_factory=dict,
+        validation_alias="NEWAPI_VIDEO_TOKEN_KEYS_JSON",
+    )
+    newapi_video_current_token_alias: str | None = None
+    billing_reference_recovery_seconds: int = Field(
+        default=86_400, gt=0, strict=True
+    )
+    billing_receipt_deadline_seconds: int = Field(
+        default=86_400, gt=0, strict=True
+    )
+    billing_hold_timeout_seconds: int = Field(default=86_400, gt=0, strict=True)
+    billing_quote_stale_retries: int = Field(default=2, gt=0, strict=True)
+    billing_max_video_bytes: int = Field(
+        default=536_870_912, gt=0, strict=True
+    )
 
     def __init__(self, **values):
         try:
@@ -64,6 +94,22 @@ class AppSettings(BaseSettings):
     def empty_optional_values_are_unset(cls, value):
         return None if value == "" else value
 
+    @field_validator(
+        "billing_reference_recovery_seconds",
+        "billing_receipt_deadline_seconds",
+        "billing_hold_timeout_seconds",
+        "billing_quote_stale_retries",
+        "billing_max_video_bytes",
+        mode="before",
+    )
+    @classmethod
+    def parse_positive_integer_settings(cls, value):
+        if type(value) is int:
+            return value
+        if type(value) is str and re.fullmatch(r"[1-9][0-9]*", value):
+            return int(value)
+        raise ValueError("billing safety settings must be positive integers")
+
     @field_validator("epay_pay_address")
     @classmethod
     def validate_epay_pay_address(cls, value: str | None) -> str | None:
@@ -73,6 +119,47 @@ class AppSettings(BaseSettings):
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("epay_pay_address must be an absolute HTTP(S) URL")
         return value
+
+    @field_validator("newapi_base_url")
+    @classmethod
+    def validate_newapi_base_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("newapi_base_url must be a clean HTTP(S) origin") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+            or (port is not None and not 1 <= port <= 65_535)
+        ):
+            raise ValueError("newapi_base_url must be a clean HTTP(S) origin")
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    @model_validator(mode="after")
+    def validate_newapi_keyrings(self):
+        for kind in ("text", "image", "video"):
+            keyring = getattr(self, f"newapi_{kind}_token_keys")
+            current_alias = getattr(self, f"newapi_{kind}_current_token_alias")
+            if not keyring and current_alias is None:
+                continue
+            for alias, secret in keyring.items():
+                secret_value = secret.get_secret_value()
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", alias) is None:
+                    raise ValueError("NewAPI token aliases are invalid")
+                if not secret_value.strip() or len(secret_value) > 4096:
+                    raise ValueError("NewAPI token values are invalid")
+            if not current_alias or current_alias not in keyring:
+                raise ValueError(
+                    "each configured NewAPI keyring requires a current alias"
+                )
+        return self
 
     @model_validator(mode="after")
     def validate_production(self):
