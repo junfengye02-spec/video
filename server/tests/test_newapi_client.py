@@ -36,6 +36,8 @@ from server.app.provider.newapi import (
 QUOTE_ID = "uq_" + "A" * 32
 TASK_ID = "task_" + "B" * 32
 REQUEST_ID = "20260712123456000000000deadbeefABC12345"
+OTHER_TASK_ID = "task_" + "C" * 32
+OTHER_REQUEST_ID = "20260712123456000000001deadbeefABC12345"
 QUOTE = {
     "quote_id": QUOTE_ID,
     "status": "quoted",
@@ -77,6 +79,15 @@ class SequenceTransport(httpx.BaseTransport):
             response = response(request)
         response.request = request
         return response
+
+
+class CloseTrackingTransport(SequenceTransport):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 class ChunksThenError(httpx.SyncByteStream):
@@ -152,6 +163,65 @@ def test_token_keyrings_parse_json_environment_values(monkeypatch, kind):
         current_alias: SecretStr("current-secret"),
         retired_alias: SecretStr("retired-secret"),
     }
+
+
+def test_newapi_client_close_is_idempotent(settings):
+    transport = CloseTrackingTransport()
+    client = NewApiClient(settings, transport=transport)
+
+    client.close()
+    client.close()
+
+    assert transport.close_calls == 1
+
+
+def test_newapi_client_context_manager_closes_transport(settings):
+    transport = CloseTrackingTransport()
+    client = NewApiClient(settings, transport=transport)
+
+    with client as entered:
+        assert entered is client
+
+    assert transport.close_calls == 1
+
+
+def test_token_keyrings_reject_duplicate_environment_aliases_without_leaking_values(
+    monkeypatch,
+):
+    first_secret = "first-provider-secret-sentinel"
+    second_secret = "second-provider-secret-sentinel"
+    monkeypatch.setenv(
+        "NEWAPI_VIDEO_TOKEN_KEYS_JSON",
+        '{"video-v1":"'
+        + first_secret
+        + '","video-v1":"'
+        + second_secret
+        + '"}',
+    )
+    monkeypatch.setenv("NEWAPI_VIDEO_CURRENT_TOKEN_ALIAS", "video-v1")
+
+    with pytest.raises(ValidationError) as caught:
+        AppSettings(_env_file=None, auth_hmac_secret="x" * 32)
+
+    serialized_errors = json.dumps(caught.value.errors(), default=str)
+    for secret in (first_secret, second_secret):
+        assert secret not in str(caught.value)
+        assert secret not in repr(caught.value)
+        assert secret not in serialized_errors
+
+
+@pytest.mark.parametrize(
+    "raw_keyring",
+    ["[]", "null", "123", '"provider-secret-sentinel"'],
+)
+def test_token_keyrings_reject_nonobject_environment_json(monkeypatch, raw_keyring):
+    monkeypatch.setenv("NEWAPI_VIDEO_TOKEN_KEYS_JSON", raw_keyring)
+    monkeypatch.setenv("NEWAPI_VIDEO_CURRENT_TOKEN_ALIAS", "video-v1")
+
+    with pytest.raises(ValidationError) as caught:
+        AppSettings(_env_file=None, auth_hmac_secret="x" * 32)
+
+    assert "provider-secret-sentinel" not in repr(caught.value)
 
 
 def test_current_token_alias_must_exist_without_leaking_key_value():
@@ -395,6 +465,24 @@ def test_prepared_json_request_freezes_exact_bytes_and_redacts_body_repr():
         request.path = "/v1/responses"
 
 
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), float("-inf")])
+def test_prepared_json_rejects_nonfinite_numbers_before_network(settings, nonfinite):
+    transport = SequenceTransport([])
+    client = NewApiClient(settings, transport=transport)
+
+    with pytest.raises(ValueError):
+        client.quote(
+            "video",
+            PreparedNewApiRequest.json(
+                "POST",
+                "/v1/videos",
+                {"model": "video-model", "temperature": nonfinite},
+            ),
+        )
+
+    assert transport.requests == []
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -431,6 +519,28 @@ def test_direct_prepared_request_cannot_bypass_method_path_or_type_allowlist(
             path=path,
             content=b"{}",
             content_type=content_type,
+        )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"{}",
+        b'{"model":""}',
+        b'{"model":123}',
+        b'{"model":"first","model":"second"}',
+        b'{"model":"video-model","temperature":NaN}',
+        b'{"model":"video-model","temperature":Infinity}',
+        b'{"model":"video-model","temperature":-Infinity}',
+    ],
+)
+def test_direct_prepared_request_requires_one_strict_nonempty_model(content):
+    with pytest.raises(ValueError):
+        PreparedNewApiRequest(
+            method="POST",
+            path="/v1/videos",
+            content=content,
+            content_type="application/json",
         )
 
 
@@ -539,6 +649,28 @@ def test_quote_status_rejects_incomplete_or_impossible_reference_states(patch):
         UsageQuoteStatus.model_validate(quote_status_payload(**patch))
 
 
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {
+            "status": "accepted",
+            "reference_type": "task",
+            "reference_id": REQUEST_ID,
+            "consumed_at": 2,
+        },
+        {
+            "status": "accepted",
+            "reference_type": "request",
+            "reference_id": TASK_ID,
+            "consumed_at": 2,
+        },
+    ],
+)
+def test_quote_status_reference_format_must_match_reference_type(patch):
+    with pytest.raises(ValidationError):
+        UsageQuoteStatus.model_validate(quote_status_payload(**patch))
+
+
 def receipt_payload(**patch):
     return {
         "reference_type": "task",
@@ -592,6 +724,18 @@ def test_usage_receipt_rejects_coercing_or_extra_wire_types(patch):
         UsageReceipt.model_validate_json(json.dumps(receipt_payload(**patch)))
 
 
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"reference_type": "task", "reference_id": REQUEST_ID},
+        {"reference_type": "request", "reference_id": TASK_ID},
+    ],
+)
+def test_receipt_reference_format_must_match_reference_type(patch):
+    with pytest.raises(ValidationError):
+        UsageReceipt.model_validate(receipt_payload(**patch))
+
+
 def test_video_task_status_uses_strict_error_object_and_hides_result_metadata():
     result_url = "https://provider-result.example/private-video.mp4"
     status = VideoTaskStatus.model_validate(
@@ -643,6 +787,11 @@ def test_video_task_status_rejects_wrong_error_and_envelope_shapes(patch):
         )
 
 
+def test_video_task_status_rejects_nonprovider_task_identifiers():
+    with pytest.raises(ValidationError):
+        VideoTaskStatus.model_validate({"id": "task_other", "status": "completed"})
+
+
 def test_quote_and_execute_reuse_exact_body_route_and_capability_token(settings):
     transport = SequenceTransport(
         [
@@ -678,6 +827,16 @@ def test_quote_and_execute_reuse_exact_body_route_and_capability_token(settings)
     assert quoted.headers["Authorization"] == "Bearer video-secret"
 
 
+def test_prepared_request_model_is_derived_from_frozen_json_bytes():
+    body = {"model": "video-model", "seconds": 10}
+
+    request = PreparedNewApiRequest.json("POST", "/v1/videos", body)
+    body["model"] = "mutated-model"
+
+    assert request.model == "video-model"
+    assert json.loads(request.content)["model"] == request.model
+
+
 @pytest.mark.parametrize(
     ("kind", "path"),
     [
@@ -702,19 +861,41 @@ def test_capability_tokens_cannot_cross_relay_route_families(settings, kind, pat
         ("video", "/v1/videos", "openai"),
         ("text", "/v1/responses", "task"),
         ("image", "/v1/images/generations", "task"),
+        ("text", "/v1/chat/completions", "openai_responses"),
+        ("text", "/v1/responses", "openai"),
+        ("image", "/v1/images/generations", "openai"),
     ],
 )
 def test_quote_response_relay_format_must_match_capability(
     settings, kind, path, relay_format
 ):
     transport = SequenceTransport(
-        [httpx.Response(200, json={**QUOTE, "relay_format": relay_format})]
+        [
+            httpx.Response(
+                200,
+                json={**QUOTE, "model": "m", "relay_format": relay_format},
+            )
+        ]
     )
 
     with pytest.raises(InvalidNewApiResponse):
         NewApiClient(settings, transport=transport).quote(
             kind,
             PreparedNewApiRequest.json("POST", path, {"model": "m"}),
+        )
+
+
+def test_quote_response_model_must_match_prepared_request(settings):
+    transport = SequenceTransport(
+        [httpx.Response(200, json={**QUOTE, "model": "different-model"})]
+    )
+
+    with pytest.raises(InvalidNewApiResponse):
+        NewApiClient(settings, transport=transport).quote(
+            "video",
+            PreparedNewApiRequest.json(
+                "POST", "/v1/videos", {"model": "video-model"}
+            ),
         )
 
 
@@ -780,6 +961,13 @@ def test_quoted_execution_returns_typed_sanitized_references(
         ),
         ("video", "/v1/videos", {"id": 123}, {}),
         ("video", "/v1/videos", {"id": "../task"}, {}),
+        ("video", "/v1/videos", {"id": "task_other"}, {}),
+        (
+            "text",
+            "/v1/responses",
+            {"output": []},
+            {"X-Oneapi-Request-Id": "request_other"},
+        ),
         ("video", "/v1/videos", [], {}),
     ],
 )
@@ -809,6 +997,60 @@ def test_malformed_quote_id_is_rejected_before_network(settings, quote_id):
             PreparedNewApiRequest.json("POST", "/v1/videos", {"model": "m"}),
             quote_id,
         )
+    assert transport.requests == []
+
+
+@pytest.mark.parametrize(
+    ("method_name", "args"),
+    [
+        ("get_video_task", ("video-v1", "task_other")),
+        ("get_task_receipt", ("video", "video-v1", "task_other")),
+        ("get_request_receipt", ("text", "text-v1", "request_other")),
+    ],
+)
+def test_malformed_provider_references_are_rejected_before_network(
+    settings, method_name, args
+):
+    transport = SequenceTransport([])
+    client = NewApiClient(settings, transport=transport)
+
+    with pytest.raises(ValueError):
+        getattr(client, method_name)(*args)
+
+    assert transport.requests == []
+
+
+def test_malformed_video_download_task_id_is_rejected_before_network(
+    settings, tmp_path
+):
+    transport = SequenceTransport([])
+    client = NewApiClient(settings, transport=transport)
+
+    with pytest.raises(ValueError):
+        client.download_video_content(
+            "video-v1", "task_other", tmp_path / "video.mp4"
+        )
+
+    assert transport.requests == []
+
+
+@pytest.mark.parametrize(
+    ("method_name", "kind", "token_alias", "identifier"),
+    [
+        ("get_task_receipt", "text", "text-v1", TASK_ID),
+        ("get_task_receipt", "image", "image-v1", TASK_ID),
+        ("get_request_receipt", "video", "video-v1", REQUEST_ID),
+    ],
+)
+def test_receipt_reference_type_must_match_capability_before_network(
+    settings, method_name, kind, token_alias, identifier
+):
+    transport = SequenceTransport([])
+    client = NewApiClient(settings, transport=transport)
+
+    with pytest.raises(ValueError, match="capability"):
+        getattr(client, method_name)(kind, token_alias, identifier)
+
     assert transport.requests == []
 
 
@@ -892,13 +1134,15 @@ def test_quote_status_rejects_wrong_capability_or_response_identity(
             "get_task_receipt",
             "video",
             TASK_ID,
-            receipt_payload(reference_id="task_other"),
+            receipt_payload(reference_id=OTHER_TASK_ID),
         ),
         (
             "get_request_receipt",
             "text",
             REQUEST_ID,
-            receipt_payload(reference_type="request", reference_id="request_other"),
+            receipt_payload(
+                reference_type="request", reference_id=OTHER_REQUEST_ID
+            ),
         ),
     ],
 )
@@ -911,6 +1155,45 @@ def test_receipt_reads_reject_wrong_response_identity(
     )
     with pytest.raises(InvalidNewApiResponse):
         getattr(client, method_name)(kind, f"{kind}-v1", identifier)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "args", "payload"),
+    [
+        (
+            "get_quote_status",
+            ("video", "video-v1", QUOTE_ID),
+            quote_status_payload(
+                status="accepted",
+                reference_type="task",
+                reference_id="task_other",
+                consumed_at=2,
+            ),
+        ),
+        (
+            "get_task_receipt",
+            ("video", "video-v1", TASK_ID),
+            receipt_payload(reference_id="task_other"),
+        ),
+        (
+            "get_request_receipt",
+            ("text", "text-v1", REQUEST_ID),
+            receipt_payload(
+                reference_type="request", reference_id="request_other"
+            ),
+        ),
+    ],
+)
+def test_status_and_receipts_reject_malformed_provider_references(
+    settings, method_name, args, payload
+):
+    client = NewApiClient(
+        settings,
+        transport=SequenceTransport([httpx.Response(200, json=payload)]),
+    )
+
+    with pytest.raises(InvalidNewApiResponse):
+        getattr(client, method_name)(*args)
 
 
 @pytest.mark.parametrize(

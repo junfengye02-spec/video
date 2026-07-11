@@ -1,6 +1,8 @@
+import json
 import re
+from collections.abc import Mapping
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from pydantic import (
@@ -11,7 +13,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
 
@@ -43,17 +45,17 @@ class AppSettings(BaseSettings):
     epay_id: str | None = None
     epay_key: SecretStr | None = None
     newapi_base_url: str = "http://127.0.0.1:3000"
-    newapi_text_token_keys: dict[str, SecretStr] = Field(
+    newapi_text_token_keys: Annotated[dict[str, SecretStr], NoDecode] = Field(
         default_factory=dict,
         validation_alias="NEWAPI_TEXT_TOKEN_KEYS_JSON",
     )
     newapi_text_current_token_alias: str | None = None
-    newapi_image_token_keys: dict[str, SecretStr] = Field(
+    newapi_image_token_keys: Annotated[dict[str, SecretStr], NoDecode] = Field(
         default_factory=dict,
         validation_alias="NEWAPI_IMAGE_TOKEN_KEYS_JSON",
     )
     newapi_image_current_token_alias: str | None = None
-    newapi_video_token_keys: dict[str, SecretStr] = Field(
+    newapi_video_token_keys: Annotated[dict[str, SecretStr], NoDecode] = Field(
         default_factory=dict,
         validation_alias="NEWAPI_VIDEO_TOKEN_KEYS_JSON",
     )
@@ -109,6 +111,37 @@ class AppSettings(BaseSettings):
         if type(value) is str and re.fullmatch(r"[1-9][0-9]*", value):
             return int(value)
         raise ValueError("billing safety settings must be positive integers")
+
+    @field_validator(
+        "newapi_text_token_keys",
+        "newapi_image_token_keys",
+        "newapi_video_token_keys",
+        mode="before",
+    )
+    @classmethod
+    def parse_newapi_keyring(cls, value):
+        if isinstance(value, Mapping):
+            return value
+        if type(value) is not str:
+            raise ValueError("NewAPI token keyrings must be JSON objects")
+
+        def reject_duplicate_aliases(
+            pairs: list[tuple[str, object]],
+        ) -> dict[str, object]:
+            keyring: dict[str, object] = {}
+            for alias, secret in pairs:
+                if alias in keyring:
+                    raise ValueError("duplicate NewAPI token alias")
+                keyring[alias] = secret
+            return keyring
+
+        try:
+            parsed = json.loads(value, object_pairs_hook=reject_duplicate_aliases)
+        except (json.JSONDecodeError, ValueError):
+            raise ValueError("NewAPI token keyrings must be unique JSON objects") from None
+        if type(parsed) is not dict:
+            raise ValueError("NewAPI token keyrings must be JSON objects")
+        return parsed
 
     @field_validator("epay_pay_address")
     @classmethod

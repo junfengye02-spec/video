@@ -71,8 +71,16 @@ def _reject_duplicate_json_names(pairs: list[tuple[str, object]]) -> dict[str, o
     return parsed
 
 
+def _reject_nonfinite_json_constant(constant: str) -> object:
+    raise ValueError("non-finite JSON number")
+
+
 def _load_unique_json(content: bytes) -> object:
-    return json.loads(content, object_pairs_hook=_reject_duplicate_json_names)
+    return json.loads(
+        content,
+        object_pairs_hook=_reject_duplicate_json_names,
+        parse_constant=_reject_nonfinite_json_constant,
+    )
 
 
 def _validate_json_model(
@@ -95,6 +103,12 @@ _CAPABILITY_PATHS = {
     "image": frozenset({"/v1/images/generations"}),
     "video": frozenset({"/v1/videos"}),
 }
+_RELAY_FORMATS = {
+    "/v1/chat/completions": "openai",
+    "/v1/responses": "openai_responses",
+    "/v1/images/generations": "openai_image",
+    "/v1/videos": "task",
+}
 
 
 def _validate_relay_path(path: str) -> str:
@@ -108,12 +122,32 @@ def _validate_capability_path(kind: TokenKind, path: str) -> None:
         raise ValueError("NewAPI request capability does not match relay path")
 
 
+def _validate_task_id(task_id: object) -> str:
+    if type(task_id) is not str or len(task_id) != 37 or not task_id.startswith("task_"):
+        raise ValueError("invalid NewAPI task identifier")
+    if any(not (character.isascii() and character.isalnum()) for character in task_id[5:]):
+        raise ValueError("invalid NewAPI task identifier")
+    return task_id
+
+
+def _validate_request_id(request_id: object) -> str:
+    if type(request_id) is not str or len(request_id) != 39:
+        raise ValueError("invalid NewAPI request identifier")
+    timestamp, suffix = request_id[:23], request_id[23:]
+    if any(not (character.isascii() and character.isdigit()) for character in timestamp):
+        raise ValueError("invalid NewAPI request identifier")
+    if any(not (character.isascii() and character.isalnum()) for character in suffix):
+        raise ValueError("invalid NewAPI request identifier")
+    return request_id
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedNewApiRequest:
     method: Literal["POST"]
     path: str
     content: bytes = field(repr=False)
     content_type: str
+    model: str = field(init=False)
 
     def __post_init__(self) -> None:
         if self.method != "POST":
@@ -123,6 +157,13 @@ class PreparedNewApiRequest:
             raise ValueError("NewAPI request content must be immutable bytes")
         if self.content_type != "application/json":
             raise ValueError("unsupported NewAPI request content type")
+        payload = _load_unique_json(self.content)
+        if type(payload) is not dict:
+            raise ValueError("NewAPI request content must be a JSON object")
+        model = payload.get("model")
+        if type(model) is not str or not 1 <= len(model) <= 200:
+            raise ValueError("NewAPI request model must be a nonempty string")
+        object.__setattr__(self, "model", model)
 
     @classmethod
     def json(
@@ -139,6 +180,7 @@ class PreparedNewApiRequest:
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,
+                allow_nan=False,
             ).encode("utf-8"),
             content_type="application/json",
         )
@@ -238,6 +280,10 @@ class UsageQuoteStatus(_StrictNewApiModel):
             raise ValueError("consumed quote must expose its reference")
         if self.status in {"quoted", "expired"} and self.reference_id is not None:
             raise ValueError("unconsumed quote cannot expose a reference")
+        if self.reference_type == "task":
+            _validate_task_id(self.reference_id)
+        elif self.reference_type == "request":
+            _validate_request_id(self.reference_id)
         return self
 
 
@@ -270,6 +316,14 @@ class UsageReceipt(_StrictNewApiModel):
         if type(value) not in {int, float, Decimal}:
             raise ValueError("quota_per_unit must be a JSON number")
         return value if type(value) is Decimal else Decimal(str(value))
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> "UsageReceipt":
+        if self.reference_type == "task":
+            _validate_task_id(self.reference_id)
+        else:
+            _validate_request_id(self.reference_id)
+        return self
 
 
 class _VideoTaskError(_StrictNewApiModel):
@@ -306,6 +360,11 @@ class VideoTaskStatus(_StrictNewApiModel):
         exclude=True,
     )
 
+    @field_validator("id", "task_id")
+    @classmethod
+    def validate_task_identifiers(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_task_id(value)
+
     @model_validator(mode="after")
     def validate_legacy_task_id(self) -> "VideoTaskStatus":
         if self.task_id is not None and self.task_id != self.id:
@@ -336,19 +395,6 @@ def _validate_quote_id(quote_id: str) -> str:
     ):
         raise ValueError("invalid NewAPI quote identifier")
     return quote_id
-
-
-def _validate_reference_id(reference_id: object) -> str:
-    if type(reference_id) is not str or not 1 <= len(reference_id) <= 200:
-        raise ValueError("invalid NewAPI reference")
-    if not reference_id[0].isalnum() or not reference_id[0].isascii():
-        raise ValueError("invalid NewAPI reference")
-    if any(
-        not (character.isascii() and (character.isalnum() or character in "._:-"))
-        for character in reference_id
-    ):
-        raise ValueError("invalid NewAPI reference")
-    return reference_id
 
 
 def _has_quote_stale_contract(response: httpx.Response) -> bool:
@@ -404,6 +450,15 @@ class NewApiClient:
         self._max_video_bytes = settings.billing_max_video_bytes
         self._client = httpx.Client(timeout=30, transport=transport)
 
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> "NewApiClient":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
     def quote(
         self,
         kind: TokenKind,
@@ -428,7 +483,10 @@ class NewApiClient:
             quote = _validate_json_model(UsageQuote, response.content)
         except Exception:
             raise InvalidNewApiResponse("invalid NewAPI response") from None
-        if (kind == "video") != (quote.relay_format == "task"):
+        if (
+            quote.relay_format != _RELAY_FORMATS[request.path]
+            or quote.model != request.model
+        ):
             raise InvalidNewApiResponse("invalid NewAPI response")
         return TokenScopedQuote(token_alias=alias, quote=quote)
 
@@ -454,10 +512,10 @@ class NewApiClient:
                 if type(payload) is not dict:
                     raise ValueError("invalid video response")
                 reference_type = "task"
-                reference_id = _validate_reference_id(payload.get("id"))
+                reference_id = _validate_task_id(payload.get("id"))
             else:
                 reference_type = "request"
-                reference_id = _validate_reference_id(
+                reference_id = _validate_request_id(
                     response.headers.get("X-Oneapi-Request-Id")
                 )
         except Exception:
@@ -494,7 +552,9 @@ class NewApiClient:
         token_alias: str,
         task_id: str,
     ) -> UsageReceipt:
-        expected_task_id = _validate_reference_id(task_id)
+        if kind != "video":
+            raise ValueError("NewAPI receipt capability does not match reference type")
+        expected_task_id = _validate_task_id(task_id)
         receipt = self._get_model(
             kind,
             token_alias,
@@ -515,7 +575,9 @@ class NewApiClient:
         token_alias: str,
         request_id: str,
     ) -> UsageReceipt:
-        expected_request_id = _validate_reference_id(request_id)
+        if kind not in {"text", "image"}:
+            raise ValueError("NewAPI receipt capability does not match reference type")
+        expected_request_id = _validate_request_id(request_id)
         receipt = self._get_model(
             kind,
             token_alias,
@@ -535,7 +597,7 @@ class NewApiClient:
         token_alias: str,
         task_id: str,
     ) -> VideoTaskStatus:
-        expected_task_id = _validate_reference_id(task_id)
+        expected_task_id = _validate_task_id(task_id)
         response = self._get_raw(
             "video",
             token_alias,
@@ -557,7 +619,7 @@ class NewApiClient:
         task_id: str,
         destination: Path,
     ) -> None:
-        expected_task_id = _validate_reference_id(task_id)
+        expected_task_id = _validate_task_id(task_id)
         token = self._keyrings["video"].get(token_alias)
         if token is None:
             raise NewApiCallError("NewAPI capability token is unavailable")
