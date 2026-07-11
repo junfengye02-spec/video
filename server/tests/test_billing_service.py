@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import time
 import uuid
@@ -12,7 +12,8 @@ from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import Engine, create_engine, func, select, text
+from sqlalchemy import Engine, create_engine, event, func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session
 from sqlalchemy.pool import StaticPool
 
@@ -23,6 +24,7 @@ from server.app.billing.models import (
     CostReceipt,
     GenerationJob,
 )
+from server.app.billing.money import provider_micro_to_charge_units
 from server.app.billing.service import (
     BillingService,
     InvalidBillingState,
@@ -412,6 +414,7 @@ def test_quote_replacement_uses_original_multiplier_and_canonical_snapshot(
             cost_micro=3_000_001,
             other_ratios={"seconds": Decimal("12.00")},
         ),
+        expected_quote_id=child.quote_id,
     )
     refreshed = db_session.get(GenerationJob, child.id)
     hold = db_session.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
@@ -422,6 +425,25 @@ def test_quote_replacement_uses_original_multiplier_and_canonical_snapshot(
     assert refreshed.quote_other_ratios_json == '{"seconds":12}'
     assert refreshed.status == "reserved"
     assert hold is not None and hold.amount_units == 4_500_002
+
+
+def test_quote_replacement_rejects_stale_expected_quote_without_mutation(
+    db_session: Session, billing_service: BillingService
+) -> None:
+    child = reserve_child(billing_service)
+    before = billing_graph_snapshot(db_session, child.id)
+
+    with pytest.raises(InvalidBillingState, match="expected quote"):
+        billing_service.replace_job_quote(
+            child.id,
+            usage_quote(
+                quote_id="uq_00000000000000000000000000000031",
+                cost_micro=3_000_000,
+            ),
+            expected_quote_id="uq_00000000000000000000000000000030",
+        )
+
+    assert billing_graph_snapshot(db_session, child.id) == before
 
 
 def test_quote_growth_without_funds_commits_snapshot_and_keeps_original_hold(
@@ -444,6 +466,7 @@ def test_quote_growth_without_funds_commits_snapshot_and_keeps_original_hold(
             quote_id="uq_00000000000000000000000000000003",
             cost_micro=20_000_000,
         ),
+        expected_quote_id=child.quote_id,
     )
     db_session.expire_all()
     refreshed = db_session.get(GenerationJob, child.id)
@@ -465,8 +488,12 @@ def test_zero_replacement_releases_once_without_consumption(
         quote_id="uq_00000000000000000000000000000004", cost_micro=0
     )
 
-    first = billing_service.replace_job_quote(child.id, free_quote)
-    second = billing_service.replace_job_quote(child.id, free_quote)
+    first = billing_service.replace_job_quote(
+        child.id, free_quote, expected_quote_id=child.quote_id
+    )
+    second = billing_service.replace_job_quote(
+        child.id, free_quote, expected_quote_id=child.quote_id
+    )
     hold = db_session.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
     wallet = db_session.scalar(
         select(WalletAccount).where(WalletAccount.user_id == USER_ID)
@@ -490,6 +517,7 @@ def test_replacement_rejects_changed_alias_or_model_without_mutation(
                 quote_id="uq_00000000000000000000000000000005",
                 token_alias="other-video-v1",
             ),
+            expected_quote_id=child.quote_id,
         )
     with pytest.raises(InvalidBillingState, match="model"):
         billing_service.replace_job_quote(
@@ -498,6 +526,7 @@ def test_replacement_rejects_changed_alias_or_model_without_mutation(
                 quote_id="uq_00000000000000000000000000000006",
                 model="changed-video-model",
             ),
+            expected_quote_id=child.quote_id,
         )
 
     db_session.expire_all()
@@ -522,6 +551,7 @@ def test_owned_payment_required_quote_is_detached_and_hides_cross_owner(
             quote_id="uq_00000000000000000000000000000007",
             cost_micro=20_000_000,
         ),
+        expected_quote_id=child.quote_id,
     )
 
     detached = billing_service.load_owned_payment_required_quote(
@@ -929,14 +959,51 @@ def test_incomplete_replacement_releases_exactly_once(
         ),
     )
 
-    assert billing_service.replace_job_quote(child.id, incomplete) == (
+    assert billing_service.replace_job_quote(
+        child.id, incomplete, expected_quote_id=child.quote_id
+    ) == (
         "provider_pricing_unavailable_no_charge"
     )
-    assert billing_service.replace_job_quote(child.id, incomplete) == (
+    assert billing_service.replace_job_quote(
+        child.id, incomplete, expected_quote_id=child.quote_id
+    ) == (
         "provider_pricing_unavailable_no_charge"
     )
     hold = db_session.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
     assert hold is not None and hold.status == "released"
+
+
+@pytest.mark.parametrize(
+    "malformed_wrapper",
+    [
+        None,
+        object(),
+        TokenScopedQuote(token_alias="video-v1", quote=SimpleNamespace()),
+        TokenScopedQuote(token_alias="", quote=usage_quote().quote),
+    ],
+)
+def test_malformed_fresh_quote_wrapper_releases_without_attribute_error(
+    db_session: Session,
+    billing_service: BillingService,
+    malformed_wrapper: object,
+) -> None:
+    child = reserve_child(billing_service)
+
+    outcome = billing_service.replace_job_quote(
+        child.id,
+        malformed_wrapper,
+        expected_quote_id=child.quote_id,
+    )
+
+    job = billing_service.load_job(child.id)
+    hold = db_session.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
+    assert outcome == "provider_pricing_unavailable_no_charge"
+    assert job.status == "provider_pricing_unavailable_no_charge"
+    assert job.quote_id == child.quote_id
+    assert hold is not None and hold.status == "released"
+    assert db_session.scalar(
+        select(func.count(WalletEntry.id)).where(WalletEntry.source_id == child.id)
+    ) == 0
 
 
 def test_valid_quote_with_changed_route_metadata_is_rejected_without_release(
@@ -949,7 +1016,9 @@ def test_valid_quote_with_changed_route_metadata_is_rejected_without_release(
     )
 
     with pytest.raises(InvalidBillingState, match="route"):
-        billing_service.replace_job_quote(child.id, changed)
+        billing_service.replace_job_quote(
+            child.id, changed, expected_quote_id=child.quote_id
+        )
     hold = db_session.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
     assert hold is not None and hold.status == "active"
     assert billing_service.load_job(child.id).quote_id == child.quote_id
@@ -1000,6 +1069,140 @@ def test_undeliverable_sync_call_binds_reference_releases_and_keeps_late_receipt
     assert db_session.scalar(
         select(func.count(WalletEntry.id)).where(WalletEntry.source_id == child.id)
     ) == 0
+    before_idempotent_retry = billing_graph_snapshot(db_session, child.id)
+    billing_service.fail_undeliverable_sync_call(
+        child.id, reference_type="request", reference_id=request_id
+    )
+    assert billing_graph_snapshot(db_session, child.id) == before_idempotent_retry
+
+
+def billing_graph_snapshot(db: Session, job_id: str) -> tuple[object, ...]:
+    db.expire_all()
+    job = db.get(GenerationJob, job_id)
+    hold = db.scalar(select(WalletHold).where(WalletHold.job_id == job_id))
+    receipt = db.scalar(select(CostReceipt).where(CostReceipt.job_id == job_id))
+    wallet = db.scalar(
+        select(WalletAccount).where(WalletAccount.user_id == job.user_id)
+    )
+    snapshot = (
+        job.status,
+        job.provider_reference_type,
+        job.provider_reference_id,
+        job.result_locator,
+        job.result_sha256,
+        job.result_staged,
+        job.result_visible,
+        hold.status,
+        hold.amount_units,
+        hold.reason,
+        wallet.balance_units,
+        wallet.held_units,
+        receipt.status if receipt is not None else None,
+        receipt.raw_sha256 if receipt is not None else None,
+        db.scalar(
+            select(func.count(WalletEntry.id)).where(WalletEntry.source_id == job_id)
+        ),
+    )
+    db.commit()
+    return snapshot
+
+
+@pytest.mark.parametrize(
+    "settlement_state",
+    ["result_pending", "payment_required", "staged", "refunded"],
+)
+def test_undeliverable_sync_rejects_any_post_settlement_or_staged_state_unchanged(
+    db_session: Session,
+    billing_service: BillingService,
+    artifact_store: ArtifactStore,
+    settlement_state: str,
+) -> None:
+    child = reserve_text_child(billing_service)
+    request_id = "20260712010203000000000" + "B" * 16
+    billing_service.bind_provider_reference(child.id, "request", request_id)
+    if settlement_state in {"staged", "payment_required"}:
+        artifact = artifact_store.add(
+            locator=f"hidden://{child.id}/text-result.json",
+            source_reference=request_id,
+            capability="text",
+        )
+        billing_service.stage_result(child.id, artifact.locator, artifact.sha256)
+    if settlement_state == "result_pending":
+        billing_service.settle_job(
+            child.id,
+            settled_receipt(
+                request_id,
+                reference_type="request",
+                model="text-model",
+            ),
+        )
+    elif settlement_state == "payment_required":
+        billing_service.settle_job(
+            child.id,
+            settled_receipt(
+                request_id,
+                reference_type="request",
+                model="text-model",
+                cost_micro=30_000_000,
+            ),
+        )
+    elif settlement_state == "refunded":
+        billing_service.settle_job(
+            child.id,
+            settled_receipt(
+                request_id,
+                reference_type="request",
+                model="text-model",
+                status="refunded",
+                cost_micro=0,
+            ),
+        )
+    before = billing_graph_snapshot(db_session, child.id)
+
+    with pytest.raises(InvalidBillingState):
+        billing_service.fail_undeliverable_sync_call(
+            child.id, reference_type="request", reference_id=request_id
+        )
+
+    assert billing_graph_snapshot(db_session, child.id) == before
+
+
+def test_undeliverable_sync_rejects_reserved_job_with_stored_receipt_unchanged(
+    db_session: Session,
+    billing_service: BillingService,
+) -> None:
+    child = reserve_text_child(billing_service)
+    request_id = "20260712010203000000000" + "C" * 16
+    billing_service.bind_provider_reference(child.id, "request", request_id)
+    raw = '{"recovered":"settled"}'
+    db_session.add(
+        CostReceipt(
+            id=uuid.uuid4().hex,
+            job_id=child.id,
+            reference_type="request",
+            reference_id=request_id,
+            status="settled",
+            model="text-model",
+            quota=1_550_000,
+            refunded_quota=0,
+            quota_per_unit=Decimal("500000.5"),
+            pricing_version="sha256:pricing-v1",
+            cost_currency="USD",
+            cost_amount_micro=3_100_000,
+            settled_at=NOW,
+            raw_canonical_json=raw,
+            raw_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        )
+    )
+    db_session.commit()
+    before = billing_graph_snapshot(db_session, child.id)
+
+    with pytest.raises(InvalidBillingState, match="receipt"):
+        billing_service.fail_undeliverable_sync_call(
+            child.id, reference_type="request", reference_id=request_id
+        )
+
+    assert billing_graph_snapshot(db_session, child.id) == before
 
 
 def test_parent_and_sibling_funds_results_and_terminal_states_are_isolated(
@@ -1096,6 +1299,7 @@ def seed_postgres_child(
     *,
     suffix: str,
     stage: bool,
+    bind_reference: bool = True,
 ) -> tuple[str, str, StagedArtifact]:
     user_id = f"u{suffix}"
     project_id = f"p{suffix}"
@@ -1145,12 +1349,14 @@ def seed_postgres_child(
             ),
         )
         task_id = f"task_{suffix.zfill(32)}"
-        service.bind_provider_reference(child.id, "task", task_id)
+        if bind_reference:
+            service.bind_provider_reference(child.id, "task", task_id)
         artifact = artifact_store.add(
             locator=f"hidden://{child.id}/pg-result.mp4",
             source_reference=task_id,
         )
         if stage:
+            assert bind_reference
             service.stage_result(child.id, artifact.locator, artifact.sha256)
         return child.id, task_id, artifact
 
@@ -1280,3 +1486,214 @@ def test_postgres_topup_serializes_with_payment_required_retry(
         assert db.scalar(
             select(func.count(WalletEntry.id)).where(WalletEntry.source_id == child_id)
         ) == 1
+
+
+def test_postgres_same_old_quote_allows_one_concurrent_replacement(
+    postgres_engine: Engine,
+) -> None:
+    artifacts = ArtifactStore()
+    child_id, _task_id, _artifact = seed_postgres_child(
+        postgres_engine,
+        artifacts,
+        suffix="804",
+        stage=False,
+        bind_reference=False,
+    )
+    with Session(postgres_engine) as db:
+        expected_quote_id = db.get(GenerationJob, child_id).quote_id
+    fresh_quotes = (
+        usage_quote(
+            quote_id="uq_00000000000000000000000000000804",
+            cost_micro=2_000_000,
+        ),
+        usage_quote(
+            quote_id="uq_00000000000000000000000000001804",
+            cost_micro=3_000_000,
+        ),
+    )
+
+    def replace(index: int):
+        try:
+            with Session(postgres_engine, expire_on_commit=False) as db:
+                outcome = BillingService(
+                    db, service_settings(), artifacts.inspect
+                ).replace_job_quote(
+                    child_id,
+                    fresh_quotes[index],
+                    expected_quote_id=expected_quote_id,
+                )
+                return outcome, index
+        except InvalidBillingState as exc:
+            assert "expected quote" in str(exc)
+            return "stale", index
+
+    barrier = Barrier(2)
+
+    def synchronized(index: int):
+        barrier.wait(timeout=10)
+        return replace(index)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(synchronized, range(2)))
+    assert sorted(outcome for outcome, _index in outcomes) == ["ready", "stale"]
+    winner = next(index for outcome, index in outcomes if outcome == "ready")
+    with Session(postgres_engine) as db:
+        job = db.get(GenerationJob, child_id)
+        hold = db.scalar(select(WalletHold).where(WalletHold.job_id == child_id))
+        assert job is not None and job.quote_id == fresh_quotes[winner].quote.quote_id
+        assert hold is not None and hold.amount_units == provider_micro_to_charge_units(
+            fresh_quotes[winner].quote.estimated_cost_amount_micro,
+            15_000,
+        )
+
+
+def test_postgres_same_fresh_quote_race_maps_unique_loser_to_domain_error(
+    postgres_engine: Engine,
+) -> None:
+    artifacts = ArtifactStore()
+    suffix = "805"
+    user_id = f"u{suffix}"
+    project_id = f"p{suffix}"
+    with Session(postgres_engine, expire_on_commit=False) as db:
+        db.add(
+            User(
+                id=user_id,
+                email="billing-pg-805@example.com",
+                password_hash="hash",
+                role="user",
+                status="active",
+            )
+        )
+        db.flush()
+        db.add_all(
+            [
+                ProjectRecord(
+                    id=project_id,
+                    owner_user_id=user_id,
+                    title="PostgreSQL quote uniqueness",
+                    mode="short_drama",
+                    project_type="single_video",
+                ),
+                WalletAccount(
+                    id=f"w{suffix}",
+                    user_id=user_id,
+                    balance_units=40_000_000,
+                    held_units=0,
+                ),
+                BillingSetting(id=1, multiplier_bps=15_000, version=0),
+            ]
+        )
+        db.commit()
+        service = BillingService(
+            db, service_settings(), artifacts.inspect, now=lambda: NOW
+        )
+        jobs = (
+            service.reserve_provider_call(
+                user_id=user_id,
+                project_id=project_id,
+                parent_job_id=None,
+                capability="video",
+                operation="shot:pg-unique-1",
+                provider_method="POST",
+                provider_route="/v1/videos",
+                quote=usage_quote(
+                    quote_id="uq_00000000000000000000000000000805",
+                    cost_micro=2_000_000,
+                ),
+            ),
+            service.reserve_provider_call(
+                user_id=user_id,
+                project_id=project_id,
+                parent_job_id=None,
+                capability="video",
+                operation="shot:pg-unique-2",
+                provider_method="POST",
+                provider_route="/v1/videos",
+                quote=usage_quote(
+                    quote_id="uq_00000000000000000000000000001805",
+                    cost_micro=3_000_000,
+                ),
+            ),
+        )
+        job_ids = tuple(job.id for job in jobs)
+        expected_quote_ids = tuple(job.quote_id for job in jobs)
+    fresh = usage_quote(
+        quote_id="uq_00000000000000000000000000002805",
+        cost_micro=4_000_000,
+    )
+    lookup_barrier = Barrier(2)
+
+    def synchronize_duplicate_lookup(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(statement.lower().split())
+        if (
+            "from generation_jobs" in normalized
+            and "generation_jobs.quote_id =" in normalized
+            and "generation_jobs.id !=" in normalized
+        ):
+            lookup_barrier.wait(timeout=10)
+
+    def replace(index: int) -> tuple[str, int]:
+        try:
+            with Session(postgres_engine, expire_on_commit=False) as db:
+                outcome = BillingService(
+                    db, service_settings(), artifacts.inspect
+                ).replace_job_quote(
+                    job_ids[index],
+                    fresh,
+                    expected_quote_id=expected_quote_ids[index],
+                )
+                return outcome, index
+        except InvalidBillingState as exc:
+            assert str(exc) == "provider quote is already bound"
+            return "domain_error", index
+        except IntegrityError:
+            return "raw_integrity_error", index
+
+    event.listen(postgres_engine, "after_cursor_execute", synchronize_duplicate_lookup)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(replace, range(2)))
+    finally:
+        event.remove(
+            postgres_engine, "after_cursor_execute", synchronize_duplicate_lookup
+        )
+
+    assert sorted(outcome for outcome, _index in outcomes) == [
+        "domain_error",
+        "ready",
+    ]
+    winner = next(index for outcome, index in outcomes if outcome == "ready")
+    loser = 1 - winner
+    with Session(postgres_engine) as db:
+        durable_jobs = tuple(db.get(GenerationJob, job_id) for job_id in job_ids)
+        durable_holds = tuple(
+            db.scalar(select(WalletHold).where(WalletHold.job_id == job_id))
+            for job_id in job_ids
+        )
+        assert durable_jobs[winner].quote_id == fresh.quote.quote_id
+        assert (
+            durable_jobs[winner].quote_estimated_provider_cost_micro
+            == fresh.quote.estimated_cost_amount_micro
+        )
+        assert durable_holds[winner].amount_units == 6_000_000
+        assert durable_jobs[loser].quote_id == expected_quote_ids[loser]
+        assert durable_jobs[loser].quote_estimated_provider_cost_micro == (
+            2_000_000 if loser == 0 else 3_000_000
+        )
+        assert durable_holds[loser].amount_units == (
+            3_000_000 if loser == 0 else 4_500_000
+        )
+        assert all(job.status == "reserved" for job in durable_jobs)
+        assert all(hold.status == "active" for hold in durable_holds)
+        wallet = db.scalar(
+            select(WalletAccount).where(WalletAccount.user_id == user_id)
+        )
+        assert wallet is not None
+        assert wallet.held_units == sum(hold.amount_units for hold in durable_holds)

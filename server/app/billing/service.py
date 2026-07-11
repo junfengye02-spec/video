@@ -26,6 +26,7 @@ from server.app.provider.newapi import (
     TokenScopedQuote,
     UsageQuote,
     UsageReceipt,
+    _validate_quote_id,
     _validate_request_id,
     _validate_task_id,
 )
@@ -159,6 +160,7 @@ def _validate_quote(
     provider_method: str,
     provider_route: str,
     now: datetime,
+    enforce_quote_context: bool = True,
 ) -> UsageQuote:
     if provider_method != "POST":
         raise InvalidBillingState("invalid provider method")
@@ -206,8 +208,11 @@ def _validate_quote(
         or quote.quota_per_unit <= 0
         or type(quote.expires_at) is not int
         or not ratios_are_valid
-        or quote.relay_format != expected_format
-        or quote.fixed_group != f"openmontage-{capability}"
+        or (enforce_quote_context and quote.relay_format != expected_format)
+        or (
+            enforce_quote_context
+            and quote.fixed_group != f"openmontage-{capability}"
+        )
         or quote_expires_at <= now
         or len(scoped_quote.token_alias) > 64
     ):
@@ -513,9 +518,17 @@ class BillingService:
             raise
 
     def replace_job_quote(
-        self, job_id: str, fresh_quote: TokenScopedQuote
+        self,
+        job_id: str,
+        fresh_quote: TokenScopedQuote,
+        *,
+        expected_quote_id: str,
     ) -> str:
         try:
+            try:
+                _validate_quote_id(expected_quote_id)
+            except ValueError:
+                raise InvalidBillingState("invalid expected quote identifier") from None
             job = self.db.scalar(
                 select(GenerationJob)
                 .where(GenerationJob.id == job_id)
@@ -523,38 +536,13 @@ class BillingService:
             )
             if job is None or not job.chargeable:
                 raise InvalidBillingState("billing job not found")
+            if job.quote_id != expected_quote_id:
+                raise InvalidBillingState("expected quote does not match current job")
             if job.status == "provider_pricing_unavailable_no_charge":
                 self.db.commit()
                 return "provider_pricing_unavailable_no_charge"
             if job.status not in {"reserved", "payment_required_quote"}:
                 raise InvalidBillingState("quote cannot be replaced in current state")
-            if (
-                type(fresh_quote.token_alias) is str
-                and fresh_quote.token_alias
-                and fresh_quote.token_alias != job.token_alias
-            ):
-                raise InvalidBillingState("fresh quote token alias changed")
-            if (
-                type(fresh_quote.quote.model) is str
-                and fresh_quote.quote.model
-                and fresh_quote.quote.model != job.model
-            ):
-                raise InvalidBillingState("fresh quote model changed")
-            expected_format = _CAPABILITY_ROUTES.get(job.capability, {}).get(
-                job.provider_route
-            )
-            if (
-                type(fresh_quote.quote.relay_format) is str
-                and fresh_quote.quote.relay_format
-                and fresh_quote.quote.relay_format != expected_format
-            ):
-                raise InvalidBillingState("fresh quote provider route changed")
-            if (
-                type(fresh_quote.quote.fixed_group) is str
-                and fresh_quote.quote.fixed_group
-                and fresh_quote.quote.fixed_group != f"openmontage-{job.capability}"
-            ):
-                raise InvalidBillingState("fresh quote capability group changed")
             try:
                 provider_quote = _validate_quote(
                     fresh_quote,
@@ -562,6 +550,7 @@ class BillingService:
                     provider_method=job.provider_method,
                     provider_route=job.provider_route,
                     now=self._now(),
+                    enforce_quote_context=False,
                 )
             except ProviderPricingUnavailable:
                 release_hold(
@@ -571,6 +560,17 @@ class BillingService:
                 job.result_visible = False
                 self.db.commit()
                 return "provider_pricing_unavailable_no_charge"
+            if fresh_quote.token_alias != job.token_alias:
+                raise InvalidBillingState("fresh quote token alias changed")
+            if provider_quote.model != job.model:
+                raise InvalidBillingState("fresh quote model changed")
+            expected_format = _CAPABILITY_ROUTES.get(job.capability, {}).get(
+                job.provider_route
+            )
+            if provider_quote.relay_format != expected_format:
+                raise InvalidBillingState("fresh quote provider route changed")
+            if provider_quote.fixed_group != f"openmontage-{job.capability}":
+                raise InvalidBillingState("fresh quote capability group changed")
             duplicate = self.db.scalar(
                 select(GenerationJob.id).where(
                     GenerationJob.quote_id == provider_quote.quote_id,
@@ -597,6 +597,9 @@ class BillingService:
                 result = "ready"
             self.db.commit()
             return result
+        except IntegrityError:
+            self.db.rollback()
+            raise InvalidBillingState("provider quote is already bound") from None
         except Exception:
             self.db.rollback()
             raise
@@ -828,6 +831,25 @@ class BillingService:
                 return
             if job.status in _TERMINALS:
                 raise InvalidBillingState("cannot transition a terminal billing job")
+            if job.status not in {
+                "reserved",
+                "submitted_ambiguous",
+                "reference_recovery_pending",
+            }:
+                raise InvalidBillingState("invalid undeliverable sync predecessor")
+            if job.result_staged:
+                raise InvalidBillingState(
+                    "staged provider result cannot become undeliverable no-charge"
+                )
+            stored_receipt = self.db.scalar(
+                select(CostReceipt)
+                .where(CostReceipt.job_id == job.id)
+                .with_for_update()
+            )
+            if stored_receipt is not None:
+                raise InvalidBillingState(
+                    "received provider receipt cannot become undeliverable no-charge"
+                )
             if job.capability not in {"text", "image"} or reference_type != "request":
                 raise InvalidBillingState("undeliverable reference does not match capability")
             try:
