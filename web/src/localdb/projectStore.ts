@@ -41,6 +41,11 @@ async function runTransaction<T>(tx: IDBTransaction, work: () => Promise<T>): Pr
     await done;
     return result;
   } catch (error) {
+    try {
+      tx.abort();
+    } catch {
+      // The transaction may already have completed or aborted.
+    }
     await done.catch(() => undefined);
     throw error;
   }

@@ -246,6 +246,59 @@ describe("projectStore", () => {
     expect(await getRecord("mediaOperations", sessionId)).toBeNull();
   });
 
+  it("aborts every queued final-import write when a later media put throws", async () => {
+    await saveProjectSnapshot(snapshot("existing", "Existing"));
+    const sessionId = await projectImportApi.beginProjectImport("atomic-failure");
+    const refs: LocalMediaRef[] = [];
+    for (const index of [0, 1]) {
+      const writer = await beginMediaWrite({
+        projectId: "atomic-failure",
+        importSessionId: sessionId,
+        sourcePath: `assets/${index}.mp4`,
+        contentType: "video/mp4",
+        sizeBytes: 1,
+      });
+      await writer.write(new Uint8Array([index]));
+      refs.push(await writer.commit());
+    }
+
+    const originalPut = IDBObjectStore.prototype.put;
+    const failure = new Error("late media commit failed");
+    let committedMediaPuts = 0;
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value,
+      key,
+    ) {
+      if (
+        this.name === "media" &&
+        (value as LocalMediaRecord).state === "committed" &&
+        ++committedMediaPuts === 2
+      ) {
+        throw failure;
+      }
+      return originalPut.call(this, value, key as IDBValidKey | undefined);
+    });
+
+    await expect(projectImportApi.commitImportedProject(
+      snapshot("atomic-failure", "Atomic Failure", { finalPath: refs[0] }),
+      sessionId,
+      { overwrite: false, leaseOwner: sessionId },
+    )).rejects.toBe(failure);
+
+    expect(await loadProjectSnapshot("atomic-failure")).toBeNull();
+    expect((await loadRecentProjectSnapshot())?.id).toBe("existing");
+    for (const ref of refs) {
+      const mediaId = ref.split("/").pop()!;
+      expect(await getRecord<LocalMediaRecord>("media", mediaId)).toMatchObject({
+        state: "staged",
+        importSessionId: sessionId,
+      });
+    }
+    expect(await getRecord<MediaJournalRecord>("mediaOperations", sessionId))
+      .toMatchObject({ state: "cleanup_due" });
+  });
+
   it("queues the exact import session for cleanup when the final conflict check loses", async () => {
     const sessionId = await projectImportApi.beginProjectImport("raced");
     const writer = await beginMediaWrite({
