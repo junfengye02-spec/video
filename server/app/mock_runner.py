@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from server.app.consistency import apply_consistency_scores, evaluate_storyboard_consistency
@@ -238,4 +238,4 @@ def _title_from_prompt(prompt: str) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()

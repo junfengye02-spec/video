@@ -6,16 +6,24 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event, Lock
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
 os.environ.setdefault("AUTH_HMAC_SECRET", "x" * 32)
 
+from server.app.auth.models import User
+from server.app.main import _project_mutation
 from server.app.projects.models import ProjectRecord
+from server.app.projects.repository import ProjectRepository
+from server.app.storage import ProjectMutationJournal, WorkbenchStore
 from server.manage import run_manage
 from server.tests.test_project_ownership import (
     ALICE_ID,
@@ -457,6 +465,178 @@ def test_postgres_16_migration_blocks_unowned_projects(tmp_path):
         assert check.returncode == 0, check.stderr
         assert "No new upgrade operations detected" in check.stdout
     finally:
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_owned_test_schema(connection, schema_name)
+        admin_engine.dispose()
+
+
+def test_postgres_project_lock_keeps_failed_restore_before_later_commit(
+    tmp_path, monkeypatch
+):
+    database_url = os.getenv("OPENMONTAGE_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("OPENMONTAGE_TEST_POSTGRES_URL is not configured")
+
+    schema_name = _new_disposable_schema_name()
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with admin_engine.begin() as connection:
+            _create_owned_test_schema(
+                connection,
+                acknowledgement=os.getenv("OPENMONTAGE_DESTRUCTIVE_TEST_ACK"),
+                schema_name=schema_name,
+            )
+        schema_created = True
+        scoped_database_url = _database_url_for_schema(database_url, schema_name)
+        schema_engine = create_engine(scoped_database_url)
+
+        env = os.environ.copy()
+        env["DATABASE_URL"] = scoped_database_url
+        env.setdefault("AUTH_HMAC_SECRET", "x" * 32)
+        migrated = _run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"], env=env
+        )
+        assert migrated.returncode == 0, migrated.stderr
+
+        owner_id = "a" * 32
+        project_id = "11111111111141118111111111111111"
+        with Session(schema_engine) as seed_db:
+            seed_db.add(
+                User(
+                    id=owner_id,
+                    email="postgres-concurrency@example.com",
+                    password_hash="unused",
+                    role="user",
+                    status="active",
+                )
+            )
+            seed_db.add(
+                ProjectRecord(
+                    id=project_id,
+                    owner_user_id=owner_id,
+                    title="PostgreSQL concurrency",
+                    mode="short_drama",
+                    project_type="single_video",
+                )
+            )
+            seed_db.commit()
+
+        store = WorkbenchStore(projects_root=tmp_path / "postgres-projects")
+        store.write_artifact(project_id, "state.json", {"value": "initial"})
+        b_attempting = Event()
+        b_acquired = Event()
+        b_committed = Event()
+        schedule: list[str] = []
+        schedule_lock = Lock()
+        restore_observations: list[tuple[str, bool, bool]] = []
+
+        def record(step: str) -> None:
+            with schedule_lock:
+                schedule.append(step)
+
+        original_restore = ProjectMutationJournal.restore
+
+        def observed_restore(journal: ProjectMutationJournal) -> None:
+            record("a_restore_started")
+            restore_observations.append(
+                ("before", b_acquired.is_set(), b_committed.is_set())
+            )
+            original_restore(journal)
+            restore_observations.append(
+                ("after", b_acquired.is_set(), b_committed.is_set())
+            )
+            record("a_restore_finished")
+            assert restore_observations == [
+                ("before", False, False),
+                ("after", False, False),
+            ]
+
+        monkeypatch.setattr(ProjectMutationJournal, "restore", observed_restore)
+
+        def mutate_b() -> None:
+            with Session(schema_engine) as db_b:
+                record("b_attempting")
+                b_attempting.set()
+                ProjectRepository(db_b).require_owned_for_update(project_id, owner_id)
+                record("b_acquired")
+                b_acquired.set()
+                with _project_mutation(
+                    db=db_b,
+                    workbench=store,
+                    project_id=project_id,
+                    operation="postgres_b",
+                    changed_paths=["artifacts/state.json"],
+                    failure_detail="B mutation failed",
+                ):
+                    record("b_journal_started")
+                    store.write_artifact(project_id, "state.json", {"value": "B"})
+                    record("b_written")
+                record("b_committed")
+                b_committed.set()
+
+        with Session(schema_engine) as db_a:
+            original_a_rollback = db_a.rollback
+
+            def observed_a_rollback() -> None:
+                record("a_rollback_started")
+                original_a_rollback()
+
+            monkeypatch.setattr(db_a, "rollback", observed_a_rollback)
+            ProjectRepository(db_a).require_owned_for_update(project_id, owner_id)
+            record("a_locked")
+            with pytest.raises(HTTPException, match="A mutation failed"):
+                with _project_mutation(
+                    db=db_a,
+                    workbench=store,
+                    project_id=project_id,
+                    operation="postgres_a",
+                    changed_paths=["artifacts/state.json"],
+                    failure_detail="A mutation failed",
+                ):
+                    record("a_journal_started")
+                    store.write_artifact(project_id, "state.json", {"value": "A"})
+                    record("a_written")
+                    b_future = executor.submit(mutate_b)
+                    assert b_attempting.wait(timeout=5)
+                    acquired_while_a_held_lock = b_acquired.wait(timeout=0.25)
+                    committed_while_a_held_lock = b_committed.is_set()
+                    raise RuntimeError("force A restore")
+
+            b_future.result(timeout=5)
+
+        assert store.read_artifact(project_id, "state.json") == {"value": "B"}
+        assert acquired_while_a_held_lock is False
+        assert committed_while_a_held_lock is False
+        assert restore_observations == [
+            ("before", False, False),
+            ("after", False, False),
+        ]
+        assert schedule == [
+            "a_locked",
+            "a_journal_started",
+            "a_written",
+            "b_attempting",
+            "a_restore_started",
+            "a_restore_finished",
+            "a_rollback_started",
+            "b_acquired",
+            "b_journal_started",
+            "b_written",
+            "b_committed",
+        ]
+        assert not (store.projects_root / ".recovery").exists()
+        store.assert_project_available(project_id)
+        with Session(schema_engine) as verify_db:
+            project = ProjectRepository(verify_db).require_owned(project_id, owner_id)
+            assert project.title == "PostgreSQL concurrency"
+    finally:
+        executor.shutdown(wait=True)
         if schema_engine is not None:
             schema_engine.dispose()
         if schema_created:

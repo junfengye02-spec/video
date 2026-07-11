@@ -1,15 +1,30 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import shutil
+import tempfile
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 from server.app.models import Project
 from server.app.projects.schemas import canonical_project_id
+
+
+logger = logging.getLogger("server.app.project_recovery")
+_OPERATION_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_OPERATION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_RECOVERY_STATES = {"active", "restoring", "recovery_failed", "recovered", "committed"}
+_HEALTHY_RECOVERY_STATES = {"committed", "recovered"}
+
+
+class ProjectRecoveryRequired(RuntimeError):
+    pass
 
 
 class WorkbenchStore:
@@ -38,8 +53,44 @@ class WorkbenchStore:
         if workspace.exists():
             _remove_tree(workspace, root)
 
-    def checkpoint_project_workspace(self, project_id: str) -> ProjectWorkspaceCheckpoint:
-        return ProjectWorkspaceCheckpoint(self, project_id)
+    def begin_project_mutation(
+        self,
+        project_id: str,
+        *,
+        operation: str,
+        changed_paths: list[str],
+        new_workspace: bool = False,
+    ) -> ProjectMutationJournal:
+        return ProjectMutationJournal(
+            self,
+            project_id,
+            operation=operation,
+            changed_paths=changed_paths,
+            new_workspace=new_workspace,
+        )
+
+    def assert_project_available(self, project_id: str) -> None:
+        canonical_id = canonical_project_id(project_id)
+        recovery_root = self.projects_root.resolve() / ".recovery"
+        if not recovery_root.exists():
+            return
+        if _is_link_or_junction(recovery_root) or not recovery_root.is_dir():
+            raise ProjectRecoveryRequired("Project recovery state is unavailable")
+        project_recovery = recovery_root / canonical_id
+        if not project_recovery.exists():
+            return
+        if _is_link_or_junction(project_recovery) or not project_recovery.is_dir():
+            raise ProjectRecoveryRequired("Project recovery state is unavailable")
+        for operation_dir in project_recovery.iterdir():
+            if _is_link_or_junction(operation_dir) or not operation_dir.is_dir():
+                raise ProjectRecoveryRequired("Project recovery state is unavailable")
+            if not _valid_recovery_operation_tree(operation_dir):
+                raise ProjectRecoveryRequired("Project recovery state is unavailable")
+            marker = _read_marker(operation_dir / "marker.json")
+            if not _valid_marker(marker, canonical_id, operation_dir.name):
+                raise ProjectRecoveryRequired("Project recovery state is unavailable")
+            if marker.get("state") not in _HEALTHY_RECOVERY_STATES:
+                raise ProjectRecoveryRequired("Project recovery is required")
 
     def artifact_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "artifacts"
@@ -47,10 +98,7 @@ class WorkbenchStore:
     def write_artifact(self, project_id: str, name: str, data: dict[str, Any]) -> Path:
         self._ensure_project_dirs(project_id)
         path = self.artifact_dir(project_id) / name
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _atomic_write_json(path, data)
         return path
 
     def read_artifact(self, project_id: str, name: str) -> dict[str, Any] | None:
@@ -89,66 +137,236 @@ class WorkbenchStore:
         return root, workspace
 
 
-class ProjectWorkspaceCheckpoint:
-    def __init__(self, store: WorkbenchStore, project_id: str):
+class ProjectMutationJournal:
+    def __init__(
+        self,
+        store: WorkbenchStore,
+        project_id: str,
+        *,
+        operation: str,
+        changed_paths: list[str],
+        new_workspace: bool,
+    ):
+        if _OPERATION_PATTERN.fullmatch(operation) is None:
+            raise ValueError("Project mutation operation is invalid")
         self._store = store
         self._project_id = canonical_project_id(project_id)
+        self.operation_id = uuid.uuid4().hex
+        self.operation = operation
         self._root, self._workspace = store._validated_workspace_path(project_id)
-        self._existed = self._workspace.exists()
-        self._backup: Path | None = None
+        self._new_workspace = new_workspace
         self._closed = False
-        if self._existed:
-            _ensure_tree_has_no_links(self._workspace)
-            self._backup = self._root / (
-                f".openmontage-rollback-{self._project_id}-{uuid.uuid4().hex}"
+        if new_workspace and self._workspace.exists():
+            raise ValueError("New project workspace already exists")
+        if not new_workspace and not self._workspace.is_dir():
+            raise ValueError("Project workspace path is invalid")
+
+        self._operation_dir = self._create_operation_dir()
+        self._entries: list[dict[str, Any]] = []
+        self._created_dirs: set[str] = set()
+        self._write_marker("active")
+        try:
+            for changed_path in sorted(set(changed_paths)):
+                self._capture_path(changed_path)
+            _atomic_write_json(
+                self._operation_dir / "manifest.json",
+                {
+                    "project_id": self._project_id,
+                    "operation_id": self.operation_id,
+                    "operation": self.operation,
+                    "new_workspace": self._new_workspace,
+                    "entries": self._entries,
+                    "created_dirs": sorted(self._created_dirs),
+                },
             )
+        except Exception:
             try:
-                shutil.copytree(self._workspace, self._backup, symlinks=True)
-                _ensure_tree_has_no_links(self._backup)
+                self._cleanup()
             except Exception:
-                if self._backup.exists() and not _is_link_or_junction(self._backup):
-                    try:
-                        _remove_tree(self._backup, self._root)
-                    except Exception:
-                        pass
-                raise
+                logger.error(
+                    "project recovery journal initialization cleanup failed project_id=%s operation_id=%s",
+                    self._project_id,
+                    self.operation_id,
+                )
+            raise
 
     def restore(self) -> None:
         if self._closed:
             return
-        if not self._existed:
-            self._store.delete_project_workspace(self._project_id)
-            self._closed = True
-            return
-
-        self._store._validated_workspace_path(self._project_id)
-        if self._backup is None or not self._backup.is_dir():
-            raise ValueError("Project workspace checkpoint is unavailable")
-        _ensure_tree_has_no_links(self._backup)
-        quarantine = self._root / (
-            f".openmontage-failed-{self._project_id}-{uuid.uuid4().hex}"
-        )
-        self._workspace.replace(quarantine)
         try:
-            self._backup.replace(self._workspace)
+            self._store._validated_workspace_path(self._project_id)
+            self._write_marker("restoring")
+            if self._new_workspace:
+                self._store.delete_project_workspace(self._project_id)
+            else:
+                for entry in self._entries:
+                    self._restore_entry(entry)
+                for relative_dir in sorted(
+                    self._created_dirs,
+                    key=lambda value: len(PurePosixPath(value).parts),
+                    reverse=True,
+                ):
+                    directory = self._project_path(relative_dir)
+                    if directory.exists() and not any(directory.iterdir()):
+                        directory.rmdir()
+            self._write_marker("recovered")
         except Exception:
-            quarantine.replace(self._workspace)
+            try:
+                self._write_marker("recovery_failed")
+            except Exception:
+                pass
+            logger.error(
+                "project recovery failed project_id=%s operation_id=%s state=recovery_failed",
+                self._project_id,
+                self.operation_id,
+            )
             raise
-        self._backup = None
         self._closed = True
-        try:
-            _remove_tree(quarantine, self._root)
-        except Exception:
-            pass
+        self._cleanup()
 
-    def discard(self) -> None:
+    def complete(self) -> None:
         if self._closed:
             return
-        backup = self._backup
-        self._backup = None
+        self._write_marker("committed")
         self._closed = True
-        if backup is not None and backup.exists():
-            _remove_tree(backup, self._root)
+        self._cleanup()
+
+    def _create_operation_dir(self) -> Path:
+        recovery_root = self._root / ".recovery"
+        _ensure_controlled_directory(recovery_root, self._root)
+        project_recovery = recovery_root / self._project_id
+        _ensure_controlled_directory(project_recovery, recovery_root)
+        operation_dir = project_recovery / self.operation_id
+        operation_dir.mkdir()
+        return operation_dir
+
+    def _capture_path(self, relative_path: str) -> None:
+        normalized = _normalize_relative_path(relative_path)
+        destination = self._project_path(normalized)
+        parent = destination.parent
+        while parent != self._workspace:
+            if not parent.exists():
+                self._created_dirs.add(parent.relative_to(self._workspace).as_posix())
+            elif _is_link_or_junction(parent) or not parent.is_dir():
+                raise ValueError("Project workspace path is invalid")
+            parent = parent.parent
+
+        existed = destination.exists()
+        if destination.is_symlink() or _is_link_or_junction(destination):
+            raise ValueError("Project workspace path is invalid")
+        if existed and not destination.is_file():
+            raise ValueError("Project mutation paths must be files")
+        self._entries.append({"path": normalized, "existed": existed})
+        if existed:
+            backup = self._backup_path(normalized, create_parents=True)
+            shutil.copy2(destination, backup)
+
+    def _restore_entry(self, entry: dict[str, Any]) -> None:
+        destination = self._project_path(str(entry["path"]))
+        if entry["existed"]:
+            backup = self._backup_path(str(entry["path"]))
+            if not backup.is_file():
+                raise ValueError("Project recovery backup is unavailable")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.",
+                suffix=".restore",
+                dir=destination.parent,
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as temporary_handle:
+                    with backup.open("rb") as backup_handle:
+                        shutil.copyfileobj(backup_handle, temporary_handle)
+                    temporary_handle.flush()
+                    os.fsync(temporary_handle.fileno())
+                if _is_link_or_junction(temporary) or not temporary.is_file():
+                    raise ValueError("Project workspace path is invalid")
+                os.replace(temporary, destination)
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        elif destination.exists():
+            if _is_link_or_junction(destination) or not destination.is_file():
+                raise ValueError("Project workspace path is invalid")
+            destination.unlink()
+
+    def _project_path(self, relative_path: str) -> Path:
+        normalized = _normalize_relative_path(relative_path)
+        candidate = self._workspace.joinpath(*PurePosixPath(normalized).parts)
+        if self._workspace not in candidate.parents:
+            raise ValueError("Project workspace path is invalid")
+        parent = candidate.parent
+        while parent != self._workspace:
+            if parent.exists() and (_is_link_or_junction(parent) or not parent.is_dir()):
+                raise ValueError("Project workspace path is invalid")
+            parent = parent.parent
+        if _is_link_or_junction(candidate):
+            raise ValueError("Project workspace path is invalid")
+        return candidate
+
+    def _backup_path(self, relative_path: str, *, create_parents: bool = False) -> Path:
+        self._validate_operation_dir()
+        normalized = _normalize_relative_path(relative_path)
+        backup = self._operation_dir / "backups" / Path(
+            *PurePosixPath(normalized).parts
+        )
+        if self._operation_dir not in backup.parents:
+            raise ValueError("Project recovery path is invalid")
+        current = self._operation_dir
+        for part in backup.relative_to(self._operation_dir).parts[:-1]:
+            current = current / part
+            if not current.exists() and create_parents:
+                current.mkdir()
+            if _is_link_or_junction(current) or not current.is_dir():
+                raise ValueError("Project recovery path is invalid")
+        if _is_link_or_junction(backup):
+            raise ValueError("Project recovery path is invalid")
+        return backup
+
+    def _validate_operation_dir(self) -> None:
+        recovery_root = self._root / ".recovery"
+        project_recovery = recovery_root / self._project_id
+        if (
+            recovery_root.parent != self._root
+            or _is_link_or_junction(recovery_root)
+            or not recovery_root.is_dir()
+            or project_recovery.parent != recovery_root
+            or _is_link_or_junction(project_recovery)
+            or not project_recovery.is_dir()
+            or self._operation_dir.parent != project_recovery
+            or _is_link_or_junction(self._operation_dir)
+            or not self._operation_dir.is_dir()
+        ):
+            raise ValueError("Project recovery path is invalid")
+
+    def _write_marker(self, state: str) -> None:
+        self._validate_operation_dir()
+        _atomic_write_json(
+            self._operation_dir / "marker.json",
+            {
+                "project_id": self._project_id,
+                "operation_id": self.operation_id,
+                "operation": self.operation,
+                "state": state,
+            },
+        )
+
+    def _cleanup(self) -> None:
+        self._validate_operation_dir()
+        project_recovery = self._operation_dir.parent
+        recovery_root = project_recovery.parent
+        _remove_controlled_tree(self._operation_dir, project_recovery)
+        try:
+            project_recovery.rmdir()
+        except OSError:
+            return
+        try:
+            recovery_root.rmdir()
+        except OSError:
+            pass
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -178,5 +396,85 @@ def _remove_tree(path: Path, root: Path) -> None:
     shutil.rmtree(path)
 
 
+def _normalize_relative_path(value: str) -> str:
+    candidate = PurePosixPath(value.replace("\\", "/"))
+    if candidate.is_absolute() or not candidate.parts:
+        raise ValueError("Project mutation path is invalid")
+    if any(part in {"", ".", ".."} for part in candidate.parts):
+        raise ValueError("Project mutation path is invalid")
+    return candidate.as_posix()
+
+
+def _ensure_controlled_directory(path: Path, parent: Path) -> None:
+    if path.parent != parent:
+        raise ValueError("Project recovery path is invalid")
+    path.mkdir(exist_ok=True)
+    if _is_link_or_junction(path) or not path.is_dir():
+        raise ValueError("Project recovery path is invalid")
+
+
+def _remove_controlled_tree(path: Path, parent: Path) -> None:
+    if path.parent != parent or _is_link_or_junction(path):
+        raise ValueError("Project recovery path is invalid")
+    _ensure_tree_has_no_links(path)
+    shutil.rmtree(path)
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_marker(path: Path) -> dict[str, Any]:
+    if _is_link_or_junction(path) or not path.is_file():
+        return {"state": "invalid"}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"state": "invalid"}
+    return value if isinstance(value, dict) else {"state": "invalid"}
+
+
+def _valid_recovery_operation_tree(operation_dir: Path) -> bool:
+    try:
+        children = {child.name: child for child in operation_dir.iterdir()}
+        if set(children) - {"marker.json", "manifest.json", "backups"}:
+            return False
+        for name in ("marker.json", "manifest.json"):
+            child = children.get(name)
+            if child is None or _is_link_or_junction(child) or not child.is_file():
+                return False
+        backups = children.get("backups")
+        if backups is not None and (
+            _is_link_or_junction(backups) or not backups.is_dir()
+        ):
+            return False
+        _ensure_tree_has_no_links(operation_dir)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _valid_marker(marker: dict[str, Any], project_id: str, operation_id: str) -> bool:
+    if set(marker) != {"project_id", "operation_id", "operation", "state"}:
+        return False
+    return (
+        marker.get("project_id") == project_id
+        and marker.get("operation_id") == operation_id
+        and _OPERATION_ID_PATTERN.fullmatch(operation_id) is not None
+        and isinstance(marker.get("operation"), str)
+        and _OPERATION_PATTERN.fullmatch(marker["operation"]) is not None
+        and marker.get("state") in _RECOVERY_STATES
+    )
+
+
 def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()

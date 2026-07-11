@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
 
@@ -67,7 +67,7 @@ from server.app.request_validation import (
 )
 from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
 from server.app.storyboard_generator import generate_short_drama_storyboard
-from server.app.storage import WorkbenchStore
+from server.app.storage import ProjectRecoveryRequired, WorkbenchStore
 
 DEFAULT_TEXT_MODEL = "gpt-5.5"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
@@ -80,6 +80,19 @@ MAX_MULTIPART_FIELD_BYTES = 64 * 1024
 MAX_MULTIPART_FIELDS = 4
 MAX_MULTIPART_FILES = 1
 MAX_MULTIPART_REQUEST_BYTES = MAX_IMAGE_BYTES + MAX_MULTIPART_FIELD_BYTES
+WORKFLOW_ARTIFACT_PATHS = [
+    "artifacts/proposal_packet.json",
+    "artifacts/scene_plan.json",
+    "artifacts/asset_manifest.json",
+    "artifacts/edit_decisions.json",
+    "artifacts/continuity_plan.json",
+]
+STORYBOARD_ARTIFACT_PATHS = [
+    "artifacts/episode_storyboard.json",
+    "artifacts/series_bible.json",
+    "artifacts/asset_library.json",
+    "artifacts/consistency_report.json",
+]
 
 def sanitize_project_path(project_dir: Path, path_value: Any) -> str | None:
     if not isinstance(path_value, str) or not path_value.strip():
@@ -238,18 +251,34 @@ def _require_function_user(
 
 def _require_owned_user(
     project_id: str,
+    request: Request,
     current: CurrentUser = Depends(_require_function_user, scope="function"),
     db: Session = Depends(get_db, scope="function"),
 ) -> ProjectRecord:
-    return ProjectRepository(db).require_owned(project_id, current.id)
+    project = ProjectRepository(db).require_owned(project_id, current.id)
+    _require_project_available(request, project_id)
+    return project
 
 
 def _require_owned_csrf(
     project_id: str,
+    request: Request,
     current: CurrentUser = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> ProjectRecord:
-    return ProjectRepository(db).require_owned(project_id, current.id)
+    project = ProjectRepository(db).require_owned_for_update(project_id, current.id)
+    _require_project_available(request, project_id)
+    return project
+
+
+def _require_project_available(request: Request, project_id: str) -> None:
+    try:
+        request.app.state.store.assert_project_available(project_id)
+    except ProjectRecoveryRequired as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Project is unavailable pending recovery",
+        ) from exc
 
 
 @contextmanager
@@ -258,11 +287,19 @@ def _project_mutation(
     db: Session,
     workbench: WorkbenchStore,
     project_id: str,
+    operation: str,
+    changed_paths: list[str],
     failure_detail: str,
+    new_workspace: bool = False,
     preserve_http_error_writes: bool = False,
 ):
     try:
-        checkpoint = workbench.checkpoint_project_workspace(project_id)
+        journal = workbench.begin_project_mutation(
+            project_id,
+            operation=operation,
+            changed_paths=changed_paths,
+            new_workspace=new_workspace,
+        )
     except Exception:
         _rollback_quietly(db)
         raise HTTPException(status_code=500, detail=failure_detail) from None
@@ -270,24 +307,27 @@ def _project_mutation(
     try:
         yield
     except HTTPException:
-        _rollback_quietly(db)
         if preserve_http_error_writes:
-            _discard_checkpoint_quietly(checkpoint)
+            try:
+                journal.complete()
+            finally:
+                _rollback_quietly(db)
         else:
-            _restore_checkpoint_quietly(checkpoint)
+            _restore_then_rollback(journal, db, failure_detail)
         raise
     except Exception:
-        _rollback_quietly(db)
-        _restore_checkpoint_quietly(checkpoint)
+        _restore_then_rollback(journal, db, failure_detail)
         raise HTTPException(status_code=500, detail=failure_detail) from None
 
     try:
         db.commit()
     except Exception:
-        _rollback_quietly(db)
-        _restore_checkpoint_quietly(checkpoint)
+        _restore_then_rollback(journal, db, failure_detail)
         raise HTTPException(status_code=500, detail=failure_detail) from None
-    _discard_checkpoint_quietly(checkpoint)
+    try:
+        journal.complete()
+    except Exception:
+        raise HTTPException(status_code=500, detail=failure_detail) from None
 
 
 def _rollback_quietly(db: Session) -> None:
@@ -297,18 +337,13 @@ def _rollback_quietly(db: Session) -> None:
         pass
 
 
-def _restore_checkpoint_quietly(checkpoint) -> None:
+def _restore_then_rollback(journal, db: Session, failure_detail: str) -> None:
     try:
-        checkpoint.restore()
+        journal.restore()
     except Exception:
-        pass
-
-
-def _discard_checkpoint_quietly(checkpoint) -> None:
-    try:
-        checkpoint.discard()
-    except Exception:
-        pass
+        _rollback_quietly(db)
+        raise HTTPException(status_code=500, detail=failure_detail) from None
+    _rollback_quietly(db)
 
 
 def _local_schema_ref_target(
@@ -500,8 +535,16 @@ def create_app(
     def get_events() -> EventBus:
         return app.state.events
 
-    @app.post("/api/session/key")
-    def save_gateway_key(payload: KeySessionRequest) -> dict[str, Any]:
+    @app.post(
+        "/api/session/key",
+        openapi_extra=_json_request_openapi(KeySessionRequest),
+    )
+    async def save_gateway_key(
+        request: Request,
+        current: CurrentUser = Depends(require_csrf),
+    ) -> dict[str, Any]:
+        del current
+        payload = await parse_json_request(request, KeySessionRequest)
         env = key_environment(payload.video_key, payload.base_url)
         validation = validate_gateway_models(
             base_url=payload.base_url,
@@ -551,7 +594,10 @@ def create_app(
             db=db,
             workbench=workbench,
             project_id=project.id,
+            operation="create_draft",
+            changed_paths=[],
             failure_detail="Project creation failed",
+            new_workspace=True,
         ):
             series_bible = {
                 "title": payload.title,
@@ -611,7 +657,10 @@ def create_app(
             db=db,
             workbench=workbench,
             project_id=project.id,
+            operation="import",
+            changed_paths=[],
             failure_detail="Project import failed",
+            new_workspace=True,
         ):
             artifacts = payload.artifact_payloads()
             for filename, artifact in artifacts.items():
@@ -662,7 +711,10 @@ def create_app(
             db=db,
             workbench=workbench,
             project_id=project.id,
+            operation="create_short_drama",
+            changed_paths=[],
             failure_detail="Project creation failed",
+            new_workspace=True,
         ):
             continuity_plan = _default_continuity_plan(payload.project_type)
             _persist_storyboard_state(
@@ -728,6 +780,8 @@ def create_app(
             db=db,
             workbench=workbench,
             project_id=project_id,
+            operation="continuity",
+            changed_paths=WORKFLOW_ARTIFACT_PATHS,
             failure_detail="Project update failed",
         ):
             workbench.write_artifact(project_id, "continuity_plan.json", plan)
@@ -743,7 +797,7 @@ def create_app(
                     video_model=DEFAULT_VIDEO_MODEL,
                     continuity_plan=plan,
                 )
-            project.updated_at = datetime.now(UTC)
+            project.updated_at = datetime.now(timezone.utc)
         return {"project": _project_data(project), "continuity_plan": plan}
 
     @app.post(
@@ -760,32 +814,39 @@ def create_app(
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         if series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        with _project_mutation(
-            db=db,
-            workbench=workbench,
-            project_id=project_id,
-            failure_detail="Project update failed",
-        ):
-            async with _bounded_upload_form(request) as form:
-                kind = _form_text(form, "kind", max_length=32)
-                label = _form_text(form, "label", max_length=255)
-                description = _form_text(form, "description", default="", max_length=10_000)
-                prompt = _form_text(form, "prompt", default="", max_length=10_000)
-                upload = form.get("file")
-                if not isinstance(upload, UploadFile):
-                    raise HTTPException(status_code=422, detail="file is required")
-                if kind not in {"character", "scene", "prop"}:
-                    raise HTTPException(status_code=422, detail="Unsupported asset kind")
-                suffix = validate_upload_extension(upload.filename or "", IMAGE_EXTENSIONS)
-                asset_id = f"asset-{uuid.uuid4().hex}"
-                project_dir = workbench.project_dir(project_id)
-                output_path = safe_project_media_destination(
-                    project_dir,
-                    Path("assets") / "images" / kind,
-                    f"{asset_id}{suffix}",
-                )
+        async with _bounded_upload_form(request) as form:
+            kind = _form_text(form, "kind", max_length=32)
+            label = _form_text(form, "label", max_length=255)
+            description = _form_text(form, "description", default="", max_length=10_000)
+            prompt = _form_text(form, "prompt", default="", max_length=10_000)
+            upload = form.get("file")
+            if not isinstance(upload, UploadFile):
+                raise HTTPException(status_code=422, detail="file is required")
+            if kind not in {"character", "scene", "prop"}:
+                raise HTTPException(status_code=422, detail="Unsupported asset kind")
+            suffix = validate_upload_extension(upload.filename or "", IMAGE_EXTENSIONS)
+            asset_id = f"asset-{uuid.uuid4().hex}"
+            project_dir = workbench.project_dir(project_id)
+            output_path = safe_project_media_destination(
+                project_dir,
+                Path("assets") / "images" / kind,
+                f"{asset_id}{suffix}",
+            )
+            relative_path = relative_project_path(project_dir, output_path)
+            with _project_mutation(
+                db=db,
+                workbench=workbench,
+                project_id=project_id,
+                operation="asset_upload",
+                changed_paths=[
+                    *WORKFLOW_ARTIFACT_PATHS,
+                    "artifacts/asset_library.json",
+                    "artifacts/series_bible.json",
+                    relative_path,
+                ],
+                failure_detail="Project update failed",
+            ):
                 await save_upload_file(upload, output_path, MAX_IMAGE_BYTES)
-                relative_path = relative_project_path(project_dir, output_path)
                 asset_data = {
                     "id": asset_id,
                     "kind": kind,
@@ -813,7 +874,7 @@ def create_app(
                     video_model=DEFAULT_VIDEO_MODEL,
                     continuity_plan=continuity_plan,
                 )
-                project.updated_at = datetime.now(UTC)
+                project.updated_at = datetime.now(timezone.utc)
                 response_data = {
                     "media": {
                         "path": relative_path,
@@ -870,6 +931,8 @@ def create_app(
             db=db,
             workbench=workbench,
             project_id=project_id,
+            operation="shot_save",
+            changed_paths=[*STORYBOARD_ARTIFACT_PATHS, *WORKFLOW_ARTIFACT_PATHS],
             failure_detail="Project update failed",
         ):
             _persist_storyboard_state(
@@ -888,7 +951,7 @@ def create_app(
                 video_model=workflow_settings["video_model"],
                 continuity_plan=continuity_plan,
             )
-            project.updated_at = datetime.now(UTC)
+            project.updated_at = datetime.now(timezone.utc)
         event = bus.emit(project_id, job_id=job_id, stage="save", status="complete", message="Shot saved")
         return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
 
@@ -952,6 +1015,12 @@ def create_app(
             db=db,
             workbench=workbench,
             project_id=project_id,
+            operation="shot_regenerate",
+            changed_paths=[
+                *STORYBOARD_ARTIFACT_PATHS,
+                *WORKFLOW_ARTIFACT_PATHS,
+                f"assets/video/{shot_id}.mp4",
+            ],
             failure_detail="Project update failed",
             preserve_http_error_writes=True,
         ):
@@ -1019,7 +1088,7 @@ def create_app(
                 video_model=payload.video_model,
                 continuity_plan=continuity_plan,
             )
-            project.updated_at = datetime.now(UTC)
+            project.updated_at = datetime.now(timezone.utc)
         event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
         project_dir = workbench.project_dir(project_id)
         response_storyboard = _sanitize_storyboard_response(project_dir, storyboard)
@@ -1064,10 +1133,28 @@ def create_app(
                 message=public_message,
             )
 
+        project_dir = workbench.project_dir(project_id)
+        generated_shot_paths = []
+        for shot in storyboard.get("shots", []):
+            existing_output = sanitize_project_path(project_dir, shot.get("output_path"))
+            if existing_output is not None and (project_dir / existing_output).exists():
+                continue
+            generated_shot_paths.append(
+                f"assets/video/{str(shot.get('id', 'shot'))}.mp4"
+            )
+
         with _project_mutation(
             db=db,
             workbench=workbench,
             project_id=project_id,
+            operation="render",
+            changed_paths=[
+                *STORYBOARD_ARTIFACT_PATHS,
+                *WORKFLOW_ARTIFACT_PATHS,
+                "artifacts/render_report.json",
+                "renders/final.mp4",
+                *generated_shot_paths,
+            ],
             failure_detail="Project update failed",
         ):
             emit("render", "running", "Starting final render")
@@ -1092,7 +1179,7 @@ def create_app(
             workbench.write_artifact(project_id, "episode_storyboard.json", result["storyboard"])
             workbench.write_artifact(project_id, "consistency_report.json", report)
             workbench.write_artifact(project_id, "render_report.json", result["render_report"])
-            project.updated_at = datetime.now(UTC)
+            project.updated_at = datetime.now(timezone.utc)
         project_dir = workbench.project_dir(project_id)
         response_storyboard = _sanitize_storyboard_response(project_dir, result["storyboard"])
         response_render_report = _sanitize_render_report_response(project_dir, result["render_report"])

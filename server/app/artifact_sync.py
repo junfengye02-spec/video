@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from server.app.openmontage_runner import DEFAULT_VIDEO_MODEL, build_pipeline_inputs, write_pipeline_artifacts
+from server.app.openmontage_runner import DEFAULT_VIDEO_MODEL, build_pipeline_inputs
 from server.app.storage import WorkbenchStore
 
 DEFAULT_RENDER_RUNTIME = "ffmpeg"
@@ -86,4 +86,5 @@ def rewrite_workflow_artifacts(
         render_runtime=render_runtime,  # type: ignore[arg-type]
         video_model=video_model,
     )
-    write_pipeline_artifacts(workbench.project_dir(project_id), pipeline_inputs)
+    for name, data in pipeline_inputs.items():
+        workbench.write_artifact(project_id, f"{name}.json", data)

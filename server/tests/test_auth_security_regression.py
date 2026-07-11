@@ -125,6 +125,24 @@ def test_media_path_check_happens_after_owner_check(ownership_context):
     assert response.json() == {"detail": "Project not found"}
 
 
+def test_gateway_malformed_json_checks_origin_before_body_parsing(
+    ownership_context,
+):
+    alice = ownership_context["clients"][ALICE_ID]
+
+    response = alice.post(
+        "/api/session/key",
+        headers={
+            "Origin": "https://evil.example",
+            "Content-Type": "application/json",
+        },
+        content=b'{"video_key":',
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Invalid request origin"}
+
+
 @pytest.mark.parametrize(
     ("path", "payload"),
     [

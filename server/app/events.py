@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -29,7 +29,7 @@ class EventBus:
             "stage": stage,
             "status": status,
             "message": message,
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self._events[project_id].append(event)
         for queue in list(self._queues[project_id]):

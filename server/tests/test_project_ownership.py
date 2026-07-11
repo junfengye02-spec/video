@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
+import os
+import shutil
 import sqlite3
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +17,7 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartParser
 from starlette.requests import Request
 from sqlalchemy import create_engine, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -153,6 +158,31 @@ def _create_project(client: TestClient, *, title: str = "Mine") -> dict:
     )
     assert response.status_code in {200, 201}, response.text
     return response.json()["project"]
+
+
+def _link_file(link: Path, target: Path) -> bool:
+    try:
+        link.symlink_to(target)
+    except (NotImplementedError, OSError):
+        return False
+    return True
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    except (NotImplementedError, OSError) as exc:
+        if os.name != "nt":
+            pytest.skip(f"directory symlinks are not available: {exc}")
+
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"directory links are not available: {result.stderr or result.stdout}")
 
 
 def _prepare_project_surface(context, client: TestClient) -> dict:
@@ -966,6 +996,225 @@ def test_existing_project_commit_failure_restores_entire_workspace(
     assert record.updated_at == before_updated_at
 
 
+def test_owned_project_lock_uses_postgresql_for_update():
+    statements = []
+    project = type("LockedProject", (), {"id": LEGACY_ID})()
+
+    class RecordingSession:
+        def scalar(self, statement):
+            statements.append(statement)
+            return project
+
+    locked = ProjectRepository(RecordingSession()).require_owned_for_update(
+        LEGACY_ID,
+        ALICE_ID,
+    )
+
+    sql = str(statements[0].compile(dialect=postgresql.dialect()))
+    assert locked is project
+    assert "FOR UPDATE" in sql
+
+
+def test_continuity_journal_never_copies_large_unrelated_media(
+    ownership_context, monkeypatch
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="No whole workspace copy")
+    store = ownership_context["app"].state.store
+    unrelated = store.project_dir(project["id"]) / "assets" / "video" / "unrelated.mp4"
+    unrelated.write_bytes(b"x" * (4 * 1024 * 1024))
+    original_copy2 = shutil.copy2
+    copied_sources: list[Path] = []
+
+    def reject_copytree(*args, **kwargs):
+        raise AssertionError("whole workspace copying is forbidden")
+
+    def record_copy2(source, destination, *args, **kwargs):
+        copied_sources.append(Path(source))
+        return original_copy2(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr("server.app.storage.shutil.copytree", reject_copytree)
+    monkeypatch.setattr("server.app.storage.shutil.copy2", record_copy2)
+
+    response = client.patch(
+        f"/api/projects/{project['id']}/continuity",
+        json={
+            "project_type": "single_video",
+            "series_bible": {"worldview": "Changed without touching media"},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert unrelated.read_bytes() == b"x" * (4 * 1024 * 1024)
+    assert unrelated not in copied_sources
+
+
+def test_artifact_writes_use_atomic_file_replacement(ownership_context, monkeypatch):
+    store = ownership_context["app"].state.store
+    project_id = "11111111111141118111111111111111"
+    replacements: list[tuple[Path, Path]] = []
+    original_replace = os.replace
+
+    def record_replace(source, destination):
+        replacements.append((Path(source), Path(destination)))
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("server.app.storage.os.replace", record_replace)
+
+    destination = store.write_artifact(project_id, "state.json", {"value": 1})
+
+    assert replacements
+    assert replacements[-1][1] == destination
+    assert replacements[-1][0].parent == destination.parent
+    assert not replacements[-1][0].exists()
+
+
+def test_restore_failure_retains_recovery_marker_and_quarantines_project(
+    ownership_context, monkeypatch, caplog
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Recovery marker")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    caplog.set_level(logging.ERROR)
+
+    def fail_commit_after_destroying_backup():
+        recovery_root = store.projects_root / ".recovery" / project_id
+        if recovery_root.is_dir():
+            operation_dir = next(recovery_root.iterdir())
+            backups = list((operation_dir / "backups").rglob("continuity_plan.json"))
+            if backups:
+                backups[0].unlink()
+        raise RuntimeError("commit failed with password=operator-secret")
+
+    monkeypatch.setattr(ownership_context["db"], "commit", fail_commit_after_destroying_backup)
+
+    response = client.patch(
+        f"/api/projects/{project_id}/continuity",
+        json={
+            "project_type": "single_video",
+            "series_bible": {"worldview": "Inconsistent state"},
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    operation_dirs = list((store.projects_root / ".recovery" / project_id).iterdir())
+    assert len(operation_dirs) == 1
+    marker = json.loads((operation_dirs[0] / "marker.json").read_text(encoding="utf-8"))
+    assert marker == {
+        "project_id": project_id,
+        "operation_id": marker["operation_id"],
+        "operation": "continuity",
+        "state": "recovery_failed",
+    }
+    assert project_id in caplog.text
+    assert marker["operation_id"] in caplog.text
+    assert "recovery_failed" in caplog.text
+    assert "operator-secret" not in caplog.text
+
+    loaded = client.get(f"/api/projects/{project_id}")
+    mutated = client.patch(
+        f"/api/projects/{project_id}/continuity",
+        json={"project_type": "single_video"},
+    )
+    assert loaded.status_code == 503
+    assert mutated.status_code == 503
+    assert loaded.json() == mutated.json() == {
+        "detail": "Project is unavailable pending recovery"
+    }
+
+
+def test_malformed_recovery_marker_quarantines_project(ownership_context):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Malformed recovery marker")
+    project_id = project["id"]
+    operation_dir = (
+        ownership_context["app"].state.store.projects_root
+        / ".recovery"
+        / project_id
+        / ("a" * 32)
+    )
+    operation_dir.mkdir(parents=True)
+    (operation_dir / "marker.json").write_text(
+        json.dumps({"state": "committed"}),
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/projects/{project_id}")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Project is unavailable pending recovery"
+    }
+
+
+@pytest.mark.parametrize(
+    ("unsafe_child", "state"),
+    [("manifest_symlink", "committed"), ("backups_junction", "recovered")],
+)
+def test_terminal_marker_with_linked_recovery_child_quarantines_all_project_routes(
+    ownership_context, monkeypatch, unsafe_child, state
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Linked recovery child")
+    project_id = project["id"]
+    operation_id = "b" * 32
+    operation_dir = (
+        ownership_context["app"].state.store.projects_root
+        / ".recovery"
+        / project_id
+        / operation_id
+    )
+    operation_dir.mkdir(parents=True)
+    (operation_dir / "marker.json").write_text(
+        json.dumps(
+            {
+                "project_id": project_id,
+                "operation_id": operation_id,
+                "operation": "test",
+                "state": state,
+            }
+        ),
+        encoding="utf-8",
+    )
+    outside = ownership_context["tmp_path"] / f"outside-{unsafe_child}"
+    if unsafe_child == "manifest_symlink":
+        outside.write_text("{}", encoding="utf-8")
+        manifest = operation_dir / "manifest.json"
+        if not _link_file(manifest, outside):
+            manifest.write_text("{}", encoding="utf-8")
+            original_is_symlink = Path.is_symlink
+            monkeypatch.setattr(
+                Path,
+                "is_symlink",
+                lambda path: path == manifest or original_is_symlink(path),
+            )
+    else:
+        (operation_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        outside.mkdir()
+        _link_directory(operation_dir / "backups", outside)
+
+    async def finite_stream(_project_id):
+        yield "event: job\ndata: {}\n\n"
+
+    monkeypatch.setattr(ownership_context["app"].state.events, "stream", finite_stream)
+    responses = [
+        client.get(f"/api/projects/{project_id}"),
+        client.get(f"/api/projects/{project_id}/media/assets/images/missing.png"),
+        client.get(f"/api/projects/{project_id}/events"),
+        client.patch(
+            f"/api/projects/{project_id}/continuity",
+            json={"project_type": "single_video"},
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [503] * 4
+    assert [response.json() for response in responses] == [
+        {"detail": "Project is unavailable pending recovery"}
+    ] * 4
+
+
 def test_import_assigns_fresh_id_owner_and_keeps_browser_local_media(ownership_context):
     from server.app.projects.models import ProjectRecord
 
@@ -1093,7 +1342,7 @@ def test_workspace_cleanup_rejects_linked_project_directory(
 
 
 @pytest.mark.parametrize("link_kind", ["symlink", "junction"])
-def test_workspace_checkpoint_capture_rejects_linked_project_directory(
+def test_mutation_journal_capture_rejects_linked_project_directory(
     ownership_context, monkeypatch, link_kind
 ):
     project_id = "eeeeeeeeeeee4eee8eeeeeeeeeeeeeee"
@@ -1116,17 +1365,25 @@ def test_workspace_checkpoint_capture_rejects_linked_project_directory(
         )
 
     with pytest.raises(ValueError, match="Project workspace path is invalid"):
-        store.checkpoint_project_workspace(project_id)
+        store.begin_project_mutation(
+            project_id,
+            operation="test",
+            changed_paths=["artifacts/state.json"],
+        )
 
 
 @pytest.mark.parametrize("link_kind", ["symlink", "junction"])
-def test_workspace_checkpoint_restore_fails_closed_for_linked_destination(
+def test_mutation_journal_restore_fails_closed_for_linked_destination(
     ownership_context, monkeypatch, link_kind
 ):
     project_id = "ffffffffffff4fff8fffffffffffffff"
     store = ownership_context["app"].state.store
     store.write_artifact(project_id, "state.json", {"version": "before"})
-    checkpoint = store.checkpoint_project_workspace(project_id)
+    journal = store.begin_project_mutation(
+        project_id,
+        operation="test",
+        changed_paths=["artifacts/state.json"],
+    )
     store.write_artifact(project_id, "state.json", {"version": "after"})
     if link_kind == "symlink":
         original = Path.is_symlink
@@ -1145,9 +1402,81 @@ def test_workspace_checkpoint_restore_fails_closed_for_linked_destination(
         )
 
     with pytest.raises(ValueError, match="Project workspace path is invalid"):
-        checkpoint.restore()
+        journal.restore()
 
     assert store.read_artifact(project_id, "state.json") == {"version": "after"}
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "junction"])
+def test_mutation_journal_restore_rejects_linked_backup_parent(
+    ownership_context, monkeypatch, link_kind
+):
+    project_id = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
+    store = ownership_context["app"].state.store
+    store.write_artifact(project_id, "state.json", {"version": "before"})
+    journal = store.begin_project_mutation(
+        project_id,
+        operation="test",
+        changed_paths=["artifacts/state.json"],
+    )
+    store.write_artifact(project_id, "state.json", {"version": "after"})
+    if link_kind == "symlink":
+        original = Path.is_symlink
+        monkeypatch.setattr(
+            Path,
+            "is_symlink",
+            lambda path: path.name == "backups" or original(path),
+        )
+    else:
+        original = getattr(Path, "is_junction", lambda path: False)
+        monkeypatch.setattr(
+            Path,
+            "is_junction",
+            lambda path: path.name == "backups" or original(path),
+            raising=False,
+        )
+
+    with pytest.raises(ValueError, match="Project recovery path is invalid"):
+        journal.restore()
+
+    assert store.read_artifact(project_id, "state.json") == {"version": "after"}
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "junction"])
+def test_mutation_journal_restore_ignores_preexisting_link_at_legacy_temp_name(
+    ownership_context, link_kind
+):
+    project_id = "99999999999949998999999999999999"
+    store = ownership_context["app"].state.store
+    destination = store.write_artifact(project_id, "state.json", {"version": "before"})
+    journal = store.begin_project_mutation(
+        project_id,
+        operation="test",
+        changed_paths=["artifacts/state.json"],
+    )
+    store.write_artifact(project_id, "state.json", {"version": "after"})
+    legacy_temporary = destination.with_name(
+        f".{destination.name}.{journal.operation_id}.restore"
+    )
+    outside_root = ownership_context["tmp_path"] / f"outside-restore-{link_kind}"
+    if link_kind == "symlink":
+        outside_root.write_bytes(b"outside-sentinel")
+        outside_target = outside_root
+        if not _link_file(legacy_temporary, outside_target):
+            pytest.skip("file symlinks are not available")
+    else:
+        outside_root.mkdir()
+        outside_target = outside_root / "state.json"
+        outside_target.write_bytes(b"outside-sentinel")
+        _link_directory(legacy_temporary, outside_root)
+
+    try:
+        journal.restore()
+    except Exception:
+        pass
+
+    assert outside_target.read_bytes() == b"outside-sentinel"
+    assert store.read_artifact(project_id, "state.json") == {"version": "before"}
 
 
 def test_imported_assets_survive_a_later_reference_upload(ownership_context):

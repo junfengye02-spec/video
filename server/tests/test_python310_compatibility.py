@@ -7,13 +7,8 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
-def test_auth_project_foundation_does_not_use_python311_datetime_utc():
-    roots = [
-        ROOT_DIR / "server" / "app" / "auth",
-        ROOT_DIR / "server" / "app" / "db",
-        ROOT_DIR / "server" / "app" / "projects",
-    ]
-    paths = [path for root in roots for path in root.rglob("*.py")]
+def test_production_server_does_not_use_python311_datetime_utc():
+    paths = list((ROOT_DIR / "server" / "app").rglob("*.py"))
     paths.append(ROOT_DIR / "server" / "manage.py")
     violations: list[str] = []
 

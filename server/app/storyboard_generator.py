@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -118,7 +118,7 @@ def _history_entry(shot: dict[str, Any]) -> dict[str, Any]:
         "asset_ids": list(shot.get("asset_ids", [])),
         "shot_intent": shot.get("shot_intent"),
         "shot_language": shot.get("shot_language"),
-        "updated_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
