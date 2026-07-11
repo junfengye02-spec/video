@@ -213,6 +213,7 @@ export function StoryboardPage({
           panelRef={listPanelRef}
           shots={ordered}
           selectedShotId={selectedShot?.id ?? null}
+          resolveShotMedia={resolveShotMedia}
           onSelect={selectShot}
           onPanelKeyDown={(event) => handleTabletPanelKeyDown(event, "list")}
         />

@@ -302,10 +302,10 @@ textarea:focus {
   display: grid;
   width: 100%;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
   grid-template-areas:
-    "title status"
-    "beat status";
+    "thumbnail title status"
+    "thumbnail beat status";
   align-items: center;
   gap: 4px 8px;
   padding: 10px;
@@ -326,7 +326,27 @@ textarea:focus {
   background: #edf4ff;
 }
 
-.storyboard-shot-list li button > span:first-child {
+.shot-list-thumbnail {
+  display: block;
+  width: 72px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--om-border);
+  border-radius: 4px;
+  background: #111827;
+  flex: 0 0 auto;
+  grid-area: thumbnail;
+}
+
+.shot-list-thumbnail video,
+.shot-list-thumbnail-placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.storyboard-shot-list .shot-list-title {
   grid-area: title;
   overflow: hidden;
   font-size: 0.82rem;
@@ -335,7 +355,7 @@ textarea:focus {
   white-space: nowrap;
 }
 
-.storyboard-shot-list li button > span:nth-child(2) {
+.storyboard-shot-list .shot-list-beat {
   grid-area: beat;
   overflow: hidden;
   color: var(--om-text-muted);

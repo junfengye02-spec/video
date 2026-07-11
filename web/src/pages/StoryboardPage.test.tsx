@@ -84,6 +84,24 @@ describe("StoryboardPage", () => {
     expect(screen.queryByText("音频轨")).not.toBeInTheDocument();
   });
 
+  it("shows a stable thumbnail for every shot with resolved media", () => {
+    const shots = storyboardProps.shots.map((shot, index) => ({
+      ...shot,
+      id: `s${index + 1}`,
+      index: index + 1,
+    }));
+    render(
+      <StoryboardPage
+        {...storyboardProps}
+        shots={shots}
+        resolveShotMedia={(shot) => `blob:${shot.id}`}
+      />,
+    );
+
+    expect(screen.getByLabelText("分镜 1 缩略预览")).toHaveAttribute("src", "blob:s1");
+    expect(screen.getByLabelText("分镜 2 缩略预览")).toHaveAttribute("src", "blob:s2");
+  });
+
   it("switches mobile views without unmounting a dirty shot draft", () => {
     render(<StoryboardPage {...storyboardProps} />);
 
@@ -245,8 +263,12 @@ describe("StoryboardPage", () => {
     expect(screen.getByRole("heading", { name: "分镜 1" })).toBeInTheDocument();
     expect(screen.getByLabelText("分镜 1 预览媒体")).toHaveAttribute("src", "/media/shot-1.mp4");
     expect(screen.getByLabelText("分镜 1 预览媒体")).toHaveClass("shot-preview-media");
-    expect(resolveShotMedia).toHaveBeenCalledTimes(1);
-    expect(resolveShotMedia).toHaveBeenCalledWith(expect.objectContaining({ id: "shot-1" }));
+    expect(resolveShotMedia).toHaveBeenCalledTimes(3);
+    expect(resolveShotMedia.mock.calls.map(([shot]) => shot.id).sort()).toEqual([
+      "shot-1",
+      "shot-1",
+      "shot-2",
+    ]);
   });
 
   it("shows the planned count and a clear preview empty state", () => {

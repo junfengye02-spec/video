@@ -7,6 +7,7 @@ export interface ShotListProps {
   panelRef?: Ref<HTMLElement>;
   shots: Shot[];
   selectedShotId: string | null;
+  resolveShotMedia: (shot: Shot) => string | null;
   onSelect: (shotId: string) => void;
   onPanelKeyDown?: KeyboardEventHandler<HTMLElement>;
 }
@@ -16,6 +17,7 @@ export function ShotList({
   panelRef,
   shots,
   selectedShotId,
+  resolveShotMedia,
   onSelect,
   onPanelKeyDown,
 }: ShotListProps) {
@@ -38,22 +40,39 @@ export function ShotList({
         <p className="empty-state">{strings.storyboardPage.emptyShots}</p>
       ) : (
         <ol>
-          {shots.map((shot) => (
-            <li key={shot.id}>
-              <button
-                type="button"
-                aria-label={strings.storyboardPage.selectShotLabel(shot.index)}
-                aria-pressed={selectedShotId === shot.id}
-                onClick={() => onSelect(shot.id)}
-              >
-                <span>{strings.storyboardPage.shotTitle(shot.index)}</span>
-                <span>{shot.beat}</span>
-                <span className={`status-pill status-${shot.status}`}>
-                  {strings.storyboardWaterfall.statusLabels[shot.status]}
-                </span>
-              </button>
-            </li>
-          ))}
+          {shots.map((shot) => {
+            const mediaUrl = resolveShotMedia(shot);
+
+            return (
+              <li key={shot.id}>
+                <button
+                  type="button"
+                  aria-label={strings.storyboardPage.selectShotLabel(shot.index)}
+                  aria-pressed={selectedShotId === shot.id}
+                  onClick={() => onSelect(shot.id)}
+                >
+                  <span className="shot-list-thumbnail" aria-hidden={mediaUrl ? undefined : "true"}>
+                    {mediaUrl ? (
+                      <video
+                        aria-label={`${strings.storyboardPage.shotTitle(shot.index)} 缩略预览`}
+                        src={mediaUrl}
+                        muted
+                        playsInline
+                        preload="metadata"
+                      />
+                    ) : (
+                      <span className="shot-list-thumbnail-placeholder" />
+                    )}
+                  </span>
+                  <span className="shot-list-title">{strings.storyboardPage.shotTitle(shot.index)}</span>
+                  <span className="shot-list-beat">{shot.beat}</span>
+                  <span className={`status-pill status-${shot.status}`}>
+                    {strings.storyboardWaterfall.statusLabels[shot.status]}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ol>
       )}
     </nav>
