@@ -261,6 +261,10 @@ describe("projectStore", () => {
   );
 
   it("deletes project-owned IndexedDB media without touching another project", async () => {
+    const first = snapshot("p1", "First");
+    const second = snapshot("p2", "Second");
+    await saveProjectSnapshot(first);
+    await saveProjectSnapshot(second);
     const firstRef = await saveMediaBlob({
       projectId: "p1",
       sourcePath: "assets/p1.mp4",
@@ -273,9 +277,7 @@ describe("projectStore", () => {
       contentType: "video/mp4",
       blob: await mediaBlob("second"),
     });
-    const first = snapshot("p1", "First");
     first.final_path = firstRef;
-    const second = snapshot("p2", "Second");
     second.final_path = secondRef;
     await saveProjectSnapshot(first);
     await saveProjectSnapshot(second);
@@ -289,13 +291,14 @@ describe("projectStore", () => {
 
   it("removes project-owned OPFS media", async () => {
     const { files, removeEntry } = installOpfs();
+    const project = snapshot("p1", "First");
+    await saveProjectSnapshot(project);
     const ref = await saveMediaBlob({
       projectId: "p1",
       sourcePath: "assets/p1.mp4",
       contentType: "video/mp4",
       blob: await mediaBlob("first"),
     });
-    const project = snapshot("p1", "First");
     project.final_path = ref;
     await saveProjectSnapshot(project);
 
@@ -307,15 +310,17 @@ describe("projectStore", () => {
   });
 
   it("preserves media still referenced by another project", async () => {
+    const first = snapshot("p1", "First");
+    const second = snapshot("p2", "Second");
+    await saveProjectSnapshot(first);
+    await saveProjectSnapshot(second);
     const sharedRef = await saveMediaBlob({
       projectId: "p1",
       sourcePath: "assets/shared.mp4",
       contentType: "video/mp4",
       blob: await mediaBlob("shared"),
     });
-    const first = snapshot("p1", "First");
     first.final_path = sharedRef;
-    const second = snapshot("p2", "Second");
     second.final_path = sharedRef;
     await saveProjectSnapshot(first);
     await saveProjectSnapshot(second);
@@ -327,15 +332,17 @@ describe("projectStore", () => {
   });
 
   it("collects shared IndexedDB media after the final referencing project is deleted", async () => {
+    const first = snapshot("p1", "First");
+    const second = snapshot("p2", "Second");
+    await saveProjectSnapshot(first);
+    await saveProjectSnapshot(second);
     const sharedRef = await saveMediaBlob({
       projectId: "p1",
       sourcePath: "assets/shared.mp4",
       contentType: "video/mp4",
       blob: await mediaBlob("shared"),
     });
-    const first = snapshot("p1", "First");
     first.final_path = sharedRef;
-    const second = snapshot("p2", "Second");
     second.final_path = sharedRef;
     await saveProjectSnapshot(first);
     await saveProjectSnapshot(second);
@@ -349,15 +356,17 @@ describe("projectStore", () => {
 
   it("collects shared OPFS media after the final referencing project is deleted", async () => {
     const { files, removeEntry } = installOpfs();
+    const first = snapshot("p1", "First");
+    const second = snapshot("p2", "Second");
+    await saveProjectSnapshot(first);
+    await saveProjectSnapshot(second);
     const sharedRef = await saveMediaBlob({
       projectId: "p1",
       sourcePath: "assets/shared.mp4",
       contentType: "video/mp4",
       blob: await mediaBlob("shared"),
     });
-    const first = snapshot("p1", "First");
     first.final_path = sharedRef;
-    const second = snapshot("p2", "Second");
     second.final_path = sharedRef;
     await saveProjectSnapshot(first);
     await saveProjectSnapshot(second);
@@ -374,13 +383,14 @@ describe("projectStore", () => {
 
   it("reports OPFS cleanup failure while retaining media data for retry", async () => {
     installOpfs({ removeError: new Error("OPFS remove failed") });
+    const project = snapshot("p1", "First");
+    await saveProjectSnapshot(project);
     const ref = await saveMediaBlob({
       projectId: "p1",
       sourcePath: "assets/p1.mp4",
       contentType: "video/mp4",
       blob: await mediaBlob("first"),
     });
-    const project = snapshot("p1", "First");
     project.final_path = ref;
     await saveProjectSnapshot(project);
 

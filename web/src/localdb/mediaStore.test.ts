@@ -1,13 +1,59 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { resetLocalDbForTests } from "./indexedDb";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { openLocalDb, resetLocalDbForTests } from "./indexedDb";
+import * as mediaStoreModule from "./mediaStore";
 import {
   cacheRemoteMedia,
   cleanupOrphanedOpfsMedia,
   loadMediaBlob,
   saveMediaBlob,
 } from "./mediaStore";
+import {
+  installTestStorage,
+  type TestStorageController,
+  type TestStorageOptions,
+} from "./testStorage";
+import type {
+  LocalMediaRecord,
+  LocalMediaRef,
+  MediaJournalRecord,
+  MediaOperationRecord,
+} from "./types";
 import { LOCAL_DB_NAME } from "./types";
+
+type BeginMediaWriteInput = {
+  projectId: string | null;
+  importSessionId?: string | null;
+  sourcePath: string;
+  contentType: string;
+  sizeBytes: number;
+};
+
+type MediaWriteSession = {
+  readonly operationId: string;
+  readonly mediaRef: LocalMediaRef;
+  write(chunk: Uint8Array): Promise<void>;
+  commit(): Promise<LocalMediaRef>;
+  abort(cause?: unknown): Promise<void>;
+};
+
+type RecoveryOptions = {
+  now?: () => Date;
+  leaseOwner?: string;
+  leaseDurationMs?: number;
+};
+
+type Task2MediaStore = typeof mediaStoreModule & {
+  beginMediaWrite(input: BeginMediaWriteInput): Promise<MediaWriteSession>;
+  runMediaRecovery(options?: RecoveryOptions): Promise<number>;
+  startMediaRecoveryController(options?: RecoveryOptions): {
+    run(): Promise<number>;
+    dispose(): void;
+  };
+  findCommittedMedia(projectId: string, sourcePath: string): Promise<LocalMediaRecord | null>;
+};
+
+const task2MediaStore = mediaStoreModule as Task2MediaStore;
 
 const originalStorage = Object.getOwnPropertyDescriptor(Navigator.prototype, "storage");
 
@@ -45,6 +91,53 @@ async function deleteLocalDb() {
   });
 }
 
+function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+function transactionDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
+    tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
+    tx.oncomplete = () => resolve();
+  });
+}
+
+async function put(storeName: string, value: unknown): Promise<void> {
+  const db = await openLocalDb();
+  const tx = db.transaction(storeName, "readwrite");
+  const done = transactionDone(tx);
+  tx.objectStore(storeName).put(value);
+  await done;
+}
+
+async function seedProject(id = "p1"): Promise<void> {
+  await put("projects", {
+    id,
+    title: id,
+    updatedAt: new Date().toISOString(),
+    snapshot: {},
+  });
+}
+
+async function getAll<T>(storeName: string): Promise<T[]> {
+  const db = await openLocalDb();
+  return requestToPromise<T[]>(
+    db.transaction(storeName, "readonly").objectStore(storeName).getAll(),
+  );
+}
+
+async function getRecord<T>(storeName: string, id: string): Promise<T | null> {
+  const db = await openLocalDb();
+  const value = await requestToPromise<T | undefined>(
+    db.transaction(storeName, "readonly").objectStore(storeName).get(id),
+  );
+  return value ?? null;
+}
+
 function installOpfs(options: {
   removeError: Error | null;
   delayClose?: boolean;
@@ -64,8 +157,8 @@ function installOpfs(options: {
       return {
         async createWritable() {
           return {
-            async write(blob: Blob) {
-              files.set(name, blob);
+            async write(blob: Blob | Uint8Array) {
+              files.set(name, blob instanceof Blob ? blob : new Blob([blob.slice().buffer]));
               writeStarted.resolve();
             },
             async close() {
@@ -130,6 +223,10 @@ function failMediaRecordWrites(error: Error) {
       : originalPut.call(this, value, key);
   });
 }
+
+beforeEach(async () => {
+  await seedProject();
+});
 
 afterEach(async () => {
   vi.useRealTimers();
@@ -202,7 +299,7 @@ describe("mediaStore", () => {
     })).resolves.toBeNull();
   });
 
-  it("preserves both failures when an OPFS write cannot be recorded or rolled back", async () => {
+  it("keeps durable cleanup work when an OPFS write cannot be recorded", async () => {
     const idbError = new DOMException("Quota exceeded", "QuotaExceededError");
     const opfsError = new Error("OPFS remove failed");
     const opfsOptions = { removeError: opfsError as Error | null };
@@ -221,8 +318,11 @@ describe("mediaStore", () => {
       failure = error;
     }
 
-    expect(failure).toMatchObject({ causes: [idbError, opfsError] });
+    expect(failure).toBe(idbError);
     expect(files.size).toBe(1);
+    expect(await getAll<MediaJournalRecord>("mediaOperations")).toEqual([
+      expect.objectContaining({ state: "cleanup_due" }),
+    ]);
   });
 
   it("deterministically removes an unindexed OPFS file on cleanup retry", async () => {
@@ -240,11 +340,7 @@ describe("mediaStore", () => {
     putSpy.mockRestore();
     opfsOptions.removeError = null;
 
-    const mediaStore = await import("./mediaStore") as typeof import("./mediaStore") & {
-      cleanupOrphanedOpfsMedia?: () => Promise<number>;
-    };
-    expect(mediaStore.cleanupOrphanedOpfsMedia).toBeTypeOf("function");
-    await expect(mediaStore.cleanupOrphanedOpfsMedia!()).resolves.toBe(1);
+    await expect(task2MediaStore.runMediaRecovery()).resolves.toBe(1);
     expect(files.size).toBe(0);
   });
 
@@ -292,7 +388,7 @@ describe("mediaStore", () => {
     expect(restored ? await blobToText(restored) : null).toBe("committed");
   });
 
-  it("surfaces cache cleanup failures and schedules one safe recovery scan", async () => {
+  it("keeps remote cache failure non-blocking and recovers from durable state", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response("image", { headers: { "content-type": "image/png" } })),
@@ -306,18 +402,387 @@ describe("mediaStore", () => {
     await expect(cacheRemoteMedia("https://example.test/image.png", {
       projectId: "p1",
       sourcePath: "assets/image.png",
-    })).rejects.toMatchObject({
-      name: "MediaCleanupIncompleteError",
-      causes: [idbError, opfsError],
-    });
+    })).resolves.toBeNull();
     expect(files.size).toBe(1);
     expect(fetch).toHaveBeenCalledTimes(1);
+    expect(await getAll<MediaJournalRecord>("mediaOperations")).toEqual([
+      expect.objectContaining({ state: "cleanup_due" }),
+    ]);
 
     putSpy.mockRestore();
     opfsOptions.removeError = null;
-    await vi.waitFor(() => expect(files.size).toBe(0));
+    await expect(task2MediaStore.runMediaRecovery()).resolves.toBe(1);
+    expect(files.size).toBe(0);
 
-    expect(removeEntry).toHaveBeenCalledTimes(2);
+    expect(removeEntry).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("streaming durable media writes", () => {
+  it("journals before OPFS and never touches OPFS when journaling fails", async () => {
+    const storage = installTestStorage();
+    const originalAdd = IDBObjectStore.prototype.add;
+    vi.spyOn(IDBObjectStore.prototype, "add").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey,
+    ) {
+      if (this.name === "mediaOperations") {
+        throw new DOMException("Journal full", "QuotaExceededError");
+      }
+      return key === undefined
+        ? originalAdd.call(this, value)
+        : originalAdd.call(this, value, key);
+    });
+
+    expect(task2MediaStore.beginMediaWrite).toBeTypeOf("function");
+    await expect(task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/crash.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 4,
+    })).rejects.toMatchObject({ name: "MediaDurabilityError" });
+    expect(storage.getDirectory).not.toHaveBeenCalled();
+  });
+
+  it("durably queues cleanup when OPFS creation, writing, closing, or media commit fails", async () => {
+    const cases: Array<{ name: string; options: TestStorageOptions }> = [
+      { name: "creation", options: { failGetDirectory: new Error("directory failed") } },
+      { name: "write", options: { failWriteAt: 1, writeError: new Error("write failed") } },
+      { name: "close", options: { failClose: new Error("close failed") } },
+      { name: "commit", options: {} },
+    ];
+
+    for (const crash of cases) {
+      await deleteLocalDb();
+      await seedProject();
+      const storage = installTestStorage(crash.options);
+      const sessionPromise = task2MediaStore.beginMediaWrite({
+        projectId: "p1",
+        sourcePath: `assets/${crash.name}.mp4`,
+        contentType: "video/mp4",
+        sizeBytes: 4,
+      });
+
+      if (crash.name === "creation") {
+        await expect(sessionPromise).rejects.toBeInstanceOf(Error);
+      } else {
+        const session = await sessionPromise;
+        if (crash.name === "write") {
+          await expect(session.write(new Uint8Array([1, 2, 3, 4]))).rejects.toBeInstanceOf(Error);
+        } else {
+          await session.write(new Uint8Array([1, 2, 3, 4]));
+          let putSpy: { mockRestore(): void } | undefined;
+          if (crash.name === "commit") {
+            const originalPut = IDBObjectStore.prototype.put;
+            putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+              this: IDBObjectStore,
+              value: unknown,
+              key?: IDBValidKey,
+            ) {
+              if (this.name === "media") throw new DOMException("Media commit failed", "AbortError");
+              return key === undefined
+                ? originalPut.call(this, value)
+                : originalPut.call(this, value, key);
+            });
+          }
+          await expect(session.commit()).rejects.toBeDefined();
+          putSpy?.mockRestore();
+          expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeNull();
+        }
+      }
+
+      expect(await getAll<MediaJournalRecord>("mediaOperations")).toEqual([
+        expect.objectContaining({ kind: "media_write", state: "cleanup_due" }),
+      ]);
+      crash.options.failGetDirectory = undefined;
+      crash.options.failWriteAt = undefined;
+      crash.options.failClose = undefined;
+      const controller = task2MediaStore.startMediaRecoveryController();
+      expect(controller.dispose).toBeTypeOf("function");
+      await expect(controller.run()).resolves.toBeGreaterThanOrEqual(1);
+      controller.dispose();
+      expect(await getAll("mediaOperations")).toHaveLength(0);
+      storage.restore();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("streams chunks, renews the writer lease, verifies physical bytes, and publishes only on commit", async () => {
+    const storage = installTestStorage();
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/chunks.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 4,
+    });
+    const before = await getRecord<MediaJournalRecord>("mediaOperations", session.operationId);
+
+    expect(session.mediaRef).toMatch(/^local:\/\/media\//);
+    expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await session.write(new Uint8Array([1, 2]));
+    await session.write(new Uint8Array([3, 4]));
+    const renewed = await getRecord<MediaJournalRecord>("mediaOperations", session.operationId);
+    expect(renewed?.leaseExpiresAt).not.toBe(before?.leaseExpiresAt);
+
+    await expect(session.commit()).resolves.toBe(session.mediaRef);
+    expect([...storage.files.values()][0]).toEqual(new Uint8Array([1, 2, 3, 4]));
+    expect(await getRecord("mediaOperations", session.operationId)).toBeNull();
+    expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeInstanceOf(Blob);
+  });
+
+  it("rejects a physical byte-count mismatch and leaves durable cleanup work", async () => {
+    installTestStorage({ verifiedSizeDelta: -1 });
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/truncated.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 4,
+    });
+    await session.write(new Uint8Array([1, 2, 3, 4]));
+
+    await expect(session.commit()).rejects.toThrow(/byte|size/i);
+    expect(await getRecord<MediaJournalRecord>("mediaOperations", session.operationId))
+      .toMatchObject({ state: "cleanup_due" });
+    expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeNull();
+  });
+
+  it("does not publish after the writer lease expires", async () => {
+    installTestStorage();
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/expired-writer.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await session.write(new Uint8Array([1]));
+    const operation = await getRecord<MediaOperationRecord>("mediaOperations", session.operationId);
+    await put("mediaOperations", {
+      ...operation,
+      leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+    });
+
+    await expect(session.commit()).rejects.toThrow(/lease/i);
+    expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeNull();
+    expect(await getRecord<MediaJournalRecord>("mediaOperations", session.operationId))
+      .toMatchObject({ state: "cleanup_due" });
+  });
+
+  it("uses one transactional IndexedDB fallback without an OPFS operation", async () => {
+    Object.defineProperty(Navigator.prototype, "storage", {
+      configurable: true,
+      value: {},
+    });
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/fallback.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 4,
+    });
+    await session.write(new Uint8Array([1, 2]));
+    await session.write(new Uint8Array([3, 4]));
+
+    await expect(session.commit()).resolves.toBe(session.mediaRef);
+    expect(await getAll("mediaOperations")).toHaveLength(0);
+    expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeInstanceOf(Blob);
+  });
+
+  it("validates ownership at begin time for the IndexedDB fallback", async () => {
+    Object.defineProperty(Navigator.prototype, "storage", {
+      configurable: true,
+      value: {},
+    });
+
+    await expect(task2MediaStore.beginMediaWrite({
+      projectId: "missing",
+      sourcePath: "assets/fallback-missing.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    })).rejects.toThrow(/project/i);
+    expect(await getAll("media")).toHaveLength(0);
+    expect(await getAll("mediaOperations")).toHaveLength(0);
+  });
+
+  it("validates a project or active import session before storage mutation", async () => {
+    const storage = installTestStorage();
+    await expect(task2MediaStore.beginMediaWrite({
+      projectId: "missing",
+      sourcePath: "assets/missing.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    })).rejects.toThrow(/project/i);
+    expect(storage.getDirectory).not.toHaveBeenCalled();
+
+    await put("mediaOperations", {
+      id: "import-1",
+      kind: "import_session",
+      projectId: "future-project",
+      mediaIds: [],
+      state: "importing",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      attempts: 0,
+      nextAttemptAt: new Date().toISOString(),
+      leaseOwner: "importer",
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: null,
+      importSessionId: "import-1",
+      sourcePath: "assets/imported.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await session.write(new Uint8Array([7]));
+    await session.commit();
+
+    expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeNull();
+    const mediaId = session.mediaRef.split("/").pop()!;
+    expect(await getRecord<LocalMediaRecord>("media", mediaId))
+      .toMatchObject({ projectId: "future-project", state: "staged", importSessionId: "import-1" });
+    expect(await getRecord<{ mediaIds: string[] }>("mediaOperations", "import-1"))
+      .toMatchObject({ mediaIds: [mediaId] });
+  });
+
+  it("finds only the newest committed record for a project source", async () => {
+    const base = {
+      projectId: "p1",
+      sourcePath: "assets/same.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+      storage: "indexeddb" as const,
+      blob: new Blob([new Uint8Array([1])]),
+      importSessionId: null,
+    };
+    await put("media", { ...base, id: "old", state: "committed", createdAt: "2026-01-01T00:00:00Z" });
+    await put("media", { ...base, id: "staged", state: "staged", createdAt: "2026-03-01T00:00:00Z" });
+    await put("media", { ...base, id: "new", state: "committed", createdAt: "2026-02-01T00:00:00Z" });
+
+    expect(task2MediaStore.findCommittedMedia).toBeTypeOf("function");
+    await expect(task2MediaStore.findCommittedMedia("p1", "assets/same.mp4"))
+      .resolves.toMatchObject({ id: "new" });
+  });
+});
+
+describe("durable media recovery", () => {
+  it("recovers an expired crashed writer after recreating the controller", async () => {
+    const storage = installTestStorage();
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/crashed.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 2,
+    });
+    await session.write(new Uint8Array([1, 2]));
+    const operation = await getRecord<MediaOperationRecord>("mediaOperations", session.operationId);
+    await put("mediaOperations", {
+      ...operation,
+      nextAttemptAt: "2000-01-01T00:00:00.000Z",
+      leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+    });
+
+    const controller = task2MediaStore.startMediaRecoveryController();
+    await expect(controller.run()).resolves.toBeGreaterThanOrEqual(1);
+    controller.dispose();
+    expect(storage.files.size).toBe(0);
+    expect(await getRecord("mediaOperations", session.operationId)).toBeNull();
+  });
+
+  it("persists cleanup retry backoff and succeeds from a fresh recovery run", async () => {
+    const options = { failRemove: new Error("disk busy") as Error | undefined };
+    const storage = installTestStorage(options);
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/retry.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await session.write(new Uint8Array([1]));
+    await session.abort(new Error("cancelled"));
+    const queued = await getRecord<MediaJournalRecord>("mediaOperations", session.operationId);
+    const firstAttemptAt = queued!.nextAttemptAt;
+
+    await expect(task2MediaStore.runMediaRecovery({
+      leaseOwner: "recovery-a",
+      now: () => new Date(firstAttemptAt),
+    }))
+      .rejects.toMatchObject({ name: "MediaRecoveryError", operationId: session.operationId });
+    const failed = await getRecord<MediaJournalRecord>("mediaOperations", session.operationId);
+    expect(failed).toMatchObject({ attempts: 1, leaseOwner: null });
+    expect(Date.parse(failed!.nextAttemptAt) - Date.parse(firstAttemptAt)).toBe(5_000);
+
+    options.failRemove = undefined;
+    await expect(task2MediaStore.runMediaRecovery({
+      leaseOwner: "recovery-b",
+      now: () => new Date(failed!.nextAttemptAt),
+    })).resolves.toBe(1);
+    expect(storage.files.size).toBe(0);
+    expect(await getRecord("mediaOperations", session.operationId)).toBeNull();
+  });
+
+  it("migrates legacy pending writes idempotently and keeps their ten-minute protection", async () => {
+    const storage = installTestStorage();
+    storage.seedFile("legacy", new Uint8Array([1]), Date.parse("2026-07-11T00:00:00.000Z"));
+    await put("mediaPending", {
+      id: "legacy",
+      opfsPath: "openmontage-media/legacy",
+      createdAt: "2026-07-11T00:00:00.000Z",
+      state: "writing",
+    });
+
+    await expect(task2MediaStore.runMediaRecovery({
+      leaseOwner: "first",
+      now: () => new Date("2026-07-11T00:09:59.000Z"),
+    })).resolves.toBe(0);
+    expect(storage.files.has("legacy")).toBe(true);
+    expect(await getAll("mediaPending")).toHaveLength(0);
+    expect(await getRecord<MediaJournalRecord>("mediaOperations", "legacy"))
+      .toMatchObject({ state: "writing" });
+
+    await expect(task2MediaStore.runMediaRecovery({
+      leaseOwner: "second",
+      now: () => new Date("2026-07-11T00:10:00.000Z"),
+    })).resolves.toBe(1);
+    expect(storage.files.has("legacy")).toBe(false);
+  });
+
+  it("protects untracked compatibility orphans for 24 hours and rechecks exact state", async () => {
+    const now = Date.now();
+    const storage = installTestStorage();
+    storage.seedFile("young", new Uint8Array([1]), now - 23 * 60 * 60 * 1_000);
+    storage.seedFile("old", new Uint8Array([2]), now - 25 * 60 * 60 * 1_000);
+
+    await expect(cleanupOrphanedOpfsMedia()).resolves.toBe(1);
+    expect(storage.files.has("young")).toBe(true);
+    expect(storage.files.has("old")).toBe(false);
+
+    storage.restore();
+    const recheckStorage = installTestStorage({ pauseGetDirectory: true });
+    recheckStorage.seedFile("rechecked", new Uint8Array([2]), now - 25 * 60 * 60 * 1_000);
+    const scanning = cleanupOrphanedOpfsMedia();
+    await recheckStorage.directoryStarted;
+    await put("mediaOperations", {
+      id: "operation-rechecked",
+      kind: "media_write",
+      mediaId: "rechecked",
+      projectId: "p1",
+      importSessionId: null,
+      sourcePath: "assets/rechecked.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+      opfsPath: "openmontage-media/rechecked",
+      state: "writing",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      attempts: 0,
+      nextAttemptAt: new Date().toISOString(),
+      leaseOwner: "live-writer",
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    recheckStorage.releaseDirectory();
+    await expect(scanning).resolves.toBe(0);
+    expect(recheckStorage.files.has("rechecked")).toBe(true);
   });
 });

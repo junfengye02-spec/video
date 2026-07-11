@@ -28,6 +28,13 @@ export type CreateMediaOperationInput = Pick<
   | "leaseOwner"
 >;
 
+export type ValidatedMediaOperationInput = Omit<
+  CreateMediaOperationInput,
+  "projectId"
+> & {
+  projectId: string | null;
+};
+
 export type CreateMediaImportSessionInput = Pick<
   MediaImportSessionRecord,
   "id" | "projectId" | "mediaIds" | "leaseOwner"
@@ -124,13 +131,13 @@ async function readRecord(
   return record ?? null;
 }
 
-export async function createMediaOperation(
+function mediaOperationRecord(
   input: CreateMediaOperationInput,
-  options: MediaJournalOptions = {},
-): Promise<MediaOperationRecord> {
+  options: MediaJournalOptions,
+): MediaOperationRecord {
   const now = currentTime(options);
   const timestamp = now.toISOString();
-  const record: MediaOperationRecord = {
+  return {
     ...input,
     kind: "media_write",
     state: "writing",
@@ -140,6 +147,13 @@ export async function createMediaOperation(
     nextAttemptAt: timestamp,
     leaseExpiresAt: input.leaseOwner ? leaseExpiry(now, options) : null,
   };
+}
+
+export async function createMediaOperation(
+  input: CreateMediaOperationInput,
+  options: MediaJournalOptions = {},
+): Promise<MediaOperationRecord> {
+  const record = mediaOperationRecord(input, options);
 
   try {
     const db = await database(options);
@@ -150,6 +164,46 @@ export async function createMediaOperation(
     return record;
   } catch (error) {
     throw new MediaDurabilityError(record.id, error);
+  }
+}
+
+export async function createValidatedMediaOperation(
+  input: ValidatedMediaOperationInput,
+  options: MediaJournalOptions = {},
+): Promise<MediaOperationRecord> {
+  const db = await database(options);
+  const stores = input.importSessionId
+    ? [LOCAL_STORES.mediaOperations]
+    : [LOCAL_STORES.projects, LOCAL_STORES.mediaOperations];
+  const tx = db.transaction(stores, "readwrite");
+  try {
+    return await runTransaction(tx, async () => {
+      const operationStore = tx.objectStore(LOCAL_STORES.mediaOperations);
+      let projectId = input.projectId;
+      if (input.importSessionId) {
+        const session = await readRecord(operationStore, input.importSessionId);
+        if (!session || session.kind !== "import_session" || session.state !== "importing") {
+          throw new Error(`Active import session ${input.importSessionId} was not found`);
+        }
+        if (projectId !== null && projectId !== session.projectId) {
+          throw new Error(`Import session ${input.importSessionId} belongs to another project`);
+        }
+        projectId = session.projectId;
+      } else {
+        if (!projectId) throw new Error("A project is required for media writes");
+        const project = await requestToPromise(
+          tx.objectStore(LOCAL_STORES.projects).get(projectId),
+        );
+        if (!project) throw new Error(`Project ${projectId} was not found`);
+      }
+
+      const record = mediaOperationRecord({ ...input, projectId }, options);
+      await requestToPromise(operationStore.add(record));
+      return record;
+    });
+  } catch (error) {
+    if (error instanceof Error && /project|import session/i.test(error.message)) throw error;
+    throw new MediaDurabilityError(input.id, error);
   }
 }
 
@@ -204,6 +258,33 @@ export async function renewMediaOperationLease(
       return null;
     }
 
+    const updated: MediaJournalRecord = {
+      ...record,
+      updatedAt: now.toISOString(),
+      leaseExpiresAt: leaseExpiry(now, options),
+    };
+    await requestToPromise(store.put(updated));
+    return updated;
+  });
+}
+
+export async function renewMediaRecoveryLease(
+  id: string,
+  leaseOwner: string,
+  options: MediaJournalOptions = {},
+): Promise<MediaJournalRecord | null> {
+  const db = await database(options);
+  const now = currentTime(options);
+  const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
+  return runTransaction(tx, async () => {
+    const store = tx.objectStore(LOCAL_STORES.mediaOperations);
+    const record = await readRecord(store, id);
+    if (
+      !record || record.state !== "cleanup_due" || record.leaseOwner !== leaseOwner ||
+      !hasActiveLease(record, now)
+    ) {
+      return null;
+    }
     const updated: MediaJournalRecord = {
       ...record,
       updatedAt: now.toISOString(),
@@ -347,4 +428,24 @@ export async function completeMediaJournalRecord(
     await requestToPromise(store.delete(id));
     return true;
   });
+}
+
+export async function getNextMediaRecoveryAt(
+  options: MediaJournalOptions = {},
+): Promise<Date | null> {
+  const db = await database(options);
+  const tx = db.transaction(LOCAL_STORES.mediaOperations, "readonly");
+  const records = await requestToPromise<MediaJournalRecord[]>(
+    tx.objectStore(LOCAL_STORES.mediaOperations).getAll(),
+  );
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const record of records) {
+    const nextAttemptAt = Date.parse(record.nextAttemptAt);
+    const leaseExpiresAt = record.leaseExpiresAt ? Date.parse(record.leaseExpiresAt) : NaN;
+    const eligibleAt = Number.isFinite(leaseExpiresAt)
+      ? Math.max(nextAttemptAt, leaseExpiresAt)
+      : nextAttemptAt;
+    if (Number.isFinite(eligibleAt)) earliest = Math.min(earliest, eligibleAt);
+  }
+  return Number.isFinite(earliest) ? new Date(earliest) : null;
 }

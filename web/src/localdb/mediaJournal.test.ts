@@ -6,11 +6,13 @@ import {
   completeMediaJournalRecord,
   createMediaImportSession,
   createMediaOperation,
+  getNextMediaRecoveryAt,
   markMediaOperationCleanupDue,
   MediaDurabilityError,
   MediaRecoveryError,
   recordMediaOperationFailure,
   renewMediaOperationLease,
+  renewMediaRecoveryLease,
 } from "./mediaJournal";
 import type { MediaJournalRecord } from "./types";
 import { LOCAL_DB_NAME, LOCAL_DB_VERSION } from "./types";
@@ -222,11 +224,15 @@ describe("media journal guarded mutations", () => {
       leaseDurationMs: 2_000,
     });
     expect(claimed).toMatchObject({ id: "operation-1", leaseOwner: "recovery-1" });
+    expect(await renewMediaRecoveryLease("operation-1", "recovery-1", {
+      now: at(1_500),
+      leaseDurationMs: 2_000,
+    })).toMatchObject({ leaseExpiresAt: "2026-07-11T00:00:03.500Z" });
     expect(
-      await completeMediaJournalRecord("operation-1", "other-recovery", { now: at(1_000) }),
+      await completeMediaJournalRecord("operation-1", "other-recovery", { now: at(1_500) }),
     ).toBe(false);
     expect(
-      await completeMediaJournalRecord("operation-1", "recovery-1", { now: at(1_000) }),
+      await completeMediaJournalRecord("operation-1", "recovery-1", { now: at(1_500) }),
     ).toBe(true);
     expect(await loadJournalRecord("operation-1")).toBeNull();
   });
@@ -252,6 +258,22 @@ describe("media journal guarded mutations", () => {
 });
 
 describe("media journal recovery leasing", () => {
+  it("schedules recovery from the earliest durable eligibility time", async () => {
+    await createMediaOperation(operationInput(), {
+      now: at(),
+      leaseDurationMs: 2_000,
+    });
+
+    await expect(getNextMediaRecoveryAt()).resolves.toEqual(
+      new Date("2026-07-11T00:00:02.000Z"),
+    );
+
+    await markMediaOperationCleanupDue("operation-1", "writer-1", { now: at(1_000) });
+    await expect(getNextMediaRecoveryAt()).resolves.toEqual(
+      new Date("2026-07-11T00:00:01.000Z"),
+    );
+  });
+
   it("atomically grants a due record to only one of two database connections", async () => {
     const firstDb = await openLocalDb();
     const secondDb = await openExtraConnection();
