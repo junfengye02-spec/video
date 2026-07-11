@@ -34,15 +34,23 @@ def _parser() -> argparse.ArgumentParser:
     assign = commands.add_parser("assign-project")
     assign.add_argument("--project-id", required=True)
     assign.add_argument("--owner-email", required=True)
+    reconcile = commands.add_parser("reconcile-billing")
+    reconcile.add_argument("--once", action="store_true", required=True)
     return parser
 
 
 def _run_command(
     args: argparse.Namespace,
     db: Session,
-    session_store: SessionStore,
+    session_store: SessionStore | None,
+    *,
+    billing_client=None,
+    billing_settings=None,
+    media_store=None,
 ) -> int:
     if args.command == "create-admin":
+        if session_store is None:
+            raise ValueError("create-admin requires a session store")
         email = normalize_email(input("Admin email: "))
         password = getpass("Password: ")
         confirmation = getpass("Confirm password: ")
@@ -148,6 +156,22 @@ def _run_command(
             return 1
         print(f"Assigned project ID: {project.id}")
         return 0
+    if args.command == "reconcile-billing":
+        if billing_client is None or billing_settings is None or media_store is None:
+            raise ValueError("billing reconciliation dependencies are unavailable")
+        from datetime import datetime, timezone
+
+        from server.app.billing.reconciliation import reconcile_due_jobs
+
+        reconcile_due_jobs(
+            db,
+            billing_client,
+            datetime.now(timezone.utc),
+            100,
+            settings=billing_settings,
+            media_store=media_store,
+        )
+        return 0
     return 2
 
 
@@ -156,21 +180,55 @@ def run_manage(
     *,
     db_session: Session | None = None,
     session_store: SessionStore | None = None,
+    billing_client=None,
+    media_store=None,
+    settings=None,
 ) -> int:
     args = _parser().parse_args(argv)
-    if db_session is not None or session_store is not None:
-        if db_session is None or session_store is None:
+    if db_session is not None:
+        if args.command != "reconcile-billing" and session_store is None:
             raise ValueError("database session and session store must be supplied together")
-        return _run_command(args, db_session, session_store)
+        return _run_command(
+            args,
+            db_session,
+            session_store,
+            billing_client=billing_client,
+            billing_settings=settings,
+            media_store=media_store,
+        )
+    if session_store is not None:
+        raise ValueError("database session and session store must be supplied together")
+    if billing_client is not None or media_store is not None:
+        raise ValueError("injected dependencies require a database session")
 
     from server.app.core.config import get_settings
     from server.app.db.session import SessionLocal
+
+    settings = settings or get_settings()
+    if args.command == "reconcile-billing":
+        from server.app.provider.newapi import NewApiClient
+        from server.app.settings import DEFAULT_PROJECTS_ROOT
+        from server.app.storage import WorkbenchStore
+
+        client = NewApiClient(settings)
+        try:
+            with SessionLocal() as db:
+                return _run_command(
+                    args,
+                    db,
+                    None,
+                    billing_client=client,
+                    billing_settings=settings,
+                    media_store=WorkbenchStore(projects_root=DEFAULT_PROJECTS_ROOT),
+                )
+        finally:
+            client.close()
+
     from server.app.redis import get_redis
 
-    settings = get_settings()
-    session_store = SessionStore.from_settings(get_redis(), settings)
+    resolved_session_store = SessionStore.from_settings(get_redis(), settings)
     with SessionLocal() as db:
-        return _run_command(args, db, session_store)
+        return _run_command(args, db, resolved_session_store)
 
 
 def main(argv: list[str] | None = None) -> int:

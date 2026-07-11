@@ -918,7 +918,7 @@ class BillingService:
                 job.status = "failed_no_charge"
                 job.result_visible = False
                 if receipt.status == "refund_pending":
-                    self._open_reconciliation(job, "refund_pending")
+                    self._open_reconciliation(job, "upstream_refund_pending")
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
@@ -931,6 +931,40 @@ class BillingService:
         if receipt.status not in {"refunded", "refund_pending", "not_chargeable"}:
             raise InvalidBillingState("failure settlement requires a no-charge receipt")
         self.settle_job(job_id, receipt)
+
+    def fail_missing_receipt(self, job_id: str) -> None:
+        target = "receipt_missing_no_charge"
+        try:
+            job = self._lock_chargeable_job(job_id)
+            if job.status == target:
+                self.db.commit()
+                return
+            if job.status in _TERMINALS or job.status == "payment_required":
+                raise InvalidBillingState("cannot transition a terminal billing job")
+            if job.provider_reference_id is None:
+                raise InvalidBillingState("missing receipt requires a provider reference")
+            if job.status not in {
+                "reserved",
+                "reference_recovery_pending",
+                "receipt_pending",
+                "result_pending",
+            }:
+                raise InvalidBillingState("invalid missing receipt predecessor")
+            stored_receipt = self.db.scalar(
+                select(CostReceipt)
+                .where(CostReceipt.job_id == job.id)
+                .with_for_update()
+            )
+            if stored_receipt is not None:
+                raise InvalidBillingState("received provider receipt cannot become missing")
+            release_hold(self.db, job.id, reason=target)
+            job.status = target
+            job.result_visible = False
+            self._open_reconciliation(job, "receipt_missing")
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
     def retry_payment_required(self, job_id: str) -> None:
         try:

@@ -874,6 +874,60 @@ def test_failure_receipts_release_without_charge(
     assert bool(reconciliations) is expect_reconciliation
 
 
+def test_refund_pending_uses_upstream_reconciliation_reason(
+    db_session: Session, billing_service: BillingService
+) -> None:
+    child, task_id = bind_video_child(billing_service)
+
+    billing_service.fail_job(
+        child.id,
+        settled_receipt(task_id, status="refund_pending", cost_micro=0),
+    )
+
+    reconciliation = db_session.scalar(
+        select(BillingReconciliation).where(BillingReconciliation.job_id == child.id)
+    )
+    assert reconciliation is not None
+    assert reconciliation.reason == "upstream_refund_pending"
+
+
+def test_missing_receipt_releases_bound_pending_job_idempotently(
+    db_session: Session, billing_service: BillingService
+) -> None:
+    child, _task_id = bind_video_child(billing_service)
+    billing_service.mark_receipt_pending(child.id)
+
+    billing_service.fail_missing_receipt(child.id)
+    billing_service.fail_missing_receipt(child.id)
+
+    job = billing_service.load_job(child.id)
+    hold = db_session.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
+    reconciliation = db_session.scalar(
+        select(BillingReconciliation).where(BillingReconciliation.job_id == child.id)
+    )
+    assert job.status == "receipt_missing_no_charge"
+    assert job.result_visible is False
+    assert hold is not None and hold.status == "released"
+    assert reconciliation is not None and reconciliation.reason == "receipt_missing"
+    assert db_session.scalar(
+        select(func.count(WalletEntry.id)).where(WalletEntry.source_id == child.id)
+    ) == 0
+
+
+def test_missing_receipt_cannot_reverse_unbound_or_charge_terminal_jobs(
+    billing_service: BillingService, artifact_store: ArtifactStore
+) -> None:
+    unbound = reserve_child(billing_service)
+    with pytest.raises(InvalidBillingState, match="reference"):
+        billing_service.fail_missing_receipt(unbound.id)
+
+    billed, task_id = bind_video_child(billing_service)
+    stage_video(billing_service, artifact_store, billed, task_id)
+    billing_service.settle_job(billed.id, settled_receipt(task_id))
+    with pytest.raises(InvalidBillingState, match="terminal"):
+        billing_service.fail_missing_receipt(billed.id)
+
+
 def test_missing_result_releases_once_opens_reconciliation_and_late_receipt_is_audit_only(
     db_session: Session, billing_service: BillingService
 ) -> None:

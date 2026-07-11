@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -9,11 +10,13 @@ import stat
 import tempfile
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
+from server.app.billing.service import StagedArtifact
 from server.app.models import Project
 from server.app.projects.schemas import canonical_project_id
 
@@ -34,6 +37,106 @@ _WINDOWS_RESERVED_PATH_NAMES = {
     *(f"COM{number}" for number in range(1, 10)),
     *(f"LPT{number}" for number in range(1, 10)),
 }
+_HIDDEN_VIDEO_LOCATOR = re.compile(
+    r"^workbench-hidden-video:([0-9a-f]{32}):([0-9a-f]{32})$"
+)
+_PROVIDER_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,190}$")
+
+
+@dataclass(frozen=True, slots=True)
+class HiddenVideoArtifact:
+    locator: str
+    sha256: str
+    source_reference: str
+    capability: str
+    project_id: str
+    operation: str
+    hidden: bool
+    path: Path
+
+
+class HiddenVideoDestination:
+    def __init__(self, store: "WorkbenchStore", project_id: str, operation: str):
+        if (
+            type(operation) is not str
+            or not operation
+            or len(operation) > 191
+            or any(ord(character) < 32 for character in operation)
+        ):
+            raise ValueError("Video operation is invalid")
+        self._store = store
+        self.project_id = canonical_project_id(project_id)
+        self.operation = operation
+        self._directory = store._hidden_video_dir(self.project_id)
+        self._artifact_id = uuid.uuid4().hex
+        self.temporary_path = self._directory / f".{self._artifact_id}.partial"
+        self._metadata_partial = self._directory / f".{self._artifact_id}.json.partial"
+        self._committed = False
+        with self.temporary_path.open("xb"):
+            pass
+
+    def __enter__(self) -> "HiddenVideoDestination":
+        return self
+
+    def commit(self, *, sha256: str, source_reference: str) -> HiddenVideoArtifact:
+        if self._committed:
+            raise ValueError("Hidden video destination is already committed")
+        if (
+            type(sha256) is not str
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise ValueError("Video hash is invalid")
+        if (
+            type(source_reference) is not str
+            or _PROVIDER_REFERENCE.fullmatch(source_reference) is None
+        ):
+            raise ValueError("Video source reference is invalid")
+        _require_regular_unlinked_file(self.temporary_path, "staged video")
+        actual_sha256 = _sha256_file(self.temporary_path)
+        if actual_sha256 != sha256:
+            raise ValueError("Video hash does not match staged content")
+
+        locator = f"workbench-hidden-video:{self.project_id}:{self._artifact_id}"
+        final_path = self._directory / f"{self._artifact_id}.mp4"
+        metadata_path = self._directory / f"{self._artifact_id}.json"
+        metadata = {
+            "version": 1,
+            "locator": locator,
+            "project_id": self.project_id,
+            "operation": self.operation,
+            "source_reference": source_reference,
+            "capability": "video",
+            "hidden": True,
+            "sha256": actual_sha256,
+            "filename": final_path.name,
+        }
+        _write_json_durable(self._metadata_partial, metadata)
+        _publish_without_replacement(self.temporary_path, final_path)
+        try:
+            _publish_without_replacement(self._metadata_partial, metadata_path)
+        except Exception:
+            final_path.unlink(missing_ok=True)
+            raise
+        _fsync_directory(self._directory)
+        self._committed = True
+        return HiddenVideoArtifact(
+            locator=locator,
+            sha256=actual_sha256,
+            source_reference=source_reference,
+            capability="video",
+            project_id=self.project_id,
+            operation=self.operation,
+            hidden=True,
+            path=final_path,
+        )
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        for path in (self.temporary_path, self._metadata_partial):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove hidden video partial", exc_info=True)
 
 
 class ProjectRecoveryRequired(RuntimeError):
@@ -124,6 +227,90 @@ class WorkbenchStore:
 
     def artifact_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "artifacts"
+
+    def hidden_video_destination(
+        self, project_id: str, operation: str
+    ) -> HiddenVideoDestination:
+        return HiddenVideoDestination(self, project_id, operation)
+
+    def inspect_staged_artifact(self, locator: str) -> StagedArtifact:
+        match = _HIDDEN_VIDEO_LOCATOR.fullmatch(locator) if type(locator) is str else None
+        if match is None:
+            raise ValueError("Hidden video locator is invalid")
+        project_id, artifact_id = match.groups()
+        directory = self._hidden_video_dir(project_id, create=False)
+        metadata_path = directory / f"{artifact_id}.json"
+        video_path = directory / f"{artifact_id}.mp4"
+        _require_regular_unlinked_file(metadata_path, "hidden video metadata")
+        _require_regular_unlinked_file(video_path, "hidden video")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise ValueError("Hidden video metadata is invalid") from None
+        expected = {
+            "version": 1,
+            "locator": locator,
+            "project_id": project_id,
+            "operation": metadata.get("operation"),
+            "source_reference": metadata.get("source_reference"),
+            "capability": "video",
+            "hidden": True,
+            "sha256": metadata.get("sha256"),
+            "filename": video_path.name,
+        }
+        if metadata != expected:
+            raise ValueError("Hidden video metadata is invalid")
+        source_reference = metadata["source_reference"]
+        operation = metadata["operation"]
+        digest = metadata["sha256"]
+        if (
+            type(source_reference) is not str
+            or _PROVIDER_REFERENCE.fullmatch(source_reference) is None
+            or type(operation) is not str
+            or not operation
+            or len(operation) > 191
+            or any(ord(character) < 32 for character in operation)
+            or type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or _sha256_file(video_path) != digest
+        ):
+            raise ValueError("Hidden video artifact is invalid")
+        return StagedArtifact(
+            locator=locator,
+            sha256=digest,
+            source_reference=source_reference,
+            capability="video",
+        )
+
+    def exists(self, locator: str, *, sha256: str | None = None) -> bool:
+        try:
+            artifact = self.inspect_staged_artifact(locator)
+        except (OSError, ValueError):
+            return False
+        return sha256 is None or artifact.sha256 == sha256
+
+    def _hidden_video_dir(self, project_id: str, *, create: bool = True) -> Path:
+        canonical_id = canonical_project_id(project_id)
+        if _is_link_or_junction(self.projects_root):
+            raise ValueError("Projects root cannot be a link")
+        root = self.projects_root.resolve()
+        workspace = root / canonical_id
+        directories = (
+            workspace,
+            workspace / "assets",
+            workspace / "assets" / "video",
+            workspace / "assets" / "video" / ".hidden",
+        )
+        for directory in directories:
+            if directory.exists():
+                if _is_link_or_junction(directory) or not directory.is_dir():
+                    raise ValueError("Hidden video directory is invalid")
+            elif create:
+                directory.mkdir()
+            else:
+                raise ValueError("Hidden video directory is unavailable")
+        return directories[-1]
 
     def write_artifact(self, project_id: str, name: str, data: dict[str, Any]) -> Path:
         self._ensure_project_dirs(project_id)
@@ -452,6 +639,58 @@ class ProjectMutationJournal:
 def _is_link_or_junction(path: Path) -> bool:
     is_junction = getattr(path, "is_junction", lambda: False)
     return path.is_symlink() or is_junction()
+
+
+def _require_regular_unlinked_file(path: Path, label: str) -> None:
+    if _is_link_or_junction(path):
+        raise ValueError(f"{label} cannot be a link")
+    try:
+        details = path.stat(follow_symlinks=False)
+    except OSError:
+        raise ValueError(f"{label} is unavailable") from None
+    if not stat.S_ISREG(details.st_mode):
+        raise ValueError(f"{label} must be a regular file")
+    if details.st_nlink != 1:
+        raise ValueError(f"{label} cannot be a hard link")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_json_durable(path: Path, data: dict[str, Any]) -> None:
+    encoded = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    with path.open("xb") as output:
+        output.write(encoded)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _publish_without_replacement(source: Path, destination: Path) -> None:
+    try:
+        os.link(source, destination, follow_symlinks=False)
+    except OSError as exc:
+        if destination.exists():
+            raise ValueError("Hidden video artifact already exists") from None
+        raise OSError("Hidden video artifact could not be published") from exc
+    source.unlink()
+
+
+def _fsync_directory(directory: Path) -> None:
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _ensure_tree_has_no_links(root: Path) -> None:
