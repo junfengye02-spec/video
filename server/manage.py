@@ -30,6 +30,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("create-admin")
     migrate = commands.add_parser("migrate-legacy-projects")
     migrate.add_argument("--sqlite-path", required=True)
+    commands.add_parser("list-unowned-projects")
     assign = commands.add_parser("assign-project")
     assign.add_argument("--project-id", required=True)
     assign.add_argument("--owner-email", required=True)
@@ -76,6 +77,15 @@ def _run_command(
         for project_id in result.conflict_ids:
             print(f"Conflicting project ID: {project_id}", file=sys.stderr)
         return 1 if result.conflict_ids else 0
+    if args.command == "list-unowned-projects":
+        project_ids = db.scalars(
+            select(ProjectRecord.id)
+            .where(ProjectRecord.owner_user_id.is_(None))
+            .order_by(ProjectRecord.id)
+        ).all()
+        for project_id in project_ids:
+            print(project_id)
+        return 0
     if args.command == "assign-project":
         operator_email = normalize_email(input("Admin operator email: "))
         operator_password = getpass("Admin password: ")

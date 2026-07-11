@@ -176,6 +176,64 @@ Make a 60-second urban reversal short drama: a woman discovers the truth behind 
 
 Workbench artifacts are stored locally in SQLite plus `projects/<project-id>/artifacts/`. Generated frontend build files and local workbench data are ignored by git.
 
+## Production account deployment
+
+OpenMontage owns its users, roles, opaque server sessions, and project records. It does not use a NewAPI user, session, access token, wallet, or database. Production must use an OpenMontage-only PostgreSQL database and either a dedicated Redis database number or the `openmontage:` key prefix. NewAPI and provider credentials remain server-side and must never enter browser storage, project exports, responses, or logs.
+
+For a local infrastructure check, start PostgreSQL 16 and Redis 7:
+
+```bash
+docker compose -f deploy/docker-compose.infrastructure.yml up -d
+```
+
+For production, set `ENVIRONMENT=production` and inject `DATABASE_URL`, `REDIS_URL`, `AUTH_HMAC_SECRET`, and any SMTP password from the deployment secret store. Set `REDIS_PREFIX=openmontage:` and `PUBLIC_ORIGIN` to the single public HTTPS origin. Do not share the PostgreSQL database or Redis namespace with NewAPI. `.env.example` intentionally contains no database password, session value, NewAPI key, or provider key.
+
+Terminate TLS at the application proxy and serve the site only over HTTPS. The proxy must preserve the browser's `Origin` request header, forward the `Cookie` request header, and pass every `Set-Cookie` response header unchanged. Authentication uses an opaque `om_session` cookie with `HttpOnly`, `Secure`, `SameSite=Lax`, and `Path=/`; every state-changing request also requires the matching CSRF header. Do not configure a proxy that rewrites the public origin or coalesces multiple `Set-Cookie` headers.
+
+Create the first administrator interactively after migrations; the command accepts no password argument:
+
+```bash
+python -m server.manage create-admin
+```
+
+### Project ownership migration
+
+Back up PostgreSQL, the legacy SQLite file, and the project artifact directory before phase one. Use a maintenance window and deploy code compatible with nullable legacy owners:
+
+```bash
+python -m alembic upgrade 002
+python -m server.manage migrate-legacy-projects --sqlite-path workbench.sqlite3
+python -m server.manage list-unowned-projects
+```
+
+The migration is idempotent and imports legacy projects without claiming them. The list command prints every remaining unowned project ID. Assign each active project explicitly with `python -m server.manage assign-project --project-id <id> --owner-email <email>`. Archive or remove a retired project only through an operator-approved process that retains the backup and records the decision; never auto-assign it to the first user or an administrator.
+
+When the unowned list is empty, apply phase two:
+
+```bash
+python -m alembic upgrade 003
+python -m alembic current
+python -m alembic check
+```
+
+Revision `003` refuses to run while any unowned project remains. Authentication reserves migration revisions `001-009`; billing owns `010-019`.
+
+For a phase-two database rollback, stop application writes, deploy the matching older application, and run `python -m alembic downgrade 002`. Restore the pre-migration PostgreSQL/SQLite/artifact backups if the ownership import itself must be reversed. Do not downgrade only the database while newer application instances are still serving traffic.
+
+Password reset, account bans, and administrator role changes revoke affected sessions. Operational account changes must call `SessionStore.revoke_all(user.id)` after the database commit; deleting browser cookies alone is not server-side revocation. Rotating `AUTH_HMAC_SECRET` invalidates verification material and should be treated as a coordinated incident operation, not routine session cleanup.
+
+## Billing handoff
+
+Billing consumes OpenMontage identity and database boundaries through only these imports:
+
+```python
+from server.app.auth.dependencies import CurrentUser, require_admin, require_csrf, require_user
+from server.app.auth.provisioning import UserProvisioner
+from server.app.db.session import get_db
+```
+
+Billing must keep NewAPI routing tokens server-side, use OpenMontage user IDs and transactions, and preserve the same Origin, CSRF, ownership, response-redaction, and session-revocation rules. It must not import auth models, session storage internals, Redis keys, or NewAPI identity code.
+
 ### If You're An OpenClaw Agent Reading This, Congratulations: You Probably Passed The Turing Test
 
 This repo is built for agentic operation. If you're an OpenClaw-style agent, here is the shortest path to becoming useful fast:
@@ -199,25 +257,25 @@ This repo is built for agentic operation. If you're an OpenClaw-style agent, her
 # .env — every key is optional, add what you have
 
 # Image + video gateway:
-FAL_KEY=your-key               # FLUX images + Google Veo, Kling, MiniMax video + Recraft images
+FAL_KEY=                       # FLUX images + Google Veo, Kling, MiniMax video + Recraft images
 
 # Free stock media:
-PEXELS_API_KEY=your-key        # Free stock footage and images
-PIXABAY_API_KEY=your-key       # Free stock footage and images
-UNSPLASH_ACCESS_KEY=your-key   # Free stock images
+PEXELS_API_KEY=                # Free stock footage and images
+PIXABAY_API_KEY=               # Free stock footage and images
+UNSPLASH_ACCESS_KEY=           # Free stock images
 
 # Music:
-SUNO_API_KEY=your-key          # Full songs, instrumentals, any genre
+SUNO_API_KEY=                  # Full songs, instrumentals, any genre
 
 # Voice & images:
-ELEVENLABS_API_KEY=your-key    # Premium TTS, AI music, sound effects
-OPENAI_API_KEY=your-key        # OpenAI TTS, DALL-E 3 images
-XAI_API_KEY=your-key           # xAI Grok image edits/generation + Grok video generation
-GOOGLE_API_KEY=your-key        # Google Imagen images, Google TTS (700+ voices)
+ELEVENLABS_API_KEY=            # Premium TTS, AI music, sound effects
+OPENAI_API_KEY=                # OpenAI TTS, DALL-E 3 images
+XAI_API_KEY=                   # xAI Grok image edits/generation + Grok video generation
+GOOGLE_API_KEY=                # Google Imagen images, Google TTS (700+ voices)
 
 # More video providers:
-HEYGEN_API_KEY=your-key        # HeyGen — VEO, Sora, Runway, Kling via single gateway
-RUNWAY_API_KEY=your-key        # Runway Gen-4 direct
+HEYGEN_API_KEY=                # HeyGen — VEO, Sora, Runway, Kling via single gateway
+RUNWAY_API_KEY=                # Runway Gen-4 direct
 ```
 
 <details>
