@@ -76,6 +76,7 @@ describe("ProjectsPage", () => {
 
     expect(await screen.findByText("雨夜来信")).toBeInTheDocument();
     expect(screen.getByText("8 个分镜")).toBeInTheDocument();
+    expect(screen.getByText("未生成成片")).toBeInTheDocument();
     expect(screen.getByText("雨夜来信").closest("li")).toHaveClass("project-item");
     expect(screen.getByRole("link", { name: "打开 雨夜来信" })).toHaveAttribute(
       "href",

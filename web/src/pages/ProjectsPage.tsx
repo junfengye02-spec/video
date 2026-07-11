@@ -182,7 +182,9 @@ export function ProjectsPage() {
                 <time dateTime={project.updatedAt}>
                   {strings.updatedAt(new Date(project.updatedAt).toLocaleString("zh-CN"))}
                 </time>
-                {project.hasFinalRender ? <span>{strings.finalRenderReady}</span> : null}
+                <span className={`status-pill ${project.hasFinalRender ? "status-complete" : "status-pending"}`}>
+                  {project.hasFinalRender ? "已有成片" : "未生成成片"}
+                </span>
               </div>
               <div className="project-actions">
                 <Link
