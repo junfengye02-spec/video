@@ -38,8 +38,10 @@ const localProjectStoreMocks = vi.hoisted(() => ({
 
 const localMediaStoreMocks = vi.hoisted(() => ({
   cacheRemoteMedia: vi.fn(),
+  findCommittedMedia: vi.fn(),
   loadMediaBlob: vi.fn(),
   saveMediaBlob: vi.fn(),
+  startMediaRecoveryController: vi.fn(),
 }));
 
 const localExportMocks = vi.hoisted(() => ({
@@ -140,6 +142,11 @@ describe("App routes", () => {
       persisted: false,
     });
     localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue(null);
+    localMediaStoreMocks.findCommittedMedia.mockResolvedValue(null);
+    localMediaStoreMocks.startMediaRecoveryController.mockReturnValue({
+      dispose: vi.fn(),
+      run: vi.fn().mockResolvedValue(0),
+    });
     localMediaUrlMocks.resolveLocalMediaUrl.mockResolvedValue(null);
   });
 
@@ -162,6 +169,51 @@ describe("App routes", () => {
     await waitFor(() => expect(localProjectStoreMocks.loadProjectSnapshot).toHaveBeenCalledWith("p1"));
     expect(apiMocks.loadLatestProject).not.toHaveBeenCalled();
     expect(await screen.findByRole("heading", { name: "\u8d44\u6e90\u5e93" })).toBeInTheDocument();
+  });
+
+  it("renders exact non-blocking local backup status without exposing internal refs", async () => {
+    const cache = deferred<string | null>();
+    const current = cloneProjectResponse();
+    const regeneratedShot = {
+      ...current.storyboard.shots[0],
+      output_path: "assets/video/status-shot.mp4",
+      output_url: null,
+    };
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: current.project.title,
+      updatedAt: "2026-07-11T08:00:00Z",
+      snapshot: current,
+    });
+    apiMocks.regenerateShot.mockResolvedValue({
+      job_id: "status-shot",
+      event: {
+        id: "status-shot",
+        job_id: "status-shot",
+        project_id: "p1",
+        stage: "regenerate",
+        status: "complete",
+        message: "complete",
+        created_at: "2026-07-11T08:00:00Z",
+      },
+      shot: regeneratedShot,
+      storyboard: { ...current.storyboard, shots: [regeneratedShot, ...current.storyboard.shots.slice(1)] },
+      consistency_report: current.consistency_report,
+    });
+    localMediaStoreMocks.cacheRemoteMedia.mockReturnValue(cache.promise);
+    const rendered = renderAppAt("/projects/p1/storyboard");
+    await screen.findByLabelText(zh.shotEditor.promptLabel);
+    await enterProviderCredentials();
+    fireEvent.click(screen.getByRole("button", { name: /关闭接口配置/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: zh.shotEditor.regenerateAction }));
+
+    expect(await screen.findByText("姝ｅ湪淇濆瓨鍒版湰鏈篳", { selector: "[role='status']" }))
+      .toHaveAttribute("role", "status");
+    expect(rendered.container.innerHTML).not.toContain("local://media/");
+    cache.resolve(null);
+    expect(await screen.findByText("鏈満澶囦唤绋嶅悗閲嶈瘯", { selector: "[role='status']" }))
+      .toHaveAttribute("role", "status");
   });
 
   it("keeps the newest project when rapid deep-link loads resolve out of order", async () => {

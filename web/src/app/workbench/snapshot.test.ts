@@ -1,10 +1,72 @@
 import { describe, expect, it } from "vitest";
 import { createProjectResponse, createShot } from "../../test/fixtures";
 import {
+  applyCommittedMediaOverlays,
+  collectRemoteMediaSourcePaths,
   emptyContinuityPlan,
   mergeAuthoritativeMediaOverlays,
   replaceShotInSnapshot,
 } from "./snapshot";
+
+describe("committed media hydration overlays", () => {
+  it("enumerates unique remote shot, final, and asset source paths", () => {
+    const current = createProjectResponse();
+    current.storyboard.shots[0].output_path = "assets/video/shot-1.mp4";
+    current.storyboard.shots[0].output_url = "/api/projects/p1/media/assets/video/shot-1.mp4";
+    current.storyboard.shots[1].output_path = "local://media/already-local";
+    current.final_path = "renders/final.mp4";
+    current.series_bible.assets![0].reference_images = ["assets/images/mara.png"];
+    current.series_bible.assets![0].media_urls = [
+      "assets/images/mara.png",
+      "local://media/asset-local",
+    ];
+
+    expect(collectRemoteMediaSourcePaths(current)).toEqual([
+      "assets/images/mara.png",
+      "assets/video/shot-1.mp4",
+      "renders/final.mp4",
+    ]);
+  });
+
+  it("applies local refs only where the snapshot still has the exact committed source", () => {
+    const current = createProjectResponse();
+    current.storyboard.shots[0].output_path = "assets/video/shot-1.mp4";
+    current.storyboard.shots[0].output_url = "assets/video/shot-old.mp4";
+    current.final_path = "renders/final-new.mp4";
+    current.series_bible.assets![0].reference_images = ["assets/images/mara.png"];
+    current.series_bible.assets![0].media_urls = ["assets/images/mara-new.png"];
+
+    const overlaid = applyCommittedMediaOverlays(current, new Map([
+      ["assets/video/shot-1.mp4", "local://media/shot-1" as const],
+      ["assets/video/shot-old.mp4", "local://media/shot-old" as const],
+      ["renders/final-old.mp4", "local://media/final-old" as const],
+      ["assets/images/mara.png", "local://media/mara" as const],
+      ["assets/images/missing.png", "local://media/missing" as const],
+    ]));
+
+    expect(overlaid.storyboard.shots[0]).toMatchObject({
+      output_path: "local://media/shot-1",
+      output_url: null,
+    });
+    expect(overlaid.final_path).toBe("renders/final-new.mp4");
+    expect(overlaid.series_bible.assets![0].reference_images).toEqual(["local://media/mara"]);
+    expect(overlaid.series_bible.assets![0].media_urls).toEqual(["assets/images/mara-new.png"]);
+    expect(JSON.stringify(overlaid)).not.toContain("local://media/missing");
+  });
+
+  it("does not overlay a stale shot URL behind a newer active output path", () => {
+    const current = createProjectResponse();
+    current.storyboard.shots[0].output_path = "assets/video/shot-new.mp4";
+    current.storyboard.shots[0].output_url = "assets/video/shot-old.mp4";
+
+    const overlaid = applyCommittedMediaOverlays(current, new Map([
+      ["assets/video/shot-old.mp4", "local://media/shot-old" as const],
+    ]));
+
+    expect(overlaid.storyboard.shots[0].output_path).toBe("assets/video/shot-new.mp4");
+    expect(overlaid.storyboard.shots[0].output_url).toBe("assets/video/shot-old.mp4");
+  });
+});
 
 const snapshot = createProjectResponse();
 const sampleShot = createShot();

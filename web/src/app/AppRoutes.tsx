@@ -75,6 +75,17 @@ function ErrorSurface() {
   );
 }
 
+function LocalBackupStatusSurface() {
+  const { localBackupStatus } = useWorkbench();
+  if (localBackupStatus === "idle") return null;
+
+  return (
+    <p className="workbench-local-backup-status" role="status">
+      {zh.localBackup[localBackupStatus]}
+    </p>
+  );
+}
+
 function RootLayout() {
   const [providerOpen, setProviderOpen] = useState(false);
 
@@ -216,6 +227,7 @@ function ProjectLayout() {
       onBeforeNavigate={confirmNavigation}
     >
       <ErrorSurface />
+      <LocalBackupStatusSurface />
       {content}
     </AppShell>
   );

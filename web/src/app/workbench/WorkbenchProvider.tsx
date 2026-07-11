@@ -37,7 +37,12 @@ import type {
   Storyboard,
 } from "../../domain/types";
 import { detectLocale, getStrings } from "../../i18n";
-import { cacheRemoteMedia, loadMediaBlob } from "../../localdb/mediaStore";
+import {
+  cacheRemoteMedia,
+  findCommittedMedia,
+  loadMediaBlob,
+  startMediaRecoveryController,
+} from "../../localdb/mediaStore";
 import { resolveLocalMediaUrl, revokeLocalMediaUrls } from "../../localdb/mediaUrls";
 import {
   loadProjectSnapshot,
@@ -46,9 +51,15 @@ import {
 } from "../../localdb/projectStore";
 import { getStorageEstimate } from "../../localdb/storageEstimate";
 import type { LocalMediaRef } from "../../localdb/types";
-import { emptyContinuityPlan, mergeAuthoritativeMediaOverlays } from "./snapshot";
+import {
+  applyCommittedMediaOverlays,
+  collectRemoteMediaSourcePaths,
+  emptyContinuityPlan,
+  mergeAuthoritativeMediaOverlays,
+} from "./snapshot";
 import type {
   CreateProjectInput,
+  LocalBackupStatus,
   WorkbenchBusyState,
   WorkbenchContextValue,
 } from "./types";
@@ -94,6 +105,11 @@ type ProjectOperationToken = {
   name: ProjectOperationName;
   projectId: string;
   sequence: number;
+};
+
+type BackgroundCacheJobToken = {
+  generation: number;
+  id: number;
 };
 
 const INITIAL_OPERATION_SEQUENCES: Record<ProjectOperationName, number> = {
@@ -212,44 +228,6 @@ function mergeRenderResponse(
   };
 }
 
-function valueChanged(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) !== JSON.stringify(right);
-}
-
-function mergeConcurrentSnapshotChanges(
-  base: ShortDramaProjectResponse,
-  beforeAwait: ShortDramaProjectResponse,
-  afterAwait: ShortDramaProjectResponse,
-): ShortDramaProjectResponse {
-  return {
-    ...base,
-    project: valueChanged(beforeAwait.project, afterAwait.project) ? afterAwait.project : base.project,
-    series_bible: valueChanged(beforeAwait.series_bible, afterAwait.series_bible)
-      ? afterAwait.series_bible
-      : base.series_bible,
-    storyboard: valueChanged(beforeAwait.storyboard, afterAwait.storyboard)
-      ? afterAwait.storyboard
-      : base.storyboard,
-    consistency_report: valueChanged(
-      beforeAwait.consistency_report,
-      afterAwait.consistency_report,
-    ) ? afterAwait.consistency_report : base.consistency_report,
-    continuity_plan: valueChanged(beforeAwait.continuity_plan, afterAwait.continuity_plan)
-      ? afterAwait.continuity_plan
-      : base.continuity_plan,
-    workflow_artifacts: valueChanged(
-      beforeAwait.workflow_artifacts,
-      afterAwait.workflow_artifacts,
-    ) ? afterAwait.workflow_artifacts : base.workflow_artifacts,
-    render_report: valueChanged(beforeAwait.render_report, afterAwait.render_report)
-      ? afterAwait.render_report
-      : base.render_report,
-    final_path: valueChanged(beforeAwait.final_path, afterAwait.final_path)
-      ? afterAwait.final_path
-      : base.final_path,
-  };
-}
-
 function isCompleteRenderSource(
   path: string | null | undefined,
   report: RenderReport | null | undefined,
@@ -297,8 +275,12 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const previousMediaProjectIdRef = useRef<string | null>(null);
   const mediaMountedRef = useRef(true);
   const resolvingMediaRefsRef = useRef(new Set<string>());
+  const failedMediaRefsRef = useRef(new Set<string>());
   const mediaGenerationRef = useRef(0);
   const mediaResetSnapshotRef = useRef<ShortDramaProjectResponse | null>(null);
+  const backgroundCacheGenerationRef = useRef(0);
+  const nextBackgroundCacheJobRef = useRef(0);
+  const backgroundCacheJobsRef = useRef(new Map<number, LocalBackupStatus>());
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null);
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -307,9 +289,43 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   >({});
   const [mediaGeneration, setMediaGeneration] = useState(0);
   const [mediaWakeVersion, setMediaWakeVersion] = useState(0);
+  const [localBackupStatus, setLocalBackupStatus] = useState<LocalBackupStatus>("idle");
   const [providerCredentials, setProviderCredentials] = useState(INITIAL_CREDENTIALS);
   const [maskedKeys, setMaskedKeys] = useState<WorkbenchContextValue["maskedKeys"]>(null);
   const [busy, setBusy] = useState(INITIAL_BUSY);
+
+  const updateLocalBackupStatus = useCallback(() => {
+    const jobs = Array.from(backgroundCacheJobsRef.current.values());
+    setLocalBackupStatus(
+      jobs.includes("saving") ? "saving" : jobs.includes("retrying") ? "retrying" : "idle",
+    );
+  }, []);
+
+  const resetLocalBackupState = useCallback(() => {
+    backgroundCacheGenerationRef.current += 1;
+    backgroundCacheJobsRef.current.clear();
+    setLocalBackupStatus("idle");
+  }, []);
+
+  const beginBackgroundCacheJob = useCallback((): BackgroundCacheJobToken => {
+    const token = {
+      generation: backgroundCacheGenerationRef.current,
+      id: ++nextBackgroundCacheJobRef.current,
+    };
+    backgroundCacheJobsRef.current.set(token.id, "saving");
+    updateLocalBackupStatus();
+    return token;
+  }, [updateLocalBackupStatus]);
+
+  const finishBackgroundCacheJob = useCallback((
+    token: BackgroundCacheJobToken,
+    failed: boolean,
+  ) => {
+    if (token.generation !== backgroundCacheGenerationRef.current) return;
+    if (failed) backgroundCacheJobsRef.current.set(token.id, "retrying");
+    else backgroundCacheJobsRef.current.delete(token.id);
+    updateLocalBackupStatus();
+  }, [updateLocalBackupStatus]);
 
   const setBusyValue = useCallback(
     <K extends keyof WorkbenchBusyState>(key: K, value: WorkbenchBusyState[K]) => {
@@ -322,11 +338,12 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     projectEpochRef.current += 1;
     projectLoadGenerationRef.current += 1;
     creationSequenceRef.current += 1;
+    resetLocalBackupState();
     setBusy((current) => ({
       ...INITIAL_BUSY,
       savingProvider: current.savingProvider,
     }));
-  }, []);
+  }, [resetLocalBackupState]);
 
   const beginProjectOperation = useCallback(
     (name: ProjectOperationName, projectId: string): ProjectOperationToken => {
@@ -345,6 +362,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
 
   const applyProjectSnapshot = useCallback((next: ShortDramaProjectResponse) => {
     const previousProjectId = snapshotRef.current?.project.id ?? null;
+    if (previousProjectId && previousProjectId !== next.project.id) resetLocalBackupState();
     snapshotRef.current = next;
     snapshotRevisionRef.current += 1;
     setSnapshot(next);
@@ -356,7 +374,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       if (current && shots.some((shot) => shot.id === current)) return current;
       return shots[0]?.id ?? null;
     });
-  }, []);
+  }, [resetLocalBackupState]);
 
   const refreshStorageEstimate = useCallback(async () => {
     try {
@@ -395,6 +413,56 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     [applyAndPersistProjectSnapshot],
   );
 
+  const persistBackgroundIfCurrent = useCallback(
+    async (
+      projectId: string,
+      mutate: (current: ShortDramaProjectResponse) => ShortDramaProjectResponse,
+      isCurrent: () => boolean,
+    ): Promise<boolean> => {
+      const repairCurrentSnapshot = async (): Promise<boolean> => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const latest = snapshotRef.current;
+          if (latest?.project.id !== projectId) return false;
+          const revision = snapshotRevisionRef.current;
+          try {
+            await saveProjectSnapshot(latest);
+          } catch {
+            return false;
+          }
+          if (snapshotRef.current?.project.id !== projectId) return false;
+          if (revision === snapshotRevisionRef.current) return true;
+        }
+        return false;
+      };
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const current = snapshotRef.current;
+        if (current?.project.id !== projectId || !isCurrent()) return false;
+        const revision = snapshotRevisionRef.current;
+        const next = mutate(current);
+        try {
+          await saveProjectSnapshot(next);
+        } catch {
+          return false;
+        }
+        const latest = snapshotRef.current;
+        if (latest?.project.id !== projectId) return false;
+        if (!isCurrent()) {
+          return repairCurrentSnapshot();
+        }
+        if (revision !== snapshotRevisionRef.current) continue;
+        applyProjectSnapshot(next);
+        if (snapshotRef.current?.project.id === projectId) {
+          void refreshStorageEstimate();
+          return true;
+        }
+      }
+      await repairCurrentSnapshot();
+      return false;
+    },
+    [applyProjectSnapshot, refreshStorageEstimate],
+  );
+
   const refreshAuthoritativeProject = useCallback(
     async (
       projectId: string,
@@ -415,6 +483,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
 
   const resetMediaResolver = useCallback(() => {
     mediaGenerationRef.current += 1;
+    failedMediaRefsRef.current.clear();
     revokeLocalMediaUrls();
     setLocalMediaUrls({});
     setMediaGeneration(mediaGenerationRef.current);
@@ -423,6 +492,11 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refreshStorageEstimate();
   }, [refreshStorageEstimate]);
+
+  useEffect(() => {
+    const controller = startMediaRecoveryController();
+    return () => controller.dispose();
+  }, []);
 
   useEffect(() => {
     const projectId = snapshot?.project.id ?? null;
@@ -436,6 +510,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => () => {
     mediaMountedRef.current = false;
+    backgroundCacheGenerationRef.current += 1;
+    backgroundCacheJobsRef.current.clear();
+    failedMediaRefsRef.current.clear();
     revokeLocalMediaUrls();
   }, []);
 
@@ -459,7 +536,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     if (hasStaleResolution) return;
     const unresolved = refs.filter((ref) => {
       const pendingKey = `${generation}:${projectId ?? ""}:${ref}`;
-      return !localMediaUrls[ref] && !resolvingMediaRefsRef.current.has(pendingKey);
+      return !localMediaUrls[ref]
+        && !resolvingMediaRefsRef.current.has(pendingKey)
+        && !failedMediaRefsRef.current.has(pendingKey);
     });
     if (unresolved.length === 0) return;
 
@@ -468,7 +547,11 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       resolvingMediaRefsRef.current.add(pendingKey);
       void resolveLocalMediaUrl(ref)
         .then((url) => {
-          if (!url) return;
+          if (!url) {
+            failedMediaRefsRef.current.add(pendingKey);
+            return;
+          }
+          failedMediaRefsRef.current.delete(pendingKey);
           const currentRefs = collectLocalMediaRefs(snapshotRef.current);
           if (
             !mediaMountedRef.current
@@ -485,7 +568,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
           }
           setLocalMediaUrls((current) => ({ ...current, [ref]: url }));
         })
-        .catch(() => undefined)
+        .catch(() => {
+          failedMediaRefsRef.current.add(pendingKey);
+        })
         .finally(() => {
           resolvingMediaRefsRef.current.delete(pendingKey);
           if (mediaMountedRef.current) {
@@ -526,7 +611,24 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       pendingProjectLoadRef.current = null;
       if (!record) return false;
 
-      applyProjectSnapshot(record.snapshot);
+      const overlays = new Map<string, LocalMediaRef>();
+      await Promise.all(collectRemoteMediaSourcePaths(record.snapshot).map(async (sourcePath) => {
+        try {
+          const media = await findCommittedMedia(projectId, sourcePath);
+          if (
+            media
+            && media.projectId === projectId
+            && media.sourcePath === sourcePath
+            && (media.state === undefined || media.state === "committed")
+          ) {
+            overlays.set(sourcePath, `local://media/${media.id}`);
+          }
+        } catch {
+          // A local index failure must not make the remote project snapshot unavailable.
+        }
+      }));
+      if (generation !== projectLoadGenerationRef.current) return true;
+      applyProjectSnapshot(applyCommittedMediaOverlays(record.snapshot, overlays));
       try {
         await setRecentProjectId(projectId);
       } catch {
@@ -726,22 +828,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  const cacheShotMedia = useCallback(
-    async (projectId: string, shot: Shot): Promise<Shot> => {
-      if (!shot.output_path || isLocalMediaRef(shot.output_path)) return shot;
-      const url = mediaUrl(shot.output_path, projectId);
-      if (!url) return shot;
-      const localRef = await cacheRemoteMedia(url, {
-        projectId,
-        sourcePath: shot.output_path,
-      });
-      if (!localRef) return shot;
-      void refreshStorageEstimate();
-      return { ...shot, output_path: localRef, output_url: null };
-    },
-    [refreshStorageEstimate],
-  );
-
   const regenerateSelectedShot = useCallback(
     async (shot: Shot): Promise<void> => {
       const current = snapshotRef.current;
@@ -766,22 +852,66 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
           base_url: credentials.base_url,
           video_model: credentials.video_model,
         });
-        const cachedShot = await cacheShotMedia(projectId, result.shot);
         if (!isCurrent()) return;
         const latest = snapshotRef.current;
         if (!latest) return;
         setEvents((items) => appendUniqueEvent(items, result.event));
+        const remoteSnapshot = mergeRegeneratedSnapshot(
+          latest,
+          result.storyboard,
+          result.shot,
+          result.consistency_report,
+          operationRevision !== snapshotRevisionRef.current,
+        );
         await persistIfCurrent(
           projectId,
-          mergeRegeneratedSnapshot(
-            latest,
-            result.storyboard,
-            cachedShot,
-            result.consistency_report,
-            operationRevision !== snapshotRevisionRef.current,
-          ),
+          remoteSnapshot,
           isCurrent,
         );
+        if (!isCurrent()) return;
+        const sourcePath = result.shot.output_path;
+        const url = sourcePath && !isLocalMediaRef(sourcePath)
+          ? mediaUrl(sourcePath, projectId)
+          : null;
+        if (!sourcePath || !url) return;
+        const entityId = result.shot.id;
+        const entityVersion = result.shot.version;
+        const publishedRevision = snapshotRevisionRef.current;
+        const cacheJob = beginBackgroundCacheJob();
+        void (async () => {
+          try {
+            const localRef = await cacheRemoteMedia(url, { projectId, sourcePath });
+            if (!localRef) throw new Error("Remote media was not cached");
+            const promotionIsCurrent = () => {
+              if (!isCurrent() || snapshotRevisionRef.current < publishedRevision) return false;
+              const currentShot = snapshotRef.current?.storyboard.shots.find(
+                (item) => item.id === entityId,
+              );
+              return currentShot?.version === entityVersion
+                && currentShot.output_path === sourcePath;
+            };
+            if (!promotionIsCurrent()) {
+              finishBackgroundCacheJob(cacheJob, false);
+              return;
+            }
+            const persisted = await persistBackgroundIfCurrent(
+              projectId,
+              (currentSnapshot) => ({
+                ...currentSnapshot,
+                storyboard: {
+                  ...currentSnapshot.storyboard,
+                  shots: currentSnapshot.storyboard.shots.map((item) => item.id === entityId
+                    ? { ...item, output_path: localRef, output_url: null }
+                    : item),
+                },
+              }),
+              promotionIsCurrent,
+            );
+            finishBackgroundCacheJob(cacheJob, !persisted);
+          } catch {
+            finishBackgroundCacheJob(cacheJob, true);
+          }
+        })();
       } catch (regenerationError) {
         const message = errorMessage(
           regenerationError,
@@ -795,8 +925,10 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     },
     [
       beginProjectOperation,
-      cacheShotMedia,
+      beginBackgroundCacheJob,
+      finishBackgroundCacheJob,
       isProjectOperationCurrent,
+      persistBackgroundIfCurrent,
       persistIfCurrent,
       providerCredentials,
       setBusyValue,
@@ -903,18 +1035,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  const cacheFinalRender = useCallback(
-    async (projectId: string, path: string | null): Promise<string | null> => {
-      if (!path || isLocalMediaRef(path)) return path;
-      const url = mediaUrl(path, projectId);
-      if (!url) return path;
-      const localRef = await cacheRemoteMedia(url, { projectId, sourcePath: path });
-      void refreshStorageEstimate();
-      return localRef ?? path;
-    },
-    [refreshStorageEstimate],
-  );
-
   const renderFinal = useCallback(async (): Promise<void> => {
     const current = snapshotRef.current;
     if (!current?.storyboard.shots.length) {
@@ -946,68 +1066,99 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       const latest = snapshotRef.current;
       if (!latest) return;
       setEvents((items) => appendUniqueEvent(items, result.event));
-      applyProjectSnapshot(mergeRenderResponse(
+      const remoteSnapshot = mergeRenderResponse(
         latest,
         result,
         responseBaseRevision !== snapshotRevisionRef.current,
-      ));
+      );
+      await persistIfCurrent(projectId, remoteSnapshot, isCurrent);
+      if (!isCurrent()) return;
 
-      let authoritative: ShortDramaProjectResponse | null = null;
-      try {
-        authoritative = await refreshAuthoritativeProject(projectId, isCurrent);
-      } catch {
-        // The POST response is the render fallback when the full refresh fails.
-      }
-      if (!isCurrent()) return;
-      const latestBeforeCache = snapshotRef.current;
-      if (!latestBeforeCache) return;
-      const completeAuthoritative = authoritative
-        && isCompleteRenderSource(authoritative.final_path, authoritative.render_report)
-        ? authoritative
-        : null;
-      const completionSnapshotBase = completeAuthoritative
-        ? mergeAuthoritativeMediaOverlays(completeAuthoritative, latestBeforeCache)
-        : latestBeforeCache;
-      const selectedReport = completeAuthoritative
-        ? completeAuthoritative.render_report as RenderReport
-        : result.render_report;
-      const selectedSource = completeAuthoritative
-        ? completeAuthoritative.final_path as string
-        : result.final_path;
-      const completionBase: ShortDramaProjectResponse = {
-        ...completionSnapshotBase,
-        render_report: selectedReport,
-        final_path: selectedSource,
-      };
-      const cacheBaseRevision = snapshotRevisionRef.current;
-      const cachedFinalPath = await cacheFinalRender(projectId, selectedSource);
-      if (!isCurrent()) return;
-      const latestAfterCache = snapshotRef.current;
-      if (!latestAfterCache) return;
-      const renderReportChangedDuringCache = valueChanged(
-        latestBeforeCache.render_report,
-        latestAfterCache.render_report,
-      );
-      const finalPathChangedDuringCache = valueChanged(
-        latestBeforeCache.final_path,
-        latestAfterCache.final_path,
-      );
-      const reconciled = cacheBaseRevision === snapshotRevisionRef.current
-        ? completionBase
-        : mergeConcurrentSnapshotChanges(
-            completionBase,
-            latestBeforeCache,
-            latestAfterCache,
+      const publishedRevision = snapshotRevisionRef.current;
+      const responseSource = result.final_path;
+      const responseEntityVersion = JSON.stringify(result.render_report.outputs);
+      const cacheJob = beginBackgroundCacheJob();
+      void (async () => {
+        try {
+          let selectedSource = responseSource;
+          let selectedReport = result.render_report;
+          const responseIsCurrent = () => (
+            isCurrent()
+            && snapshotRevisionRef.current >= publishedRevision
+            && snapshotRef.current?.final_path === responseSource
+            && JSON.stringify(snapshotRef.current.render_report?.outputs ?? []) === responseEntityVersion
           );
-      await persistIfCurrent(projectId, {
-        ...reconciled,
-        render_report: renderReportChangedDuringCache
-          ? reconciled.render_report
-          : selectedReport,
-        final_path: finalPathChangedDuringCache
-          ? reconciled.final_path
-          : cachedFinalPath,
-      }, isCurrent);
+
+          let authoritative: ShortDramaProjectResponse | null = null;
+          try {
+            authoritative = await refreshAuthoritativeProject(projectId, responseIsCurrent);
+          } catch {
+            // The persisted POST result remains authoritative when refresh is unavailable.
+          }
+          if (!isCurrent()) {
+            finishBackgroundCacheJob(cacheJob, false);
+            return;
+          }
+          if (
+            authoritative
+            && isCompleteRenderSource(authoritative.final_path, authoritative.render_report)
+            && responseIsCurrent()
+          ) {
+            const currentSnapshot = snapshotRef.current;
+            if (!currentSnapshot) {
+              finishBackgroundCacheJob(cacheJob, false);
+              return;
+            }
+            selectedSource = authoritative.final_path as string;
+            selectedReport = authoritative.render_report as RenderReport;
+            const persisted = await persistBackgroundIfCurrent(
+              projectId,
+              (latestSnapshot) => {
+                const reconciled = mergeAuthoritativeMediaOverlays(authoritative, latestSnapshot);
+                return {
+                  ...reconciled,
+                  render_report: selectedReport,
+                  final_path: selectedSource,
+                };
+              },
+              responseIsCurrent,
+            );
+            if (!persisted) throw new Error("Render reconciliation was not persisted");
+          }
+
+          const sourceRevision = snapshotRevisionRef.current;
+          const selectedEntityVersion = JSON.stringify(selectedReport.outputs);
+          const promotionIsCurrent = () => (
+            isCurrent()
+            && snapshotRevisionRef.current >= sourceRevision
+            && snapshotRef.current?.final_path === selectedSource
+            && JSON.stringify(snapshotRef.current.render_report?.outputs ?? []) === selectedEntityVersion
+          );
+          if (!promotionIsCurrent()) {
+            finishBackgroundCacheJob(cacheJob, false);
+            return;
+          }
+          const url = mediaUrl(selectedSource, projectId);
+          if (!url) throw new Error("Final render URL is unavailable");
+          const localRef = await cacheRemoteMedia(url, {
+            projectId,
+            sourcePath: selectedSource,
+          });
+          if (!localRef) throw new Error("Final render was not cached");
+          if (!promotionIsCurrent()) {
+            finishBackgroundCacheJob(cacheJob, false);
+            return;
+          }
+          const persisted = await persistBackgroundIfCurrent(
+            projectId,
+            (currentSnapshot) => ({ ...currentSnapshot, final_path: localRef }),
+            promotionIsCurrent,
+          );
+          finishBackgroundCacheJob(cacheJob, !persisted);
+        } catch {
+          finishBackgroundCacheJob(cacheJob, true);
+        }
+      })();
     } catch (renderError) {
       const message = errorMessage(renderError, strings.errors.renderFallback);
       if (isCurrent()) setError(message);
@@ -1016,10 +1167,11 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       if (isCurrent()) setBusyValue("rendering", false);
     }
   }, [
-    applyProjectSnapshot,
+    beginBackgroundCacheJob,
     beginProjectOperation,
-    cacheFinalRender,
+    finishBackgroundCacheJob,
     isProjectOperationCurrent,
+    persistBackgroundIfCurrent,
     persistIfCurrent,
     providerCredentials,
     refreshAuthoritativeProject,
@@ -1097,6 +1249,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     error,
     finalRenderUrl,
     localMediaUrls,
+    localBackupStatus,
     providerCredentials,
     maskedKeys,
     providerReady: maskedKeys !== null,

@@ -30,6 +30,8 @@ export interface WorkbenchBusyState {
   uploadingReference: boolean;
 }
 
+export type LocalBackupStatus = "idle" | "saving" | "retrying";
+
 export interface WorkbenchContextValue {
   snapshot: ShortDramaProjectResponse | null;
   selectedShotId: string | null;
@@ -37,6 +39,7 @@ export interface WorkbenchContextValue {
   error: string | null;
   finalRenderUrl: string | null;
   localMediaUrls: Partial<Record<LocalMediaRef, string>>;
+  localBackupStatus: LocalBackupStatus;
   providerCredentials: ProviderCredentials;
   maskedKeys: GatewayKeySession["masked_keys"] | null;
   providerReady: boolean;

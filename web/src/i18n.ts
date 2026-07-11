@@ -8,6 +8,10 @@ export interface UIStrings {
     defaultPrompt: string;
     untitledProjectTitle: string;
   };
+  localBackup: {
+    saving: string;
+    retrying: string;
+  };
   appShell: {
     workbenchTitle: string;
     projectControlsLabel: string;
@@ -344,6 +348,10 @@ const STRINGS: Record<Locale, UIStrings> = {
       defaultPrompt:
         "Make a 60-second urban reversal short drama: a woman discovers the truth behind her boss on a rainy night.",
       untitledProjectTitle: "Untitled Short Drama",
+    },
+    localBackup: {
+      saving: "Saving to this browser",
+      retrying: "Local backup will retry later",
     },
     appShell: {
       workbenchTitle: "OpenMontage Short Drama Workbench",
@@ -749,6 +757,10 @@ const STRINGS: Record<Locale, UIStrings> = {
       defaultPrompt:
         "\u521b\u4f5c\u4e00\u4e2a 60 \u79d2\u7684\u90fd\u5e02\u53cd\u8f6c\u77ed\u5267\uff1a\u96e8\u591c\u91cc\uff0c\u4e00\u540d\u5973\u4eba\u53d1\u73b0\u4e86\u8001\u677f\u80cc\u540e\u7684\u771f\u76f8\u3002",
       untitledProjectTitle: "\u672a\u547d\u540d\u77ed\u5267",
+    },
+    localBackup: {
+      saving: "姝ｅ湪淇濆瓨鍒版湰鏈篳",
+      retrying: "鏈満澶囦唤绋嶅悗閲嶈瘯",
     },
     appShell: {
       workbenchTitle: "OpenMontage 短剧工作台",

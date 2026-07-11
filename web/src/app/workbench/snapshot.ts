@@ -6,9 +6,70 @@ import type {
   ShortDramaProjectResponse,
   Shot,
 } from "../../domain/types";
+import type { LocalMediaRef } from "../../localdb/types";
 
 function isLocalMediaRef(value: string | null | undefined): value is string {
   return typeof value === "string" && value.startsWith("local://media/");
+}
+
+function isRemoteMediaSource(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.trim().length > 0 && !isLocalMediaRef(value);
+}
+
+export function collectRemoteMediaSourcePaths(
+  snapshot: ShortDramaProjectResponse,
+): string[] {
+  const sources = new Set<string>();
+  const add = (value: string | null | undefined) => {
+    if (isRemoteMediaSource(value)) sources.add(value);
+  };
+
+  for (const asset of snapshot.series_bible.assets ?? []) {
+    asset.reference_images.forEach(add);
+    asset.media_urls?.forEach(add);
+  }
+  for (const shot of snapshot.storyboard.shots) {
+    add(shot.output_path ?? shot.output_url);
+  }
+  add(snapshot.final_path);
+  return Array.from(sources).sort();
+}
+
+function applyMediaListOverlays(
+  values: string[] | undefined,
+  overlays: ReadonlyMap<string, LocalMediaRef>,
+): string[] | undefined {
+  return values?.map((value) => overlays.get(value) ?? value);
+}
+
+export function applyCommittedMediaOverlays(
+  snapshot: ShortDramaProjectResponse,
+  overlays: ReadonlyMap<string, LocalMediaRef>,
+): ShortDramaProjectResponse {
+  return {
+    ...snapshot,
+    series_bible: {
+      ...snapshot.series_bible,
+      assets: snapshot.series_bible.assets?.map((asset) => ({
+        ...asset,
+        reference_images: applyMediaListOverlays(asset.reference_images, overlays) ?? [],
+        media_urls: applyMediaListOverlays(asset.media_urls, overlays),
+      })),
+    },
+    storyboard: {
+      ...snapshot.storyboard,
+      shots: snapshot.storyboard.shots.map((shot) => {
+        const activeSource = shot.output_path ?? shot.output_url;
+        const localRef = isRemoteMediaSource(activeSource)
+          ? overlays.get(activeSource)
+          : undefined;
+        return localRef ? { ...shot, output_path: localRef, output_url: null } : shot;
+      }),
+    },
+    final_path: isRemoteMediaSource(snapshot.final_path)
+      ? overlays.get(snapshot.final_path) ?? snapshot.final_path
+      : snapshot.final_path,
+  };
 }
 
 function mergeCompatibleMediaList(
