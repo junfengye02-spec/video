@@ -9,6 +9,10 @@ import {
   saveMediaBlob,
 } from "./mediaStore";
 import {
+  claimNextDueMediaOperation,
+  completeMediaJournalRecord,
+} from "./mediaJournal";
+import {
   installTestStorage,
   type TestStorageController,
   type TestStorageOptions,
@@ -56,6 +60,8 @@ type Task2MediaStore = typeof mediaStoreModule & {
 const task2MediaStore = mediaStoreModule as Task2MediaStore;
 
 const originalStorage = Object.getOwnPropertyDescriptor(Navigator.prototype, "storage");
+const originalVisibilityState = Object.getOwnPropertyDescriptor(document, "visibilityState");
+const realSetTimeout = globalThis.setTimeout.bind(globalThis);
 
 async function blobFromText(text: string, contentType: string): Promise<Blob> {
   return new Response(text, { headers: { "content-type": contentType } }).blob();
@@ -136,6 +142,56 @@ async function getRecord<T>(storeName: string, id: string): Promise<T | null> {
     db.transaction(storeName, "readonly").objectStore(storeName).get(id),
   );
   return value ?? null;
+}
+
+async function letRecoveryCompleteOperation(operationId: string): Promise<void> {
+  const operation = await getRecord<MediaJournalRecord>("mediaOperations", operationId);
+  await put("mediaOperations", {
+    ...operation,
+    nextAttemptAt: "2000-01-01T00:00:00.000Z",
+    leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+  });
+  const now = new Date();
+  await expect(claimNextDueMediaOperation("race-recovery", {
+    now: () => now,
+    leaseDurationMs: 60_000,
+  })).resolves.toMatchObject({ id: operationId });
+  await expect(completeMediaJournalRecord(operationId, "race-recovery", {
+    now: () => now,
+  })).resolves.toBe(true);
+}
+
+async function seedCleanupOperation(
+  id: string,
+  mediaId: string,
+  nextAttemptAt: string,
+): Promise<void> {
+  await put("mediaOperations", {
+    id,
+    kind: "media_write",
+    mediaId,
+    projectId: "p1",
+    importSessionId: null,
+    sourcePath: `assets/${mediaId}.mp4`,
+    contentType: "video/mp4",
+    sizeBytes: 1,
+    opfsPath: `openmontage-media/${mediaId}`,
+    state: "cleanup_due",
+    createdAt: nextAttemptAt,
+    updatedAt: nextAttemptAt,
+    attempts: 0,
+    nextAttemptAt,
+    leaseOwner: null,
+    leaseExpiresAt: null,
+  });
+}
+
+async function waitForStorageState(check: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (await check()) return;
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+  }
+  throw new Error("Timed out waiting for storage state");
 }
 
 function installOpfs(options: {
@@ -236,6 +292,11 @@ afterEach(async () => {
     Object.defineProperty(Navigator.prototype, "storage", originalStorage);
   } else {
     delete (Navigator.prototype as { storage?: StorageManager }).storage;
+  }
+  if (originalVisibilityState) {
+    Object.defineProperty(document, "visibilityState", originalVisibilityState);
+  } else {
+    delete (document as unknown as Record<string, unknown>).visibilityState;
   }
   await deleteLocalDb();
 });
@@ -420,6 +481,191 @@ describe("mediaStore", () => {
 });
 
 describe("streaming durable media writes", () => {
+  it("does not create or truncate OPFS bytes after recovery takes an opening writer", async () => {
+    const boundaries: Array<{
+      options: TestStorageOptions;
+      started(storage: TestStorageController): Promise<void>;
+      release(storage: TestStorageController): void;
+    }> = [
+      {
+        options: { pauseGetDirectory: true },
+        started: (storage) => storage.directoryStarted,
+        release: (storage) => storage.releaseDirectory(),
+      },
+      {
+        options: { pauseDirectoryHandle: true },
+        started: (storage) => storage.directoryHandleStarted,
+        release: (storage) => storage.releaseDirectoryHandle(),
+      },
+      {
+        options: { pauseGetFileHandle: true },
+        started: (storage) => storage.fileHandleStarted,
+        release: (storage) => storage.releaseFileHandle(),
+      },
+      {
+        options: { pauseCreateWritable: true },
+        started: (storage) => storage.createWritableStarted,
+        release: (storage) => storage.releaseCreateWritable(),
+      },
+    ];
+
+    for (const boundary of boundaries) {
+      await deleteLocalDb();
+      await seedProject();
+      const storage = installTestStorage(boundary.options);
+      const beginning = task2MediaStore.beginMediaWrite({
+        projectId: "p1",
+        sourcePath: "assets/open-race.mp4",
+        contentType: "video/mp4",
+        sizeBytes: 0,
+      });
+      await boundary.started(storage);
+      const [operation] = await getAll<MediaOperationRecord>("mediaOperations");
+      await letRecoveryCompleteOperation(operation.id);
+      boundary.release(storage);
+
+      await expect(beginning).rejects.toThrow(/lease/i);
+      expect(storage.files.size).toBe(0);
+      storage.restore();
+    }
+  });
+
+  it("does not close an idle writer after its lease has been recovered", async () => {
+    const storage = installTestStorage();
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/idle.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 0,
+    });
+    const operation = await getRecord<MediaOperationRecord>("mediaOperations", session.operationId);
+    await put("mediaOperations", {
+      ...operation,
+      nextAttemptAt: "2000-01-01T00:00:00.000Z",
+      leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+    });
+    await task2MediaStore.runMediaRecovery();
+
+    await expect(session.commit()).rejects.toThrow(/lease/i);
+    expect(storage.closeCalls).toBe(0);
+    expect(storage.files.size).toBe(0);
+  });
+
+  it("rechecks the writer token after a paused close loses to recovery", async () => {
+    const storage = installTestStorage({ pauseClose: true });
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/close-race.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await session.write(new Uint8Array([1]));
+    const committing = session.commit();
+    await storage.closeStarted;
+    const operation = await getRecord<MediaOperationRecord>("mediaOperations", session.operationId);
+    await put("mediaOperations", {
+      ...operation,
+      nextAttemptAt: "2000-01-01T00:00:00.000Z",
+      leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+    });
+    await task2MediaStore.runMediaRecovery();
+    storage.releaseClose();
+
+    await expect(committing).rejects.toBeDefined();
+    expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeNull();
+    expect(storage.files.size).toBe(0);
+  });
+
+  it.each(["indexeddb", "opfs"] as const)(
+    "synchronously reserves commit against writes and duplicate commits in %s",
+    async (mode) => {
+      let storage: TestStorageController | null = null;
+      if (mode === "indexeddb") {
+        Object.defineProperty(Navigator.prototype, "storage", {
+          configurable: true,
+          value: {},
+        });
+      } else {
+        storage = installTestStorage({ pauseClose: true });
+      }
+      const session = await task2MediaStore.beginMediaWrite({
+        projectId: "p1",
+        sourcePath: `assets/terminal-${mode}.mp4`,
+        contentType: "video/mp4",
+        sizeBytes: 1,
+      });
+      await session.write(new Uint8Array([1]));
+
+      const committing = session.commit();
+      const duplicate = session.commit();
+      const lateWrite = session.write(new Uint8Array([2]));
+      storage?.releaseClose();
+
+      await expect(duplicate).rejects.toThrow(/not open|committing/i);
+      await expect(lateWrite).rejects.toThrow(/not open|committing/i);
+      await expect(committing).resolves.toBe(session.mediaRef);
+      await expect(session.write(new Uint8Array([3]))).rejects.toThrow(/not open/i);
+    },
+  );
+
+  it.each(["indexeddb", "opfs"] as const)(
+    "does not let abort return before an in-flight %s commit settles",
+    async (mode) => {
+      let storage: TestStorageController | null = null;
+      if (mode === "indexeddb") {
+        Object.defineProperty(Navigator.prototype, "storage", {
+          configurable: true,
+          value: {},
+        });
+      } else {
+        storage = installTestStorage({ pauseClose: true });
+      }
+      const session = await task2MediaStore.beginMediaWrite({
+        projectId: "p1",
+        sourcePath: `assets/abort-race-${mode}.mp4`,
+        contentType: "video/mp4",
+        sizeBytes: 1,
+      });
+      await session.write(new Uint8Array([1]));
+      let commitSettled = false;
+      const committing = session.commit().finally(() => {
+        commitSettled = true;
+      });
+      const aborting = session.abort(new Error("too late"));
+      storage?.releaseClose();
+
+      await aborting;
+      expect(commitSettled).toBe(true);
+      await expect(committing).resolves.toBe(session.mediaRef);
+      expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).not.toBeNull();
+      if (storage) expect(storage.closeCalls).toBe(1);
+    },
+  );
+
+  it.each(["indexeddb", "opfs"] as const)(
+    "lets an earlier abort prevent a later %s commit",
+    async (mode) => {
+      if (mode === "indexeddb") {
+        Object.defineProperty(Navigator.prototype, "storage", {
+          configurable: true,
+          value: {},
+        });
+      } else {
+        installTestStorage();
+      }
+      const session = await task2MediaStore.beginMediaWrite({
+        projectId: "p1",
+        sourcePath: `assets/abort-first-${mode}.mp4`,
+        contentType: "video/mp4",
+        sizeBytes: 0,
+      });
+
+      await session.abort();
+      await expect(session.commit()).rejects.toThrow(/not open|aborted/i);
+      expect(await task2MediaStore.loadMediaBlob(session.mediaRef)).toBeNull();
+    },
+  );
+
   it("journals before OPFS and never touches OPFS when journaling fails", async () => {
     const storage = installTestStorage();
     const originalAdd = IDBObjectStore.prototype.add;
@@ -667,6 +913,59 @@ describe("streaming durable media writes", () => {
 });
 
 describe("durable media recovery", () => {
+  it("preserves media committed and reassigned during import-session cleanup", async () => {
+    const storage = installTestStorage({ pauseRemove: true });
+    storage.seedFile("staged-first", new Uint8Array([1]), Date.now());
+    storage.seedFile("staged-second", new Uint8Array([2]), Date.now());
+    const timestamp = new Date().toISOString();
+    await put("mediaOperations", {
+      id: "import-cleanup",
+      kind: "import_session",
+      projectId: "p1",
+      mediaIds: ["staged-first", "staged-second"],
+      state: "cleanup_due",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      attempts: 0,
+      nextAttemptAt: timestamp,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    });
+    for (const id of ["staged-first", "staged-second"]) {
+      await put("media", {
+        id,
+        projectId: "p1",
+        sourcePath: `assets/${id}.mp4`,
+        contentType: "video/mp4",
+        sizeBytes: 1,
+        createdAt: timestamp,
+        state: "staged",
+        importSessionId: "import-cleanup",
+        storage: "opfs",
+        opfsPath: `openmontage-media/${id}`,
+      });
+    }
+
+    const recovering = task2MediaStore.runMediaRecovery({ leaseOwner: "import-recovery" });
+    await storage.removeStarted;
+    const second = await getRecord<LocalMediaRecord>("media", "staged-second");
+    await put("media", {
+      ...second,
+      projectId: "other-project",
+      state: "committed",
+      importSessionId: null,
+    });
+    storage.releaseRemove();
+
+    await expect(recovering).resolves.toBe(1);
+    expect(storage.files.has("staged-first")).toBe(false);
+    expect(storage.files.has("staged-second")).toBe(true);
+    expect(await getRecord("media", "staged-first")).toBeNull();
+    expect(await getRecord<LocalMediaRecord>("media", "staged-second"))
+      .toMatchObject({ projectId: "other-project", state: "committed", importSessionId: null });
+    expect(await getRecord("mediaOperations", "import-cleanup")).toBeNull();
+  });
+
   it("recovers an expired crashed writer after recreating the controller", async () => {
     const storage = installTestStorage();
     const session = await task2MediaStore.beginMediaWrite({
@@ -784,5 +1083,104 @@ describe("durable media recovery", () => {
     recheckStorage.releaseDirectory();
     await expect(scanning).resolves.toBe(0);
     expect(recheckStorage.files.has("rechecked")).toBe(true);
+  });
+});
+
+describe("media recovery controller lifecycle", () => {
+  it("runs at the earliest durable due timer", async () => {
+    let nowMs = Date.now();
+    const dueAt = new Date(nowMs + 5_000).toISOString();
+    const storage = installTestStorage();
+    storage.seedFile("timer-media", new Uint8Array([1]), nowMs);
+    await seedCleanupOperation("timer-operation", "timer-media", dueAt);
+    let scheduledCallback: (() => void) | null = null;
+    let scheduledDelay: number | undefined;
+    const scheduled = deferred<void>();
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: TimerHandler, delay?: number) => {
+      if (typeof callback === "function") scheduledCallback = callback as () => void;
+      scheduledDelay = delay;
+      scheduled.resolve();
+      return 1;
+    }) as typeof setTimeout);
+
+    const controller = task2MediaStore.startMediaRecoveryController({
+      now: () => new Date(nowMs),
+      leaseOwner: "timer-controller",
+    });
+    await controller.run();
+    await scheduled.promise;
+    expect(scheduledDelay).toBe(5_000);
+
+    nowMs += 5_000;
+    scheduledCallback!();
+    await waitForStorageState(async () =>
+      (await getRecord("mediaOperations", "timer-operation")) === null);
+    expect(storage.files.has("timer-media")).toBe(false);
+    controller.dispose();
+  });
+
+  it("runs recovery when the document becomes visible", async () => {
+    let nowMs = Date.now();
+    const dueAt = new Date(nowMs + 60_000).toISOString();
+    const storage = installTestStorage();
+    storage.seedFile("visible-media", new Uint8Array([1]), nowMs);
+    await seedCleanupOperation("visible-operation", "visible-media", dueAt);
+    const controller = task2MediaStore.startMediaRecoveryController({
+      now: () => new Date(nowMs),
+      leaseOwner: "visible-controller",
+    });
+    await controller.run();
+
+    nowMs += 60_000;
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitForStorageState(async () =>
+      (await getRecord("mediaOperations", "visible-operation")) === null);
+    expect(storage.files.has("visible-media")).toBe(false);
+    controller.dispose();
+  });
+
+  it("dispose removes the visibility listener and clears the durable timer", async () => {
+    const nowMs = Date.now();
+    const dueAt = new Date(nowMs + 60_000).toISOString();
+    installTestStorage();
+    await seedCleanupOperation("dispose-operation", "dispose-media", dueAt);
+    const addSpy = vi.spyOn(document, "addEventListener");
+    const removeSpy = vi.spyOn(document, "removeEventListener");
+    const clearSpy = vi.spyOn(globalThis, "clearTimeout");
+    const controller = task2MediaStore.startMediaRecoveryController({
+      now: () => new Date(nowMs),
+    });
+    await controller.run();
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+    const visibilityListener = addSpy.mock.calls.find(([type]) => type === "visibilitychange")?.[1];
+
+    controller.dispose();
+
+    expect(visibilityListener).toBeTypeOf("function");
+    expect(removeSpy).toHaveBeenCalledWith("visibilitychange", visibilityListener);
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it("does not schedule another timer when disposed during in-flight recovery", async () => {
+    const now = new Date();
+    const storage = installTestStorage({ pauseRemove: true });
+    storage.seedFile("inflight-media", new Uint8Array([1]), now.getTime());
+    await seedCleanupOperation("inflight-operation", "inflight-media", now.toISOString());
+    const timerSpy = vi.spyOn(globalThis, "setTimeout");
+    const controller = task2MediaStore.startMediaRecoveryController({
+      now: () => now,
+      leaseOwner: "inflight-controller",
+    });
+    const running = controller.run();
+    await storage.removeStarted;
+    timerSpy.mockClear();
+
+    controller.dispose();
+    storage.releaseRemove();
+    await running;
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+
+    expect(timerSpy).not.toHaveBeenCalled();
   });
 });

@@ -387,33 +387,92 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
   const createdAt = new Date().toISOString();
   const chunks: Uint8Array[] = [];
   let bytesWritten = 0;
-  let status: "open" | "committed" | "aborted" | "failed" = "open";
+  let status: "open" | "committing" | "committed" | "aborting" | "aborted" | "failed" = "open";
+  let writeTail: Promise<void> = Promise.resolve();
+  let writeFailure: unknown;
+  let terminalPromise: Promise<LocalMediaRef> | null = null;
+  let abortPromise: Promise<void> | null = null;
   const storage = storageManager();
+
+  function stateError(): Error {
+    return new Error(`Media write session is not open (${status})`);
+  }
+
+  function enqueueWrite(work: () => Promise<void>): Promise<void> {
+    if (status !== "open") return Promise.reject(stateError());
+    const task = writeTail.then(async () => {
+      if (writeFailure !== undefined) throw writeFailure;
+      await work();
+    });
+    writeTail = task.catch((error) => {
+      writeFailure ??= error;
+    });
+    return task;
+  }
+
+  function startCommit(work: () => Promise<LocalMediaRef>): Promise<LocalMediaRef> {
+    if (status !== "open") return Promise.reject(stateError());
+    status = "committing";
+    const task = writeTail.then(async () => {
+      if (writeFailure !== undefined) throw writeFailure;
+      return work();
+    });
+    terminalPromise = task.then(
+      (result) => {
+        status = "committed";
+        return result;
+      },
+      (error) => {
+        status = "failed";
+        throw error;
+      },
+    );
+    return terminalPromise;
+  }
+
+  function startAbort(work: () => Promise<void>): Promise<void> {
+    if (status === "committing" || status === "committed") {
+      return (terminalPromise ?? Promise.resolve(ref)).then(
+        () => undefined,
+        () => undefined,
+      );
+    }
+    if (status === "aborting" || status === "aborted") {
+      return abortPromise ?? Promise.resolve();
+    }
+    if (status === "failed") return Promise.resolve();
+    status = "aborting";
+    abortPromise = writeTail.then(work, work).finally(() => {
+      status = "aborted";
+    });
+    return abortPromise;
+  }
 
   if (!storage?.getDirectory) {
     await validateMediaOwner(input);
     return {
       operationId,
       mediaRef: ref,
-      async write(chunk) {
-        if (status !== "open") throw new Error("Media write session is not open");
+      write(chunk) {
         const stableChunk = new Uint8Array(chunk);
-        chunks.push(stableChunk);
-        bytesWritten += stableChunk.byteLength;
+        return enqueueWrite(async () => {
+          chunks.push(stableChunk);
+          bytesWritten += stableChunk.byteLength;
+        });
       },
-      async commit() {
-        if (status !== "open") throw new Error("Media write session is not open");
-        assertExpectedSize(bytesWritten, input.sizeBytes);
-        const bytes = concatenateChunks(chunks, bytesWritten);
-        await commitIndexedDbMedia(input, id, createdAt, bytes);
-        status = "committed";
-        chunks.length = 0;
-        return ref;
+      commit() {
+        return startCommit(async () => {
+          assertExpectedSize(bytesWritten, input.sizeBytes);
+          const bytes = concatenateChunks(chunks, bytesWritten);
+          await commitIndexedDbMedia(input, id, createdAt, bytes);
+          chunks.length = 0;
+          return ref;
+        });
       },
-      async abort() {
-        if (status === "committed") return;
-        status = "aborted";
-        chunks.length = 0;
+      abort() {
+        return startAbort(async () => {
+          chunks.length = 0;
+        });
       },
     };
   }
@@ -431,20 +490,35 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
     leaseOwner,
   });
 
+  async function renewWriterLease(): Promise<void> {
+    const renewed = await renewMediaOperationLease(operation.id, leaseOwner);
+    if (!renewed) throw new Error(`Media operation ${operation.id} lost its writer lease`);
+  }
+
+  async function cleanupOpeningFile(): Promise<void> {
+    await removeOpfsPath(operation.opfsPath).catch(() => undefined);
+  }
+
   let fileHandle: FileSystemFileHandle;
   let writable: FileSystemWritableFileStream;
   try {
-    const directory = await openMediaDirectory(true);
+    const root = await storage.getDirectory();
+    await renewWriterLease();
+    const directory = await root.getDirectoryHandle(OPFS_MEDIA_DIR, { create: true });
+    await renewWriterLease();
     fileHandle = await directory.getFileHandle(id, { create: true });
+    await renewWriterLease();
     writable = await fileHandle.createWritable();
+    await renewWriterLease();
   } catch (error) {
+    await cleanupOpeningFile();
     await markCleanupBestEffort(operation.id, leaseOwner);
     throw error;
   }
 
   async function fail(error: unknown): Promise<never> {
-    status = "failed";
-    await writable.close().catch(() => undefined);
+    const renewed = await renewMediaOperationLease(operation.id, leaseOwner).catch(() => null);
+    if (renewed) await writable.close().catch(() => undefined);
     await markCleanupBestEffort(operation.id, leaseOwner);
     throw error;
   }
@@ -452,40 +526,42 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
   return {
     operationId,
     mediaRef: ref,
-    async write(chunk) {
-      if (status !== "open") throw new Error("Media write session is not open");
-      try {
-        const renewed = await renewMediaOperationLease(operation.id, leaseOwner);
-        if (!renewed) throw new Error(`Media operation ${operation.id} lost its writer lease`);
-        await writable.write(new Uint8Array(chunk));
-        bytesWritten += chunk.byteLength;
-      } catch (error) {
-        return fail(error);
-      }
-    },
-    async commit() {
-      if (status !== "open") throw new Error("Media write session is not open");
-      try {
-        assertExpectedSize(bytesWritten, input.sizeBytes);
-        await writable.close();
-        const physicalFile = await fileHandle.getFile();
-        assertExpectedSize(storedFileSize(physicalFile), input.sizeBytes);
-        await commitOpfsMedia(operation.id, leaseOwner, createdAt);
-        status = "committed";
-        return ref;
-      } catch (error) {
-        if (status === "open") {
-          status = "failed";
-          await markCleanupBestEffort(operation.id, leaseOwner);
+    write(chunk) {
+      const stableChunk = new Uint8Array(chunk);
+      return enqueueWrite(async () => {
+        try {
+          await renewWriterLease();
+          await writable.write(stableChunk);
+          await renewWriterLease();
+          bytesWritten += stableChunk.byteLength;
+        } catch (error) {
+          return fail(error);
         }
-        throw error;
-      }
+      });
     },
-    async abort() {
-      if (status === "committed" || status === "aborted") return;
-      status = "aborted";
-      await writable.close().catch(() => undefined);
-      await markCleanupBestEffort(operation.id, leaseOwner);
+    commit() {
+      return startCommit(async () => {
+        try {
+          assertExpectedSize(bytesWritten, input.sizeBytes);
+          await renewWriterLease();
+          await writable.close();
+          await renewWriterLease();
+          const physicalFile = await fileHandle.getFile();
+          assertExpectedSize(storedFileSize(physicalFile), input.sizeBytes);
+          await commitOpfsMedia(operation.id, leaseOwner, createdAt);
+          return ref;
+        } catch (error) {
+          await markCleanupBestEffort(operation.id, leaseOwner);
+          throw error;
+        }
+      });
+    },
+    abort() {
+      return startAbort(async () => {
+        const renewed = await renewMediaOperationLease(operation.id, leaseOwner).catch(() => null);
+        if (renewed) await writable.close().catch(() => undefined);
+        await markCleanupBestEffort(operation.id, leaseOwner);
+      });
     },
   };
 }
@@ -676,16 +752,33 @@ async function recoverImportSession(
   options: MediaRecoveryOptions,
 ): Promise<void> {
   const db = await openLocalDb();
-  const records = await Promise.all(session.mediaIds.map((id) => requestToPromise<LocalMediaRecord | undefined>(
-    db.transaction(LOCAL_STORES.media, "readonly").objectStore(LOCAL_STORES.media).get(id),
-  )));
-  for (const record of records) {
-    if (record?.state === "staged" && record.importSessionId === session.id && record.opfsPath) {
-      if (!await renewMediaRecoveryLease(session.id, leaseOwner, options)) {
-        throw new Error(`Import recovery lease ${session.id} expired`);
-      }
-      await removeOpfsPath(record.opfsPath);
+  for (const mediaId of session.mediaIds) {
+    if (!await renewMediaRecoveryLease(session.id, leaseOwner, options)) {
+      throw new Error(`Import recovery lease ${session.id} expired`);
     }
+    const readTx = db.transaction(
+      [LOCAL_STORES.mediaOperations, LOCAL_STORES.media],
+      "readonly",
+    );
+    const [currentSession, currentMedia] = await Promise.all([
+      requestToPromise<MediaJournalRecord | undefined>(
+        readTx.objectStore(LOCAL_STORES.mediaOperations).get(session.id),
+      ),
+      requestToPromise<LocalMediaRecord | undefined>(
+        readTx.objectStore(LOCAL_STORES.media).get(mediaId),
+      ),
+    ]);
+    const now = options.now?.() ?? new Date();
+    if (
+      !currentSession || currentSession.kind !== "import_session" ||
+      currentSession.state !== "cleanup_due" ||
+      !hasOwnedActiveLease(currentSession, leaseOwner, now) ||
+      !currentSession.mediaIds.includes(mediaId) ||
+      currentMedia?.state !== "staged" || currentMedia.importSessionId !== session.id
+    ) {
+      continue;
+    }
+    if (currentMedia.opfsPath) await removeOpfsPath(currentMedia.opfsPath);
   }
   if (!await renewMediaRecoveryLease(session.id, leaseOwner, options)) {
     throw new Error(`Import recovery lease ${session.id} expired before finalization`);
@@ -698,10 +791,14 @@ async function recoverImportSession(
     if (!current || current.state !== "cleanup_due" || !hasOwnedActiveLease(current, leaseOwner, now)) {
       throw new Error(`Import recovery lease ${session.id} expired before finalization`);
     }
+    if (current.kind !== "import_session") {
+      throw new Error(`Import recovery record ${session.id} changed kind`);
+    }
     const mediaStore = tx.objectStore(LOCAL_STORES.media);
-    for (const record of records) {
-      if (record?.state === "staged" && record.importSessionId === session.id) {
-        mediaStore.delete(record.id);
+    for (const mediaId of current.mediaIds) {
+      const record = await requestToPromise<LocalMediaRecord | undefined>(mediaStore.get(mediaId));
+      if (record?.state === "staged" && record.importSessionId === current.id) {
+        mediaStore.delete(mediaId);
       }
     }
     operationStore.delete(session.id);

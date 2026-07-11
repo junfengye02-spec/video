@@ -37,6 +37,9 @@ export interface TestStorageOptions {
   pauseClose?: boolean;
   pauseRemove?: boolean;
   pauseGetDirectory?: boolean;
+  pauseDirectoryHandle?: boolean;
+  pauseGetFileHandle?: boolean;
+  pauseCreateWritable?: boolean;
   verifiedSizeDelta?: number;
 }
 
@@ -47,9 +50,16 @@ export interface TestStorageController {
   readonly closeStarted: Promise<void>;
   readonly removeStarted: Promise<void>;
   readonly directoryStarted: Promise<void>;
+  readonly directoryHandleStarted: Promise<void>;
+  readonly fileHandleStarted: Promise<void>;
+  readonly createWritableStarted: Promise<void>;
+  readonly closeCalls: number;
   releaseClose(): void;
   releaseRemove(): void;
   releaseDirectory(): void;
+  releaseDirectoryHandle(): void;
+  releaseFileHandle(): void;
+  releaseCreateWritable(): void;
   seedFile(name: string, bytes: Uint8Array, lastModified: number): void;
   restore(): void;
 }
@@ -66,7 +76,14 @@ export function installTestStorage(
   const removeStarted = deferred<void>();
   const directoryStarted = deferred<void>();
   const directoryGate = deferred<void>();
+  const directoryHandleStarted = deferred<void>();
+  const directoryHandleGate = deferred<void>();
+  const fileHandleStarted = deferred<void>();
+  const fileHandleGate = deferred<void>();
+  const createWritableStarted = deferred<void>();
+  const createWritableGate = deferred<void>();
   let writeCalls = 0;
+  let closeCalls = 0;
 
   const removeEntry = vi.fn(async (name: string) => {
     removeStarted.resolve();
@@ -78,6 +95,8 @@ export function installTestStorage(
 
   const mediaDirectory = {
     async getFileHandle(name: string, handleOptions?: { create?: boolean }) {
+      fileHandleStarted.resolve();
+      if (options.pauseGetFileHandle) await fileHandleGate.promise;
       if (options.failCreateFile) throw options.failCreateFile;
       if (!files.has(name) && !handleOptions?.create) {
         throw new DOMException("File not found", "NotFoundError");
@@ -88,6 +107,8 @@ export function installTestStorage(
       }
       return {
         async createWritable() {
+          createWritableStarted.resolve();
+          if (options.pauseCreateWritable) await createWritableGate.promise;
           files.set(name, new Uint8Array());
           return {
             async write(chunk: FileSystemWriteChunkType) {
@@ -104,6 +125,7 @@ export function installTestStorage(
               modifiedAt.set(name, Date.now());
             },
             async close() {
+              closeCalls += 1;
               closeStarted.resolve();
               if (options.pauseClose) await closeGate.promise;
               if (options.failClose) throw options.failClose;
@@ -139,6 +161,8 @@ export function installTestStorage(
     if (options.failGetDirectory) throw options.failGetDirectory;
     return {
       async getDirectoryHandle() {
+        directoryHandleStarted.resolve();
+        if (options.pauseDirectoryHandle) await directoryHandleGate.promise;
         return mediaDirectory;
       },
     };
@@ -156,9 +180,18 @@ export function installTestStorage(
     closeStarted: closeStarted.promise,
     removeStarted: removeStarted.promise,
     directoryStarted: directoryStarted.promise,
+    directoryHandleStarted: directoryHandleStarted.promise,
+    fileHandleStarted: fileHandleStarted.promise,
+    createWritableStarted: createWritableStarted.promise,
+    get closeCalls() {
+      return closeCalls;
+    },
     releaseClose: () => closeGate.resolve(),
     releaseRemove: () => removeGate.resolve(),
     releaseDirectory: () => directoryGate.resolve(),
+    releaseDirectoryHandle: () => directoryHandleGate.resolve(),
+    releaseFileHandle: () => fileHandleGate.resolve(),
+    releaseCreateWritable: () => createWritableGate.resolve(),
     seedFile(name, bytes, lastModified) {
       files.set(name, bytes);
       modifiedAt.set(name, lastModified);
