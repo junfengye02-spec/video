@@ -753,7 +753,7 @@ func TestQuotePersistenceResponseAndAuditContainNoSecrets(t *testing.T) {
 	quote, row, responseBody, auditText := createQuoteWithKnownSecrets(t)
 	rowJSON, err := common.Marshal(row)
 	require.NoError(t, err)
-	for _, secret := range []string{"sk-owner-secret", "upstream-secret", "raw prompt"} {
+	for _, secret := range []string{"owner-token-fixture", "upstream-secret", "raw prompt"} {
 		assert.NotContains(t, string(rowJSON), secret)
 		assert.NotContains(t, string(responseBody), secret)
 		assert.NotContains(t, auditText, secret)
