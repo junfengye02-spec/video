@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,8 +20,19 @@ from server.app.projects.schemas import canonical_project_id
 logger = logging.getLogger("server.app.project_recovery")
 _OPERATION_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _OPERATION_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_CLEANUP_GUARD_PATTERN = re.compile(r"^([0-9a-f]{32})\.cleanup\.json$")
 _RECOVERY_STATES = {"active", "restoring", "recovery_failed", "recovered", "committed"}
 _HEALTHY_RECOVERY_STATES = {"committed", "recovered"}
+_CLEANUP_STATES = {"cleanup_pending", "cleanup_failed"}
+_WINDOWS_FORBIDDEN_PATH_CHARACTERS = frozenset('<>:"|?*')
+_WINDOWS_RESERVED_PATH_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 
 class ProjectRecoveryRequired(RuntimeError):
@@ -82,6 +94,18 @@ class WorkbenchStore:
         if _is_link_or_junction(project_recovery) or not project_recovery.is_dir():
             raise ProjectRecoveryRequired("Project recovery state is unavailable")
         for operation_dir in project_recovery.iterdir():
+            guard_match = _CLEANUP_GUARD_PATTERN.fullmatch(operation_dir.name)
+            if guard_match is not None:
+                guard = _read_marker(operation_dir)
+                if not _valid_cleanup_guard(
+                    guard,
+                    canonical_id,
+                    guard_match.group(1),
+                ):
+                    raise ProjectRecoveryRequired(
+                        "Project recovery state is unavailable"
+                    )
+                raise ProjectRecoveryRequired("Project recovery cleanup is required")
             if _is_link_or_junction(operation_dir) or not operation_dir.is_dir():
                 raise ProjectRecoveryRequired("Project recovery state is unavailable")
             if not _valid_recovery_operation_tree(operation_dir):
@@ -89,7 +113,12 @@ class WorkbenchStore:
             marker = _read_marker(operation_dir / "marker.json")
             if not _valid_marker(marker, canonical_id, operation_dir.name):
                 raise ProjectRecoveryRequired("Project recovery state is unavailable")
-            if marker.get("state") not in _HEALTHY_RECOVERY_STATES:
+            if marker.get("state") in _HEALTHY_RECOVERY_STATES:
+                if not _valid_terminal_manifest(operation_dir, marker):
+                    raise ProjectRecoveryRequired(
+                        "Project recovery state is unavailable"
+                    )
+            else:
                 raise ProjectRecoveryRequired("Project recovery is required")
 
     def artifact_dir(self, project_id: str) -> Path:
@@ -238,6 +267,8 @@ class ProjectMutationJournal:
         _ensure_controlled_directory(project_recovery, recovery_root)
         operation_dir = project_recovery / self.operation_id
         operation_dir.mkdir()
+        self._guard_path = project_recovery / f"{self.operation_id}.cleanup.json"
+        self._write_cleanup_guard("cleanup_pending")
         return operation_dir
 
     def _capture_path(self, relative_path: str) -> None:
@@ -354,11 +385,57 @@ class ProjectMutationJournal:
             },
         )
 
+    def _write_cleanup_guard(self, state: str) -> None:
+        if state not in _CLEANUP_STATES:
+            raise ValueError("Project recovery cleanup state is invalid")
+        project_recovery = self._root / ".recovery" / self._project_id
+        if (
+            self._guard_path.parent != project_recovery
+            or _is_link_or_junction(project_recovery)
+            or not project_recovery.is_dir()
+            or _is_link_or_junction(self._guard_path)
+        ):
+            raise ValueError("Project recovery path is invalid")
+        _atomic_write_json(
+            self._guard_path,
+            {
+                "project_id": self._project_id,
+                "operation_id": self.operation_id,
+                "operation": self.operation,
+                "state": state,
+            },
+        )
+
+    def _record_cleanup_failure(self) -> None:
+        try:
+            self._write_cleanup_guard("cleanup_failed")
+        except Exception:
+            pass
+        logger.error(
+            "project recovery cleanup failed project_id=%s operation_id=%s state=cleanup_failed",
+            self._project_id,
+            self.operation_id,
+        )
+
+    def _remove_cleanup_guard(self, project_recovery: Path) -> None:
+        if (
+            self._guard_path.parent != project_recovery
+            or _is_link_or_junction(self._guard_path)
+            or not self._guard_path.is_file()
+        ):
+            raise ValueError("Project recovery path is invalid")
+        self._guard_path.unlink()
+
     def _cleanup(self) -> None:
-        self._validate_operation_dir()
-        project_recovery = self._operation_dir.parent
+        project_recovery = self._guard_path.parent
         recovery_root = project_recovery.parent
-        _remove_controlled_tree(self._operation_dir, project_recovery)
+        try:
+            self._validate_operation_dir()
+            _remove_controlled_tree(self._operation_dir, project_recovery)
+            self._remove_cleanup_guard(project_recovery)
+        except Exception:
+            self._record_cleanup_failure()
+            raise
         try:
             project_recovery.rmdir()
         except OSError:
@@ -438,7 +515,7 @@ def _read_marker(path: Path) -> dict[str, Any]:
         return {"state": "invalid"}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {"state": "invalid"}
     return value if isinstance(value, dict) else {"state": "invalid"}
 
@@ -474,6 +551,170 @@ def _valid_marker(marker: dict[str, Any], project_id: str, operation_id: str) ->
         and _OPERATION_PATTERN.fullmatch(marker["operation"]) is not None
         and marker.get("state") in _RECOVERY_STATES
     )
+
+
+def _valid_cleanup_guard(
+    guard: dict[str, Any],
+    project_id: str,
+    operation_id: str,
+) -> bool:
+    if set(guard) != {"project_id", "operation_id", "operation", "state"}:
+        return False
+    return (
+        guard.get("project_id") == project_id
+        and guard.get("operation_id") == operation_id
+        and _OPERATION_ID_PATTERN.fullmatch(operation_id) is not None
+        and isinstance(guard.get("operation"), str)
+        and _OPERATION_PATTERN.fullmatch(guard["operation"]) is not None
+        and guard.get("state") in _CLEANUP_STATES
+    )
+
+
+def _valid_terminal_manifest(operation_dir: Path, marker: dict[str, Any]) -> bool:
+    manifest_path = operation_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "project_id",
+        "operation_id",
+        "operation",
+        "new_workspace",
+        "entries",
+        "created_dirs",
+    }:
+        return False
+    if (
+        manifest.get("project_id") != marker.get("project_id")
+        or manifest.get("operation_id") != marker.get("operation_id")
+        or manifest.get("operation_id") != operation_dir.name
+        or manifest.get("operation") != marker.get("operation")
+        or not isinstance(manifest.get("new_workspace"), bool)
+        or not isinstance(manifest.get("entries"), list)
+        or not isinstance(manifest.get("created_dirs"), list)
+    ):
+        return False
+
+    files: list[tuple[PurePosixPath, bool]] = []
+    for entry in manifest["entries"]:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "existed"}
+            or not isinstance(entry.get("existed"), bool)
+        ):
+            return False
+        path = _canonical_manifest_path(entry.get("path"))
+        if path is None:
+            return False
+        files.append((path, entry["existed"]))
+
+    directories: list[PurePosixPath] = []
+    for value in manifest["created_dirs"]:
+        path = _canonical_manifest_path(value)
+        if path is None:
+            return False
+        directories.append(path)
+
+    file_paths = [path for path, _existed in files]
+    file_keys = [_manifest_path_comparison_key(path) for path in file_paths]
+    directory_keys = [_manifest_path_comparison_key(path) for path in directories]
+    if len(set(file_keys)) != len(file_keys) or len(set(directory_keys)) != len(
+        directory_keys
+    ):
+        return False
+    for index, file_key in enumerate(file_keys):
+        for other_key in file_keys[index + 1 :]:
+            if _is_comparison_key_ancestor(
+                file_key, other_key
+            ) or _is_comparison_key_ancestor(other_key, file_key):
+                return False
+        for directory_key in directory_keys:
+            if file_key == directory_key or _is_comparison_key_ancestor(
+                file_key, directory_key
+            ):
+                return False
+
+    expected_files = {path for path, existed in files if existed}
+    expected_directories = {
+        PurePosixPath(*path.parts[:depth])
+        for path in expected_files
+        for depth in range(1, len(path.parts))
+    }
+    backups = operation_dir / "backups"
+    if not expected_files:
+        return not backups.exists() and not _is_link_or_junction(backups)
+    if _is_link_or_junction(backups) or not backups.is_dir():
+        return False
+
+    actual_files: set[PurePosixPath] = set()
+    actual_directories: set[PurePosixPath] = set()
+    pending = [backups]
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    if entry.is_symlink() or _is_link_or_junction(path):
+                        return False
+                    relative = PurePosixPath(*path.relative_to(backups).parts)
+                    if entry.is_dir(follow_symlinks=False):
+                        actual_directories.add(relative)
+                        pending.append(path)
+                    elif entry.is_file(follow_symlinks=False):
+                        if path.stat(follow_symlinks=False).st_nlink != 1:
+                            return False
+                        actual_files.add(relative)
+                    else:
+                        return False
+    except OSError:
+        return False
+    return (
+        actual_files == expected_files
+        and actual_directories == expected_directories
+    )
+
+
+def _canonical_manifest_path(value: Any) -> PurePosixPath | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.startswith(("/", "\\"))
+        or "\\" in value
+        or any(
+            character in _WINDOWS_FORBIDDEN_PATH_CHARACTERS
+            or unicodedata.category(character) == "Cc"
+            for character in value
+        )
+    ):
+        return None
+    components = value.split("/")
+    for component in components:
+        device_name = component.split(".", 1)[0].rstrip(" .").upper()
+        if (
+            component in {"", ".", ".."}
+            or component.endswith((".", " "))
+            or device_name in _WINDOWS_RESERVED_PATH_NAMES
+        ):
+            return None
+    try:
+        normalized = _normalize_relative_path(value)
+    except ValueError:
+        return None
+    if normalized != value:
+        return None
+    return PurePosixPath(normalized)
+
+
+def _manifest_path_comparison_key(path: PurePosixPath) -> tuple[str, ...]:
+    return tuple(component.casefold() for component in path.parts)
+
+
+def _is_comparison_key_ancestor(
+    parent: tuple[str, ...], child: tuple[str, ...]
+) -> bool:
+    return len(parent) < len(child) and child[: len(parent)] == parent
 
 
 def _utc_now() -> str:

@@ -260,13 +260,39 @@ def _require_owned_user(
     return project
 
 
+def _require_owned_reader(
+    project_id: str,
+    request: Request,
+    current: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> ProjectRecord:
+    project = ProjectRepository(db).require_owned_for_read(project_id, current.id)
+    _require_project_available(request, project_id)
+    return project
+
+
 def _require_owned_csrf(
     project_id: str,
     request: Request,
     current: CurrentUser = Depends(require_csrf),
     db: Session = Depends(get_db),
 ) -> ProjectRecord:
-    project = ProjectRepository(db).require_owned_for_update(project_id, current.id)
+    project = ProjectRepository(db).require_owned(project_id, current.id)
+    _require_project_available(request, project_id)
+    return project
+
+
+def _lock_owned_project_after_parse(
+    *,
+    request: Request,
+    db: Session,
+    project_id: str,
+    authorized_project: ProjectRecord,
+) -> ProjectRecord:
+    project = ProjectRepository(db).require_owned_for_update(
+        project_id,
+        authorized_project.owner_user_id,
+    )
     _require_project_available(request, project_id)
     return project
 
@@ -755,7 +781,7 @@ def create_app(
     @app.get("/api/projects/{project_id}")
     def get_project(
         project_id: str,
-        project: Annotated[ProjectRecord, Depends(_require_owned_user)],
+        project: Annotated[ProjectRecord, Depends(_require_owned_reader)],
         workbench: WorkbenchStore = Depends(get_store),
     ) -> dict[str, Any]:
         return _project_snapshot(workbench, project)
@@ -772,6 +798,12 @@ def create_app(
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, ContinuityPlan)
+        project = _lock_owned_project_after_parse(
+            request=request,
+            db=db,
+            project_id=project_id,
+            authorized_project=project,
+        )
         plan = payload.model_dump()
         plan["project_type"] = project.project_type
         if project.project_type == "single_video":
@@ -811,9 +843,6 @@ def create_app(
         workbench: WorkbenchStore = Depends(get_store),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        series_bible = workbench.read_artifact(project_id, "series_bible.json")
-        if series_bible is None:
-            raise HTTPException(status_code=404, detail="Project not found")
         async with _bounded_upload_form(request) as form:
             kind = _form_text(form, "kind", max_length=32)
             label = _form_text(form, "label", max_length=255)
@@ -833,6 +862,15 @@ def create_app(
                 f"{asset_id}{suffix}",
             )
             relative_path = relative_project_path(project_dir, output_path)
+            project = _lock_owned_project_after_parse(
+                request=request,
+                db=db,
+                project_id=project_id,
+                authorized_project=project,
+            )
+            series_bible = workbench.read_artifact(project_id, "series_bible.json")
+            if series_bible is None:
+                raise HTTPException(status_code=404, detail="Project not found")
             with _project_mutation(
                 db=db,
                 workbench=workbench,
@@ -890,7 +928,7 @@ def create_app(
     def project_media(
         project_id: str,
         relative_path: str,
-        project: Annotated[ProjectRecord, Depends(_require_owned_user)],
+        project: Annotated[ProjectRecord, Depends(_require_owned_reader)],
         workbench: WorkbenchStore = Depends(get_store),
     ) -> FileResponse:
         media_path = safe_project_media_file(workbench.project_dir(project_id), relative_path)
@@ -912,6 +950,12 @@ def create_app(
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, ShotSaveRequest)
+        project = _lock_owned_project_after_parse(
+            request=request,
+            db=db,
+            project_id=project_id,
+            authorized_project=project,
+        )
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
@@ -993,6 +1037,12 @@ def create_app(
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, ShotRegenerateRequest)
+        project = _lock_owned_project_after_parse(
+            request=request,
+            db=db,
+            project_id=project_id,
+            authorized_project=project,
+        )
         if not payload.video_key:
             raise HTTPException(status_code=422, detail="video_key is required for shot regeneration")
         key_environment(payload.video_key, payload.base_url)
@@ -1115,6 +1165,12 @@ def create_app(
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, RenderProjectRequest)
+        project = _lock_owned_project_after_parse(
+            request=request,
+            db=db,
+            project_id=project_id,
+            authorized_project=project,
+        )
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")

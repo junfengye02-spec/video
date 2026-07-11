@@ -9,9 +9,12 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, Lock
+from time import monotonic, sleep
 
+import fakeredis
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
@@ -20,13 +23,19 @@ from sqlalchemy.orm import Session
 os.environ.setdefault("AUTH_HMAC_SECRET", "x" * 32)
 
 from server.app.auth.models import User
-from server.app.main import _project_mutation
+from server.app.auth.sessions import SessionStore
+from server.app.core.config import AppSettings, get_settings
+from server.app.db.session import get_db
+from server.app.main import _project_mutation, create_app
 from server.app.projects.models import ProjectRecord
 from server.app.projects.repository import ProjectRepository
+from server.app.redis import get_redis
 from server.app.storage import ProjectMutationJournal, WorkbenchStore
 from server.manage import run_manage
 from server.tests.test_project_ownership import (
     ALICE_ID,
+    AUTH_ORIGIN,
+    CSRF_HEADER,
     ownership_context,
 )
 
@@ -135,6 +144,56 @@ def _database_url_for_schema(database_url: str, schema_name: str) -> str:
     return url.update_query_dict(
         {"options": scoped_options}
     ).render_as_string(hide_password=False)
+
+
+def _wait_for_postgres_for_update_lock_wait(
+    connection,
+    *,
+    blocked_backend_pid: int,
+    blocking_backend_pid: int,
+    timeout_seconds: float = 5,
+    poll_interval_seconds: float = 0.01,
+) -> dict[str, object]:
+    deadline = monotonic() + timeout_seconds
+    last_observation = None
+    while True:
+        row = connection.execute(
+            text(
+                """
+                SELECT
+                    pid,
+                    state,
+                    wait_event_type,
+                    wait_event,
+                    query,
+                    pg_blocking_pids(pid) AS blocking_pids,
+                    :blocking_backend_pid = ANY(pg_blocking_pids(pid))
+                        AS blocked_by_expected
+                FROM pg_stat_activity
+                WHERE pid = :blocked_backend_pid
+                """
+            ),
+            {
+                "blocked_backend_pid": blocked_backend_pid,
+                "blocking_backend_pid": blocking_backend_pid,
+            },
+        ).mappings().one_or_none()
+        last_observation = dict(row) if row is not None else None
+        if (
+            last_observation is not None
+            and last_observation["pid"] == blocked_backend_pid
+            and last_observation["state"] == "active"
+            and last_observation["wait_event_type"] == "Lock"
+            and "FOR UPDATE" in str(last_observation["query"]).upper()
+            and blocking_backend_pid in last_observation["blocking_pids"]
+        ):
+            return last_observation
+        if monotonic() >= deadline:
+            raise AssertionError(
+                "PostgreSQL backend did not enter the expected FOR UPDATE "
+                f"lock wait; last observation: {last_observation!r}"
+            )
+        sleep(poll_interval_seconds)
 
 
 def test_list_unowned_projects_prints_every_remaining_id(
@@ -268,6 +327,63 @@ def test_schema_cleanup_targets_only_the_exact_owned_schema():
 
     assert connection.statements == [f'DROP SCHEMA "{schema_name}" CASCADE']
     assert all("public" not in statement for statement in connection.statements)
+
+
+def test_postgres_lock_wait_polling_requires_exact_active_for_update_blocker():
+    observations = [
+        {
+            "pid": 4321,
+            "state": "active",
+            "wait_event_type": None,
+            "wait_event": None,
+            "query": "SELECT projects.id FROM projects FOR UPDATE",
+            "blocking_pids": [],
+        },
+        {
+            "pid": 4321,
+            "state": "active",
+            "wait_event_type": "Lock",
+            "wait_event": "transactionid",
+            "query": "SELECT projects.id FROM projects FOR UPDATE",
+            "blocking_pids": [1234],
+        },
+    ]
+
+    class Result:
+        def __init__(self, observation):
+            self.observation = observation
+
+        def mappings(self):
+            return self
+
+        def one_or_none(self):
+            return self.observation
+
+    class Connection:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, statement, parameters):
+            assert parameters == {
+                "blocked_backend_pid": 4321,
+                "blocking_backend_pid": 1234,
+            }
+            observation = observations[min(self.calls, len(observations) - 1)]
+            self.calls += 1
+            return Result(observation)
+
+    connection = Connection()
+
+    observation = _wait_for_postgres_for_update_lock_wait(
+        connection,
+        blocked_backend_pid=4321,
+        blocking_backend_pid=1234,
+        timeout_seconds=0.1,
+        poll_interval_seconds=0,
+    )
+
+    assert observation == observations[1]
+    assert connection.calls == 2
 
 
 def test_schema_database_url_scopes_every_connection_to_the_owned_schema():
@@ -635,6 +751,401 @@ def test_postgres_project_lock_keeps_failed_restore_before_later_commit(
         with Session(schema_engine) as verify_db:
             project = ProjectRepository(verify_db).require_owned(project_id, owner_id)
             assert project.title == "PostgreSQL concurrency"
+    finally:
+        executor.shutdown(wait=True)
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_owned_test_schema(connection, schema_name)
+        admin_engine.dispose()
+
+
+def test_postgres_route_parses_before_attempting_project_write_lock(
+    tmp_path, monkeypatch
+):
+    database_url = os.getenv("OPENMONTAGE_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("OPENMONTAGE_TEST_POSTGRES_URL is not configured")
+
+    from server.app import main as main_module
+
+    schema_name = _new_disposable_schema_name()
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    client = None
+    executor = ThreadPoolExecutor(max_workers=2)
+    release_parse = Event()
+    parse_started = Event()
+    b_committed = Event()
+    schedule: list[str] = []
+    schedule_lock = Lock()
+
+    def record(step: str) -> None:
+        with schedule_lock:
+            schedule.append(step)
+
+    try:
+        with admin_engine.begin() as connection:
+            _create_owned_test_schema(
+                connection,
+                acknowledgement=os.getenv("OPENMONTAGE_DESTRUCTIVE_TEST_ACK"),
+                schema_name=schema_name,
+            )
+        schema_created = True
+        scoped_database_url = _database_url_for_schema(database_url, schema_name)
+        schema_engine = create_engine(scoped_database_url)
+
+        env = os.environ.copy()
+        env["DATABASE_URL"] = scoped_database_url
+        env.setdefault("AUTH_HMAC_SECRET", "x" * 32)
+        migrated = _run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"], env=env
+        )
+        assert migrated.returncode == 0, migrated.stderr
+
+        project_id = "22222222222242228222222222222222"
+        with Session(schema_engine) as seed_db:
+            seed_db.add(
+                User(
+                    id=ALICE_ID,
+                    email="postgres-lock-timing@example.com",
+                    password_hash="unused",
+                    role="user",
+                    status="active",
+                )
+            )
+            seed_db.add(
+                ProjectRecord(
+                    id=project_id,
+                    owner_user_id=ALICE_ID,
+                    title="PostgreSQL lock timing",
+                    mode="short_drama",
+                    project_type="single_video",
+                )
+            )
+            seed_db.commit()
+
+        settings = AppSettings(
+            _env_file=None,
+            environment="test",
+            database_url=scoped_database_url,
+            redis_url="redis://unused/0",
+            redis_prefix="postgres-lock-timing:",
+            public_origin=AUTH_ORIGIN,
+            session_cookie_name="om_session",
+            session_cookie_secure=True,
+            session_idle_seconds=60,
+            session_absolute_seconds=300,
+            auth_hmac_secret="x" * 32,
+        )
+        redis = fakeredis.FakeRedis(decode_responses=True)
+        session_store = SessionStore.from_settings(redis, settings)
+        app = create_app(
+            db_path=tmp_path / "postgres-lock-timing.sqlite3",
+            projects_root=tmp_path / "postgres-lock-timing-projects",
+        )
+        app.state.store.write_artifact(
+            project_id,
+            "continuity_plan.json",
+            {"project_type": "single_video"},
+        )
+
+        def request_db():
+            with Session(schema_engine, expire_on_commit=False) as db:
+                db.info["lock_timing_actor"] = "a"
+                yield db
+
+        app.dependency_overrides[get_db] = request_db
+        app.dependency_overrides[get_redis] = lambda: redis
+        app.dependency_overrides[get_settings] = lambda: settings
+        client = TestClient(app, base_url=AUTH_ORIGIN, raise_server_exceptions=False)
+        session_id, session = session_store.create(ALICE_ID)
+        client.cookies.set(settings.session_cookie_name, session_id)
+        client.headers.update(
+            {"Origin": AUTH_ORIGIN, CSRF_HEADER: session.csrf_token}
+        )
+
+        original_require_owned = ProjectRepository.require_owned
+        original_require_owned_for_update = ProjectRepository.require_owned_for_update
+        original_parse_json_request = main_module.parse_json_request
+        original_available = app.state.store.assert_project_available
+        original_begin_mutation = app.state.store.begin_project_mutation
+        availability_calls = 0
+
+        def observed_require_owned(repository, owned_project_id, owner_user_id):
+            result = original_require_owned(
+                repository,
+                owned_project_id,
+                owner_user_id,
+            )
+            if repository.db.info.get("lock_timing_actor") == "a":
+                record("a_authorized")
+            return result
+
+        def observed_require_owned_for_update(
+            repository,
+            owned_project_id,
+            owner_user_id,
+        ):
+            actor = repository.db.info.get("lock_timing_actor")
+            record(f"{actor}_lock_attempt")
+            result = original_require_owned_for_update(
+                repository,
+                owned_project_id,
+                owner_user_id,
+            )
+            record(f"{actor}_lock_acquired")
+            return result
+
+        def observed_available(available_project_id):
+            nonlocal availability_calls
+            result = original_available(available_project_id)
+            availability_calls += 1
+            record(
+                "a_available_preparse"
+                if availability_calls == 1
+                else "a_available_postlock"
+            )
+            return result
+
+        async def controlled_parse(request, model, **kwargs):
+            record("a_parse_started")
+            parse_started.set()
+            assert release_parse.wait(timeout=10), "test did not release PostgreSQL parse"
+            result = await original_parse_json_request(request, model, **kwargs)
+            record("a_parse_finished")
+            return result
+
+        def observed_begin_mutation(*args, **kwargs):
+            record("a_journal_started")
+            return original_begin_mutation(*args, **kwargs)
+
+        monkeypatch.setattr(ProjectRepository, "require_owned", observed_require_owned)
+        monkeypatch.setattr(
+            ProjectRepository,
+            "require_owned_for_update",
+            observed_require_owned_for_update,
+        )
+        monkeypatch.setattr(main_module, "parse_json_request", controlled_parse)
+        monkeypatch.setattr(
+            app.state.store,
+            "assert_project_available",
+            observed_available,
+        )
+        monkeypatch.setattr(
+            app.state.store,
+            "begin_project_mutation",
+            observed_begin_mutation,
+        )
+
+        def mutate_b() -> None:
+            with Session(schema_engine) as db_b:
+                db_b.info["lock_timing_actor"] = "b"
+                ProjectRepository(db_b).require_owned_for_update(project_id, ALICE_ID)
+                db_b.commit()
+                record("b_committed")
+                b_committed.set()
+
+        response_future = executor.submit(
+            client.patch,
+            f"/api/projects/{project_id}/continuity",
+            json={"project_type": "single_video"},
+        )
+        assert parse_started.wait(timeout=5), "PostgreSQL controlled parser did not start"
+        b_future = executor.submit(mutate_b)
+        b_committed_before_parse_release = b_committed.wait(timeout=5)
+        release_parse.set()
+        response = response_future.result(timeout=15)
+        b_future.result(timeout=15)
+
+        assert response.status_code == 200, response.text
+        assert b_committed_before_parse_release is True
+        assert schedule == [
+            "a_authorized",
+            "a_available_preparse",
+            "a_parse_started",
+            "b_lock_attempt",
+            "b_lock_acquired",
+            "b_committed",
+            "a_parse_finished",
+            "a_lock_attempt",
+            "a_lock_acquired",
+            "a_available_postlock",
+            "a_journal_started",
+        ]
+    finally:
+        release_parse.set()
+        executor.shutdown(wait=True)
+        if client is not None:
+            client.close()
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_owned_test_schema(connection, schema_name)
+        admin_engine.dispose()
+
+
+def test_postgres_shared_reader_blocks_writer_until_snapshot_is_materialized(
+    tmp_path,
+):
+    database_url = os.getenv("OPENMONTAGE_TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("OPENMONTAGE_TEST_POSTGRES_URL is not configured")
+
+    schema_name = _new_disposable_schema_name()
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    executor = ThreadPoolExecutor(max_workers=1)
+    schedule: list[str] = []
+    schedule_lock = Lock()
+    b_pid_ready = Event()
+    b_backend_pid: list[int] = []
+    b_acquired = Event()
+
+    def record(step: str) -> None:
+        with schedule_lock:
+            schedule.append(step)
+
+    try:
+        with admin_engine.begin() as connection:
+            _create_owned_test_schema(
+                connection,
+                acknowledgement=os.getenv("OPENMONTAGE_DESTRUCTIVE_TEST_ACK"),
+                schema_name=schema_name,
+            )
+        schema_created = True
+        scoped_database_url = _database_url_for_schema(database_url, schema_name)
+        schema_engine = create_engine(scoped_database_url)
+
+        env = os.environ.copy()
+        env["DATABASE_URL"] = scoped_database_url
+        env.setdefault("AUTH_HMAC_SECRET", "x" * 32)
+        migrated = _run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"], env=env
+        )
+        assert migrated.returncode == 0, migrated.stderr
+
+        owner_id = "r" * 32
+        project_id = "33333333333343338333333333333333"
+        with Session(schema_engine) as seed_db:
+            seed_db.add(
+                User(
+                    id=owner_id,
+                    email="postgres-shared-reader@example.com",
+                    password_hash="unused",
+                    role="user",
+                    status="active",
+                )
+            )
+            seed_db.add(
+                ProjectRecord(
+                    id=project_id,
+                    owner_user_id=owner_id,
+                    title="PostgreSQL shared reader",
+                    mode="short_drama",
+                    project_type="single_video",
+                )
+            )
+            seed_db.commit()
+
+        store = WorkbenchStore(projects_root=tmp_path / "postgres-reader-projects")
+        store.write_artifact(project_id, "first.json", {"version": "A"})
+        store.write_artifact(project_id, "second.json", {"version": "A"})
+
+        def mutate_b() -> None:
+            with Session(schema_engine) as db_b:
+                backend_pid = db_b.scalar(text("SELECT pg_backend_pid()"))
+                assert isinstance(backend_pid, int)
+                b_backend_pid.append(backend_pid)
+                record("b_pid_exposed")
+                b_pid_ready.set()
+                record("b_lock_attempt")
+                ProjectRepository(db_b).require_owned_for_update(project_id, owner_id)
+                record("b_lock_acquired")
+                b_acquired.set()
+                with _project_mutation(
+                    db=db_b,
+                    workbench=store,
+                    project_id=project_id,
+                    operation="postgres_reader_b",
+                    changed_paths=[
+                        "artifacts/first.json",
+                        "artifacts/second.json",
+                    ],
+                    failure_detail="B reader regression mutation failed",
+                ):
+                    record("b_journal_started")
+                    store.write_artifact(project_id, "first.json", {"version": "B"})
+                    record("b_first_written")
+                    store.write_artifact(project_id, "second.json", {"version": "B"})
+                    record("b_second_written")
+                record("b_committed")
+
+        with Session(schema_engine) as db_a:
+            a_backend_pid = db_a.scalar(text("SELECT pg_backend_pid()"))
+            assert isinstance(a_backend_pid, int)
+            ProjectRepository(db_a).require_owned_for_read(project_id, owner_id)
+            record("a_read_lock_acquired")
+            store.assert_project_available(project_id)
+            record("a_available")
+            first = store.read_artifact(project_id, "first.json")
+            record("a_first_read")
+
+            b_future = executor.submit(mutate_b)
+            assert b_pid_ready.wait(timeout=5), "writer B did not expose its backend PID"
+            with admin_engine.connect() as observer_connection:
+                lock_wait_observation = _wait_for_postgres_for_update_lock_wait(
+                    observer_connection,
+                    blocked_backend_pid=b_backend_pid[0],
+                    blocking_backend_pid=a_backend_pid,
+                    timeout_seconds=5,
+                )
+            record("b_lock_wait_observed")
+            assert not b_acquired.is_set()
+            journal_absent_while_reader_held = not (
+                store.projects_root / ".recovery"
+            ).exists()
+
+            second = store.read_artifact(project_id, "second.json")
+            record("a_second_read")
+            with schedule_lock:
+                db_a.rollback()
+                schedule.append("a_released")
+
+            b_future.result(timeout=15)
+
+        snapshot_versions = (first["version"], second["version"])
+        assert lock_wait_observation["pid"] == b_backend_pid[0]
+        assert lock_wait_observation["state"] == "active"
+        assert lock_wait_observation["wait_event_type"] == "Lock"
+        assert "FOR UPDATE" in lock_wait_observation["query"].upper()
+        assert a_backend_pid in lock_wait_observation["blocking_pids"]
+        assert lock_wait_observation["blocked_by_expected"] is True
+        assert journal_absent_while_reader_held is True
+        assert snapshot_versions in {("A", "A"), ("B", "B")}
+        assert snapshot_versions == ("A", "A")
+        assert store.read_artifact(project_id, "first.json") == {"version": "B"}
+        assert store.read_artifact(project_id, "second.json") == {"version": "B"}
+        assert schedule == [
+            "a_read_lock_acquired",
+            "a_available",
+            "a_first_read",
+            "b_pid_exposed",
+            "b_lock_attempt",
+            "b_lock_wait_observed",
+            "a_second_read",
+            "a_released",
+            "b_lock_acquired",
+            "b_journal_started",
+            "b_first_written",
+            "b_second_written",
+            "b_committed",
+        ]
+        assert not (store.projects_root / ".recovery").exists()
     finally:
         executor.shutdown(wait=True)
         if schema_engine is not None:

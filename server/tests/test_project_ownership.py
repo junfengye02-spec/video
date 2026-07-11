@@ -7,8 +7,10 @@ import os
 import shutil
 import sqlite3
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 
 import fakeredis
 import pytest
@@ -185,6 +187,211 @@ def _link_directory(link: Path, target: Path) -> None:
         pytest.skip(f"directory links are not available: {result.stderr or result.stdout}")
 
 
+def _terminal_recovery_operation(
+    context,
+    project_id: str,
+    state: str,
+) -> tuple[Path, dict]:
+    operation_id = "c" * 32
+    operation_dir = (
+        context["app"].state.store.projects_root
+        / ".recovery"
+        / project_id
+        / operation_id
+    )
+    operation_dir.mkdir(parents=True)
+    (operation_dir / "marker.json").write_text(
+        json.dumps(
+            {
+                "project_id": project_id,
+                "operation_id": operation_id,
+                "operation": "continuity",
+                "state": state,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = {
+        "project_id": project_id,
+        "operation_id": operation_id,
+        "operation": "continuity",
+        "new_workspace": False,
+        "entries": [{"path": "assets/new/output.png", "existed": False}],
+        "created_dirs": ["assets/new"],
+    }
+    return operation_dir, manifest
+
+
+def _write_manifest_case(
+    context,
+    operation_dir: Path,
+    manifest: dict,
+    case: str,
+    monkeypatch,
+) -> None:
+    manifest_path = operation_dir / "manifest.json"
+    if case == "malformed_json":
+        manifest_path.write_text('{"credential":"operator-secret"', encoding="utf-8")
+        return
+    if case == "non_object":
+        manifest_path.write_text(json.dumps([manifest]), encoding="utf-8")
+        return
+    if case == "missing_key":
+        manifest.pop("created_dirs")
+    elif case == "extra_key":
+        manifest["metadata"] = {"credential": "operator-secret"}
+    elif case == "foreign_project_id":
+        manifest["project_id"] = "d" * 32
+    elif case == "foreign_operation_id":
+        manifest["operation_id"] = "e" * 32
+    elif case == "foreign_operation":
+        manifest["operation"] = "render"
+    elif case == "non_boolean_new_workspace":
+        manifest["new_workspace"] = 0
+    elif case == "non_list_entries":
+        manifest["entries"] = {"path": "assets/new/output.png", "existed": False}
+    elif case == "non_list_created_dirs":
+        manifest["created_dirs"] = "assets/new"
+    elif case == "non_object_entry":
+        manifest["entries"] = ["assets/new/output.png"]
+    elif case == "alternate_entry_kind":
+        manifest["entries"] = [
+            {"path": "assets/new/output.png", "kind": "new"}
+        ]
+    elif case == "entry_metadata":
+        manifest["entries"][0]["credential"] = "operator-secret"
+    elif case == "non_string_entry_path":
+        manifest["entries"][0]["path"] = ["assets", "new", "output.png"]
+    elif case == "non_boolean_existed":
+        manifest["entries"][0]["existed"] = 0
+    elif case == "noncanonical_entry_path":
+        manifest["entries"][0]["path"] = "assets/./new/output.png"
+    elif case == "traversing_entry_path":
+        manifest["entries"][0]["path"] = "assets/../outside.png"
+    elif case == "noncanonical_created_dir":
+        manifest["created_dirs"] = ["assets\\new"]
+    elif case == "traversing_created_dir":
+        manifest["created_dirs"] = ["assets/../outside"]
+    elif case in TERMINAL_MANIFEST_PLATFORM_PATHS:
+        manifest["entries"][0]["path"] = TERMINAL_MANIFEST_PLATFORM_PATHS[case]
+    elif case == "reserved_created_dir":
+        manifest["created_dirs"] = ["assets/CON.cache"]
+    elif case == "control_created_dir":
+        manifest["created_dirs"] = ["assets/new\x7f"]
+    elif case == "duplicate_entry":
+        manifest["entries"].append(manifest["entries"][0].copy())
+    elif case == "duplicate_created_dir":
+        manifest["created_dirs"].append(manifest["created_dirs"][0])
+    elif case == "case_alias_new_entries":
+        manifest["entries"] = [
+            {"path": "assets/A.png", "existed": False},
+            {"path": "assets/a.png", "existed": False},
+        ]
+        manifest["created_dirs"] = []
+    elif case == "case_alias_mixed_entries":
+        manifest["entries"] = [
+            {"path": "assets/A.png", "existed": True},
+            {"path": "assets/a.png", "existed": False},
+        ]
+        manifest["created_dirs"] = []
+        backup = operation_dir / "backups" / "assets" / "A.png"
+        backup.parent.mkdir(parents=True)
+        backup.write_bytes(b"backup")
+    elif case == "case_alias_created_dirs":
+        manifest["created_dirs"] = ["assets/New", "assets/new"]
+    elif case == "case_alias_file_created_dir":
+        manifest["entries"] = [{"path": "assets/A.png", "existed": False}]
+        manifest["created_dirs"] = ["assets/a.png"]
+    elif case == "case_alias_file_ancestor":
+        manifest["entries"] = [
+            {"path": "assets/A", "existed": False},
+            {"path": "ASSETS/a/child.png", "existed": False},
+        ]
+        manifest["created_dirs"] = []
+    elif case == "case_alias_file_created_dir_ancestor":
+        manifest["entries"] = [{"path": "assets/A", "existed": False}]
+        manifest["created_dirs"] = ["ASSETS/a/child"]
+    elif case == "file_ancestor":
+        manifest["entries"] = [
+            {"path": "assets/new", "existed": False},
+            {"path": "assets/new/output.png", "existed": False},
+        ]
+        manifest["created_dirs"] = []
+    elif case == "file_directory_conflict":
+        manifest["entries"] = [{"path": "assets", "existed": False}]
+        manifest["created_dirs"] = ["assets/new"]
+    elif case == "missing_backup":
+        manifest["entries"][0]["existed"] = True
+    elif case == "backup_for_new_file":
+        backup = operation_dir / "backups" / "assets" / "new" / "output.png"
+        backup.parent.mkdir(parents=True)
+        backup.write_bytes(b"unexpected")
+    elif case == "unexpected_backup_file":
+        backup = operation_dir / "backups" / "unlisted.bin"
+        backup.parent.mkdir(parents=True)
+        backup.write_bytes(b"unexpected")
+    elif case == "unexpected_backup_directory":
+        (operation_dir / "backups" / "unlisted").mkdir(parents=True)
+    elif case == "mismatched_backup_path":
+        manifest["entries"][0]["existed"] = True
+        backup = operation_dir / "backups" / "assets" / "new" / "other.png"
+        backup.parent.mkdir(parents=True)
+        backup.write_bytes(b"wrong path")
+    elif case == "nonregular_backup":
+        manifest["entries"][0]["existed"] = True
+        (operation_dir / "backups" / "assets" / "new" / "output.png").mkdir(
+            parents=True
+        )
+    elif case == "linked_backup_file":
+        manifest["entries"][0]["existed"] = True
+        backup = operation_dir / "backups" / "assets" / "new" / "output.png"
+        backup.parent.mkdir(parents=True)
+        outside = context["tmp_path"] / "outside-backup.bin"
+        outside.write_bytes(b"outside")
+        if not _link_file(backup, outside):
+            backup.write_bytes(b"outside")
+            original_is_symlink = Path.is_symlink
+            monkeypatch.setattr(
+                Path,
+                "is_symlink",
+                lambda path: path == backup or original_is_symlink(path),
+            )
+    elif case == "linked_backup_directory":
+        manifest["entries"] = [{"path": "linked/output.png", "existed": True}]
+        manifest["created_dirs"] = []
+        backups = operation_dir / "backups"
+        backups.mkdir()
+        outside = context["tmp_path"] / "outside-backup-dir"
+        outside.mkdir()
+        (outside / "output.png").write_bytes(b"outside")
+        linked = backups / "linked"
+        try:
+            linked.symlink_to(outside, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            linked.mkdir()
+            (linked / "output.png").write_bytes(b"outside")
+            original_is_junction = getattr(Path, "is_junction", lambda path: False)
+            monkeypatch.setattr(
+                Path,
+                "is_junction",
+                lambda path: path == linked or original_is_junction(path),
+                raising=False,
+            )
+    elif case == "hardlinked_backup_file":
+        manifest["entries"][0]["existed"] = True
+        backup = operation_dir / "backups" / "assets" / "new" / "output.png"
+        backup.parent.mkdir(parents=True)
+        outside = context["tmp_path"] / "outside-hardlink.bin"
+        outside.write_bytes(b"outside")
+        try:
+            os.link(outside, backup)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"hard links are not available: {exc}")
+    else:
+        raise AssertionError(f"Unknown terminal manifest case: {case}")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def _prepare_project_surface(context, client: TestClient) -> dict:
     project = _create_project(client, title="Bob's project")
     store = context["app"].state.store
@@ -221,6 +428,36 @@ def _finite_stream(_project_id: str):
         yield "event: done\ndata: {}\n\n"
 
     return generate()
+
+
+def _cleanup_guard(project_recovery: Path) -> tuple[Path, dict]:
+    guards = list(project_recovery.glob("*.cleanup.json"))
+    assert len(guards) == 1
+    guard = json.loads(guards[0].read_text(encoding="utf-8"))
+    assert set(guard) == {"project_id", "operation_id", "operation", "state"}
+    return guards[0], guard
+
+
+def _assert_project_recovery_quarantine(
+    context,
+    client: TestClient,
+    project_id: str,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(context["app"].state.events, "stream", _finite_stream)
+    responses = [
+        client.get(f"/api/projects/{project_id}"),
+        client.get(f"/api/projects/{project_id}/media/assets/images/missing.png"),
+        client.get(f"/api/projects/{project_id}/events"),
+        client.patch(
+            f"/api/projects/{project_id}/continuity",
+            json={"project_type": "single_video"},
+        ),
+    ]
+    assert [response.status_code for response in responses] == [503] * 4
+    assert [response.json() for response in responses] == [
+        {"detail": "Project is unavailable pending recovery"}
+    ] * 4
 
 
 SURFACE_CASES = [
@@ -493,6 +730,320 @@ def test_authorized_malformed_project_bodies_preserve_validation_statuses(
 
     assert malformed_json.status_code == 422
     assert malformed_multipart.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("method", "path_suffix"),
+    [
+        ("PATCH", "/continuity"),
+        ("PATCH", "/shots/s1"),
+        ("POST", "/prompt-optimize"),
+        ("POST", "/shots/s1/regenerate"),
+        ("POST", "/render"),
+    ],
+)
+def test_malformed_project_json_authorizes_without_taking_write_lock(
+    ownership_context, monkeypatch, method, path_suffix
+):
+    project = _create_project(_alice(ownership_context), title="Parse ordering")
+    calls: list[str] = []
+    original_require_owned = ProjectRepository.require_owned
+    original_require_owned_for_update = ProjectRepository.require_owned_for_update
+
+    def observed_require_owned(repository, project_id, owner_user_id):
+        result = original_require_owned(repository, project_id, owner_user_id)
+        calls.append("require_owned")
+        return result
+
+    def observed_require_owned_for_update(repository, project_id, owner_user_id):
+        result = original_require_owned_for_update(
+            repository,
+            project_id,
+            owner_user_id,
+        )
+        calls.append("require_owned_for_update")
+        return result
+
+    monkeypatch.setattr(ProjectRepository, "require_owned", observed_require_owned)
+    monkeypatch.setattr(
+        ProjectRepository,
+        "require_owned_for_update",
+        observed_require_owned_for_update,
+    )
+
+    response = _alice(ownership_context).request(
+        method,
+        f"/api/projects/{project['id']}{path_suffix}",
+        content=b'{"unterminated":',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert calls == ["require_owned"]
+
+
+def test_slow_project_json_parses_between_nonlocking_auth_and_write_lock(
+    ownership_context, monkeypatch
+):
+    project = _create_project(_alice(ownership_context), title="Slow parse ordering")
+    calls: list[str] = []
+    parse_started = Event()
+    release_parse = Event()
+    original_require_owned = ProjectRepository.require_owned
+    original_require_owned_for_update = ProjectRepository.require_owned_for_update
+
+    from server.app import main as main_module
+
+    original_parse_json_request = main_module.parse_json_request
+
+    def observed_require_owned(repository, project_id, owner_user_id):
+        result = original_require_owned(repository, project_id, owner_user_id)
+        calls.append("require_owned")
+        return result
+
+    def observed_require_owned_for_update(repository, project_id, owner_user_id):
+        result = original_require_owned_for_update(
+            repository,
+            project_id,
+            owner_user_id,
+        )
+        calls.append("require_owned_for_update")
+        return result
+
+    async def controlled_parse(request, model, **kwargs):
+        calls.append("parse_started")
+        parse_started.set()
+        assert release_parse.wait(timeout=5), "test did not release controlled parser"
+        result = await original_parse_json_request(request, model, **kwargs)
+        calls.append("parse_finished")
+        return result
+
+    monkeypatch.setattr(ProjectRepository, "require_owned", observed_require_owned)
+    monkeypatch.setattr(
+        ProjectRepository,
+        "require_owned_for_update",
+        observed_require_owned_for_update,
+    )
+    monkeypatch.setattr(main_module, "parse_json_request", controlled_parse)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        response_future = executor.submit(
+            _alice(ownership_context).patch,
+            f"/api/projects/{project['id']}/continuity",
+            json={"project_type": "single_video"},
+        )
+        assert parse_started.wait(timeout=5), "controlled parser did not start"
+        calls_while_parsing = list(calls)
+        release_parse.set()
+        response = response_future.result(timeout=5)
+
+    assert response.status_code == 200, response.text
+    assert calls_while_parsing == ["require_owned", "parse_started"]
+    assert calls[:4] == [
+        "require_owned",
+        "parse_started",
+        "parse_finished",
+        "require_owned_for_update",
+    ]
+
+
+def test_malformed_upload_authorizes_without_taking_write_lock(
+    ownership_context, monkeypatch
+):
+    project = _create_project(_alice(ownership_context), title="Upload parse ordering")
+    calls: list[str] = []
+    original_require_owned = ProjectRepository.require_owned
+    original_require_owned_for_update = ProjectRepository.require_owned_for_update
+
+    def observed_require_owned(repository, project_id, owner_user_id):
+        result = original_require_owned(repository, project_id, owner_user_id)
+        calls.append("require_owned")
+        return result
+
+    def observed_require_owned_for_update(repository, project_id, owner_user_id):
+        result = original_require_owned_for_update(
+            repository,
+            project_id,
+            owner_user_id,
+        )
+        calls.append("require_owned_for_update")
+        return result
+
+    monkeypatch.setattr(ProjectRepository, "require_owned", observed_require_owned)
+    monkeypatch.setattr(
+        ProjectRepository,
+        "require_owned_for_update",
+        observed_require_owned_for_update,
+    )
+
+    response = _alice(ownership_context).post(
+        f"/api/projects/{project['id']}/assets/upload",
+        content=b"--wrong-boundary\r\ninvalid multipart",
+        headers={"Content-Type": "multipart/form-data; boundary=expected-boundary"},
+    )
+
+    assert response.status_code == 400
+    assert calls == ["require_owned"]
+
+
+@pytest.mark.parametrize(
+    "mutation_family",
+    ["continuity", "upload", "shot", "regenerate", "render"],
+)
+def test_existing_mutation_locks_and_rechecks_before_first_project_boundary(
+    ownership_context, monkeypatch, mutation_family
+):
+    project = _create_project(_alice(ownership_context), title="Mutation boundary")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    calls: list[str] = []
+    original_require_owned = ProjectRepository.require_owned
+    original_require_owned_for_update = ProjectRepository.require_owned_for_update
+    original_available = store.assert_project_available
+
+    def observed_require_owned(repository, owned_project_id, owner_user_id):
+        result = original_require_owned(repository, owned_project_id, owner_user_id)
+        calls.append("require_owned")
+        return result
+
+    def observed_require_owned_for_update(repository, owned_project_id, owner_user_id):
+        result = original_require_owned_for_update(
+            repository,
+            owned_project_id,
+            owner_user_id,
+        )
+        calls.append("require_owned_for_update")
+        return result
+
+    def observed_available(available_project_id):
+        result = original_available(available_project_id)
+        calls.append("available")
+        return result
+
+    def stop_at_boundary(*args, **kwargs):
+        calls.append("project_boundary")
+        raise RuntimeError("controlled first project boundary")
+
+    monkeypatch.setattr(ProjectRepository, "require_owned", observed_require_owned)
+    monkeypatch.setattr(
+        ProjectRepository,
+        "require_owned_for_update",
+        observed_require_owned_for_update,
+    )
+    monkeypatch.setattr(store, "assert_project_available", observed_available)
+    if mutation_family == "continuity":
+        monkeypatch.setattr(store, "begin_project_mutation", stop_at_boundary)
+    else:
+        monkeypatch.setattr(store, "read_artifact", stop_at_boundary)
+
+    if mutation_family == "upload":
+        from server.app import main as main_module
+
+        original_safe_destination = main_module.safe_project_media_destination
+
+        def observed_safe_destination(*args, **kwargs):
+            result = original_safe_destination(*args, **kwargs)
+            calls.append("dynamic_path")
+            return result
+
+        monkeypatch.setattr(
+            main_module,
+            "safe_project_media_destination",
+            observed_safe_destination,
+        )
+        response = _alice(ownership_context).post(
+            f"/api/projects/{project_id}/assets/upload",
+            data={"kind": "character", "label": "Uploaded"},
+            files={"file": ("uploaded.png", b"uploaded", "image/png")},
+        )
+    elif mutation_family == "shot":
+        response = _alice(ownership_context).patch(
+            f"/api/projects/{project_id}/shots/s1",
+            json={"prompt": "Changed prompt"},
+        )
+    elif mutation_family == "regenerate":
+        response = _alice(ownership_context).post(
+            f"/api/projects/{project_id}/shots/s1/regenerate",
+            json={"video_key": "video-key"},
+        )
+    elif mutation_family == "render":
+        response = _alice(ownership_context).post(
+            f"/api/projects/{project_id}/render",
+            json={"video_key": "video-key"},
+        )
+    else:
+        response = _alice(ownership_context).patch(
+            f"/api/projects/{project_id}/continuity",
+            json={"project_type": "single_video"},
+        )
+
+    assert response.status_code == 500
+    expected_prefix = ["require_owned", "available"]
+    if mutation_family == "upload":
+        expected_prefix.append("dynamic_path")
+    expected_prefix.extend(
+        ["require_owned_for_update", "available", "project_boundary"]
+    )
+    assert calls == expected_prefix
+
+
+def test_prompt_optimization_never_takes_write_lock_including_provider_call(
+    ownership_context, monkeypatch
+):
+    project = _create_project(_alice(ownership_context), title="Prompt lock regression")
+    calls: list[str] = []
+    provider_observations: list[list[str]] = []
+    original_require_owned = ProjectRepository.require_owned
+    original_require_owned_for_update = ProjectRepository.require_owned_for_update
+    store = ownership_context["app"].state.store
+    original_available = store.assert_project_available
+
+    def observed_require_owned(repository, project_id, owner_user_id):
+        result = original_require_owned(repository, project_id, owner_user_id)
+        calls.append("require_owned")
+        return result
+
+    def observed_require_owned_for_update(repository, project_id, owner_user_id):
+        result = original_require_owned_for_update(
+            repository,
+            project_id,
+            owner_user_id,
+        )
+        calls.append("require_owned_for_update")
+        return result
+
+    def observed_available(project_id):
+        result = original_available(project_id)
+        calls.append("available")
+        return result
+
+    def observed_provider(**kwargs):
+        provider_observations.append(list(calls))
+        calls.append("provider")
+        return {"optimized_text": "Optimized", "notes": []}
+
+    monkeypatch.setattr(ProjectRepository, "require_owned", observed_require_owned)
+    monkeypatch.setattr(
+        ProjectRepository,
+        "require_owned_for_update",
+        observed_require_owned_for_update,
+    )
+    monkeypatch.setattr(store, "assert_project_available", observed_available)
+    monkeypatch.setattr("server.app.main.optimize_text_prompt", observed_provider)
+
+    response = _alice(ownership_context).post(
+        f"/api/projects/{project['id']}/prompt-optimize",
+        json={
+            "target": "project",
+            "target_id": project["id"],
+            "source_text": "Original",
+            "text_key": "text-key",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert provider_observations == [["require_owned", "available"]]
+    assert calls == ["require_owned", "available", "provider"]
 
 
 def test_authorized_upload_is_bounded_before_file_spooling(
@@ -1015,6 +1566,25 @@ def test_owned_project_lock_uses_postgresql_for_update():
     assert "FOR UPDATE" in sql
 
 
+def test_owned_project_read_lock_uses_postgresql_for_share():
+    statements = []
+    project = type("LockedProject", (), {"id": LEGACY_ID})()
+
+    class RecordingSession:
+        def scalar(self, statement):
+            statements.append(statement)
+            return project
+
+    locked = ProjectRepository(RecordingSession()).require_owned_for_read(
+        LEGACY_ID,
+        ALICE_ID,
+    )
+
+    sql = str(statements[0].compile(dialect=postgresql.dialect()))
+    assert locked is project
+    assert "FOR SHARE" in sql
+
+
 def test_continuity_journal_never_copies_large_unrelated_media(
     ownership_context, monkeypatch
 ):
@@ -1081,7 +1651,9 @@ def test_restore_failure_retains_recovery_marker_and_quarantines_project(
     def fail_commit_after_destroying_backup():
         recovery_root = store.projects_root / ".recovery" / project_id
         if recovery_root.is_dir():
-            operation_dir = next(recovery_root.iterdir())
+            operation_dir = next(
+                child for child in recovery_root.iterdir() if child.is_dir()
+            )
             backups = list((operation_dir / "backups").rglob("continuity_plan.json"))
             if backups:
                 backups[0].unlink()
@@ -1099,7 +1671,8 @@ def test_restore_failure_retains_recovery_marker_and_quarantines_project(
 
     assert response.status_code == 500
     assert response.json() == {"detail": "Project update failed"}
-    operation_dirs = list((store.projects_root / ".recovery" / project_id).iterdir())
+    project_recovery = store.projects_root / ".recovery" / project_id
+    operation_dirs = [child for child in project_recovery.iterdir() if child.is_dir()]
     assert len(operation_dirs) == 1
     marker = json.loads((operation_dirs[0] / "marker.json").read_text(encoding="utf-8"))
     assert marker == {
@@ -1107,6 +1680,13 @@ def test_restore_failure_retains_recovery_marker_and_quarantines_project(
         "operation_id": marker["operation_id"],
         "operation": "continuity",
         "state": "recovery_failed",
+    }
+    _guard_path, guard = _cleanup_guard(project_recovery)
+    assert guard == {
+        "project_id": project_id,
+        "operation_id": marker["operation_id"],
+        "operation": "continuity",
+        "state": "cleanup_pending",
     }
     assert project_id in caplog.text
     assert marker["operation_id"] in caplog.text
@@ -1123,6 +1703,287 @@ def test_restore_failure_retains_recovery_marker_and_quarantines_project(
     assert loaded.json() == mutated.json() == {
         "detail": "Project is unavailable pending recovery"
     }
+
+
+@pytest.mark.parametrize(
+    "partial_removal",
+    [False, True],
+    ids=["before_tree", "partial_tree"],
+)
+def test_post_commit_cleanup_failure_leaves_secret_free_durable_quarantine(
+    ownership_context, monkeypatch, caplog, partial_removal
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Committed cleanup failure")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    injected_secret = "cleanup-secret-after-commit"
+    caplog.set_level(logging.ERROR, logger="server.app.project_recovery")
+
+    def fail_operation_tree_cleanup(path, parent):
+        operation_dir = Path(path)
+        if partial_removal:
+            (operation_dir / "marker.json").unlink()
+            (operation_dir / "manifest.json").unlink()
+        raise OSError(f"operation cleanup failed token={injected_secret}")
+
+    monkeypatch.setattr(
+        "server.app.storage._remove_controlled_tree",
+        fail_operation_tree_cleanup,
+    )
+
+    response = client.patch(
+        f"/api/projects/{project_id}/continuity",
+        json={
+            "project_type": "single_video",
+            "series_bible": {"worldview": "Committed before cleanup"},
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    assert injected_secret not in response.text + caplog.text
+    project_recovery = store.projects_root / ".recovery" / project_id
+    guard_path, guard = _cleanup_guard(project_recovery)
+    assert guard == {
+        "project_id": project_id,
+        "operation_id": guard["operation_id"],
+        "operation": "continuity",
+        "state": "cleanup_failed",
+    }
+    operation_dir = project_recovery / guard["operation_id"]
+    assert guard_path.parent == project_recovery
+    assert operation_dir.is_dir()
+    if partial_removal:
+        assert not (operation_dir / "marker.json").exists()
+        assert not (operation_dir / "manifest.json").exists()
+    assert project_id in caplog.text
+    assert guard["operation_id"] in caplog.text
+    assert "state=cleanup_failed" in caplog.text
+    _assert_project_recovery_quarantine(
+        ownership_context,
+        client,
+        project_id,
+        monkeypatch,
+    )
+
+
+def test_post_restore_cleanup_failure_preserves_compensation_and_quarantine(
+    ownership_context, monkeypatch, caplog
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Recovered cleanup failure")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    before_workspace = _workspace_bytes(store, project_id)
+    injected_secret = "cleanup-secret-after-restore"
+    caplog.set_level(logging.ERROR, logger="server.app.project_recovery")
+
+    def fail_commit():
+        raise RuntimeError("commit failure credential=restore-trigger-secret")
+
+    def fail_operation_tree_cleanup(path, parent):
+        raise OSError(f"operation cleanup failed token={injected_secret}")
+
+    monkeypatch.setattr(ownership_context["db"], "commit", fail_commit)
+    monkeypatch.setattr(
+        "server.app.storage._remove_controlled_tree",
+        fail_operation_tree_cleanup,
+    )
+
+    response = client.patch(
+        f"/api/projects/{project_id}/continuity",
+        json={
+            "project_type": "single_video",
+            "series_bible": {"worldview": "Restored before cleanup"},
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    assert _workspace_bytes(store, project_id) == before_workspace
+    assert injected_secret not in response.text + caplog.text
+    assert "restore-trigger-secret" not in response.text + caplog.text
+    project_recovery = store.projects_root / ".recovery" / project_id
+    _guard_path, guard = _cleanup_guard(project_recovery)
+    assert guard == {
+        "project_id": project_id,
+        "operation_id": guard["operation_id"],
+        "operation": "continuity",
+        "state": "cleanup_failed",
+    }
+    assert (project_recovery / guard["operation_id"]).is_dir()
+    assert project_id in caplog.text
+    assert guard["operation_id"] in caplog.text
+    assert "state=cleanup_failed" in caplog.text
+    _assert_project_recovery_quarantine(
+        ownership_context,
+        client,
+        project_id,
+        monkeypatch,
+    )
+
+
+def test_cleanup_guard_removal_failure_leaves_nonhealthy_controlled_child(
+    ownership_context, monkeypatch, caplog
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Guard cleanup failure")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    injected_secret = "cleanup-secret-removing-guard"
+    caplog.set_level(logging.ERROR, logger="server.app.project_recovery")
+    original_unlink = Path.unlink
+
+    def fail_guard_unlink(path, *args, **kwargs):
+        if path.name.endswith(".cleanup.json"):
+            original_unlink(path, *args, **kwargs)
+            raise OSError(f"guard cleanup failed token={injected_secret}")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_guard_unlink)
+
+    response = client.patch(
+        f"/api/projects/{project_id}/continuity",
+        json={
+            "project_type": "single_video",
+            "series_bible": {"worldview": "Guard remains"},
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    assert injected_secret not in response.text + caplog.text
+    project_recovery = store.projects_root / ".recovery" / project_id
+    guard_path, guard = _cleanup_guard(project_recovery)
+    assert guard == {
+        "project_id": project_id,
+        "operation_id": guard["operation_id"],
+        "operation": "continuity",
+        "state": "cleanup_failed",
+    }
+    assert guard_path.is_file()
+    assert not (project_recovery / guard["operation_id"]).exists()
+    assert project_id in caplog.text
+    assert guard["operation_id"] in caplog.text
+    assert "state=cleanup_failed" in caplog.text
+    _assert_project_recovery_quarantine(
+        ownership_context,
+        client,
+        project_id,
+        monkeypatch,
+    )
+
+
+def test_cleanup_validation_failure_is_logged_and_durably_quarantined(
+    ownership_context, monkeypatch, caplog
+):
+    from server.app.storage import ProjectMutationJournal
+
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Cleanup validation failure")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    injected_secret = "cleanup-secret-validating-operation"
+    caplog.set_level(logging.ERROR, logger="server.app.project_recovery")
+    original_validate = ProjectMutationJournal._validate_operation_dir
+
+    def fail_terminal_cleanup_validation(journal):
+        marker_path = journal._operation_dir / "marker.json"
+        if marker_path.is_file():
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            if marker.get("state") == "committed":
+                raise OSError(f"validation failed token={injected_secret}")
+        return original_validate(journal)
+
+    monkeypatch.setattr(
+        ProjectMutationJournal,
+        "_validate_operation_dir",
+        fail_terminal_cleanup_validation,
+    )
+
+    response = client.patch(
+        f"/api/projects/{project_id}/continuity",
+        json={"project_type": "single_video"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    assert injected_secret not in response.text + caplog.text
+    project_recovery = store.projects_root / ".recovery" / project_id
+    _guard_path, guard = _cleanup_guard(project_recovery)
+    assert guard["state"] == "cleanup_failed"
+    assert project_id in caplog.text
+    assert guard["operation_id"] in caplog.text
+    assert "state=cleanup_failed" in caplog.text
+    _assert_project_recovery_quarantine(
+        ownership_context,
+        client,
+        project_id,
+        monkeypatch,
+    )
+
+
+@pytest.mark.parametrize("terminal_state", ["committed", "recovered"])
+def test_successful_terminal_cleanup_removes_journal_guard_and_recovery_root(
+    ownership_context, monkeypatch, terminal_state
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Successful cleanup")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    before_workspace = _workspace_bytes(store, project_id)
+
+    if terminal_state == "recovered":
+        def fail_commit():
+            raise RuntimeError("expected compensation trigger")
+
+        monkeypatch.setattr(ownership_context["db"], "commit", fail_commit)
+
+    response = client.patch(
+        f"/api/projects/{project_id}/continuity",
+        json={
+            "project_type": "single_video",
+            "series_bible": {"worldview": "Terminal cleanup control"},
+        },
+    )
+
+    if terminal_state == "committed":
+        assert response.status_code == 200, response.text
+        assert _workspace_bytes(store, project_id) != before_workspace
+    else:
+        assert response.status_code == 500
+        assert response.json() == {"detail": "Project update failed"}
+        assert _workspace_bytes(store, project_id) == before_workspace
+    assert not (store.projects_root / ".recovery").exists()
+
+
+def test_empty_recovery_parent_removal_failure_is_best_effort(
+    ownership_context, monkeypatch
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Best effort parent cleanup")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    original_rmdir = Path.rmdir
+
+    def fail_recovery_root_rmdir(path):
+        if path.name == ".recovery":
+            raise OSError("empty recovery root removal failed")
+        return original_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", fail_recovery_root_rmdir)
+
+    response = client.patch(
+        f"/api/projects/{project_id}/continuity",
+        json={"project_type": "single_video"},
+    )
+
+    assert response.status_code == 200, response.text
+    recovery_root = store.projects_root / ".recovery"
+    assert recovery_root.is_dir()
+    assert list(recovery_root.iterdir()) == []
+    assert client.get(f"/api/projects/{project_id}").status_code == 200
 
 
 def test_malformed_recovery_marker_quarantines_project(ownership_context):
@@ -1149,10 +2010,155 @@ def test_malformed_recovery_marker_quarantines_project(ownership_context):
     }
 
 
-@pytest.mark.parametrize(
-    ("unsafe_child", "state"),
-    [("manifest_symlink", "committed"), ("backups_junction", "recovered")],
-)
+TERMINAL_MANIFEST_PLATFORM_PATHS = {
+    "drive_rooted_entry": "C:/outside",
+    "drive_relative_entry": "C:relative",
+    "ads_entry": "assets/file.txt:stream",
+    "nul_entry": "assets/new/\x00output.png",
+    "c0_control_entry": "assets/new/\x1foutput.png",
+    "del_control_entry": "assets/new/\x7foutput.png",
+    "trailing_dot_entry": "assets/new/output.png.",
+    "trailing_space_entry": "assets/new/output.png ",
+    "reserved_con_entry": "assets/CON",
+    "reserved_prn_extension_entry": "assets/prn.txt",
+    "reserved_aux_case_entry": "assets/AuX.JSON",
+    "reserved_nul_extension_entry": "assets/nUl.bin",
+    **{
+        f"reserved_com{number}_entry": (
+            f"assets/{'COM' if number % 2 else 'com'}{number}"
+            f"{'.cache' if number % 3 == 0 else ''}"
+        )
+        for number in range(1, 10)
+    },
+    **{
+        f"reserved_lpt{number}_entry": (
+            f"assets/{'lpt' if number % 2 else 'LPT'}{number}"
+            f"{'.json' if number % 3 == 1 else ''}"
+        )
+        for number in range(1, 10)
+    },
+}
+
+
+TERMINAL_MANIFEST_INVALID_CASES = [
+    "missing_manifest",
+    "malformed_json",
+    "non_object",
+    "missing_key",
+    "extra_key",
+    "foreign_project_id",
+    "foreign_operation_id",
+    "foreign_operation",
+    "non_boolean_new_workspace",
+    "non_list_entries",
+    "non_list_created_dirs",
+    "non_object_entry",
+    "alternate_entry_kind",
+    "entry_metadata",
+    "non_string_entry_path",
+    "non_boolean_existed",
+    "noncanonical_entry_path",
+    "traversing_entry_path",
+    "noncanonical_created_dir",
+    "traversing_created_dir",
+    *TERMINAL_MANIFEST_PLATFORM_PATHS,
+    "reserved_created_dir",
+    "control_created_dir",
+    "duplicate_entry",
+    "duplicate_created_dir",
+    "case_alias_new_entries",
+    "case_alias_mixed_entries",
+    "case_alias_created_dirs",
+    "case_alias_file_created_dir",
+    "case_alias_file_ancestor",
+    "case_alias_file_created_dir_ancestor",
+    "file_ancestor",
+    "file_directory_conflict",
+    "missing_backup",
+    "backup_for_new_file",
+    "unexpected_backup_file",
+    "unexpected_backup_directory",
+    "mismatched_backup_path",
+    "nonregular_backup",
+    "linked_backup_file",
+    "linked_backup_directory",
+    "hardlinked_backup_file",
+]
+
+
+@pytest.mark.parametrize("state", ["committed", "recovered"])
+@pytest.mark.parametrize("manifest_case", TERMINAL_MANIFEST_INVALID_CASES)
+def test_invalid_terminal_manifest_quarantines_all_project_routes(
+    ownership_context, monkeypatch, state, manifest_case
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Invalid terminal manifest")
+    project_id = project["id"]
+    operation_dir, manifest = _terminal_recovery_operation(
+        ownership_context,
+        project_id,
+        state,
+    )
+    if manifest_case != "missing_manifest":
+        _write_manifest_case(
+            ownership_context,
+            operation_dir,
+            manifest,
+            manifest_case,
+            monkeypatch,
+        )
+
+    monkeypatch.setattr(
+        ownership_context["app"].state.events,
+        "stream",
+        _finite_stream,
+    )
+    responses = [
+        client.get(f"/api/projects/{project_id}"),
+        client.get(f"/api/projects/{project_id}/media/assets/images/missing.png"),
+        client.get(f"/api/projects/{project_id}/events"),
+        client.patch(
+            f"/api/projects/{project_id}/continuity",
+            json={"project_type": "single_video"},
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [503] * 4
+    assert [response.json() for response in responses] == [
+        {"detail": "Project is unavailable pending recovery"}
+    ] * 4
+
+
+@pytest.mark.parametrize("state", ["committed", "recovered"])
+def test_valid_terminal_manifest_keeps_project_available(ownership_context, state):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Valid terminal manifest")
+    operation_dir, manifest = _terminal_recovery_operation(
+        ownership_context,
+        project["id"],
+        state,
+    )
+    manifest["entries"].insert(
+        0,
+        {"path": "artifacts/continuity_plan.json", "existed": True},
+    )
+    manifest["entries"][1]["path"] = "assets/.cache/output+draft.json"
+    manifest["created_dirs"] = ["assets", "assets/.cache"]
+    (operation_dir / "manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    backup = operation_dir / "backups" / "artifacts" / "continuity_plan.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_bytes(b"backup")
+
+    response = client.get(f"/api/projects/{project['id']}")
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("state", ["committed", "recovered"])
+@pytest.mark.parametrize("unsafe_child", ["manifest_symlink", "backups_junction"])
 def test_terminal_marker_with_linked_recovery_child_quarantines_all_project_routes(
     ownership_context, monkeypatch, unsafe_child, state
 ):
@@ -1717,7 +2723,16 @@ def test_event_authorization_releases_database_dependency_before_streaming(
         stream_observations.append(active_dependencies)
         yield "event: done\ndata: {}\n\n"
 
+    def reject_read_lock(*args, **kwargs):
+        pytest.fail("SSE must not acquire the finite-response read lock")
+
     ownership_context["app"].dependency_overrides[get_db] = scoped_db
+    monkeypatch.setattr(
+        ProjectRepository,
+        "require_owned_for_read",
+        reject_read_lock,
+        raising=False,
+    )
     monkeypatch.setattr(
         ownership_context["app"].state.events,
         "stream",
@@ -1729,6 +2744,155 @@ def test_event_authorization_releases_database_dependency_before_streaming(
     assert response.status_code == 200
     assert active_dependencies == 0
     assert stream_observations == [0]
+
+
+def test_finite_project_snapshot_holds_read_lock_until_json_is_materialized(
+    ownership_context, monkeypatch
+):
+    project = _create_project(_alice(ownership_context), title="Finite reader")
+    store = ownership_context["app"].state.store
+    events: list[str] = []
+
+    def scoped_db():
+        events.append("session_open")
+        try:
+            yield ownership_context["db"]
+        finally:
+            events.append("session_release")
+
+    original_require_owned = ProjectRepository.require_owned
+    original_available = store.assert_project_available
+    original_project_dir = store.project_dir
+    original_read_artifact = store.read_artifact
+
+    def observed_read_lock(repository, project_id, owner_user_id):
+        result = original_require_owned(repository, project_id, owner_user_id)
+        events.append("read_lock")
+        return result
+
+    def observed_available(project_id):
+        result = original_available(project_id)
+        events.append("available")
+        return result
+
+    def observed_project_dir(project_id):
+        events.append("project_dir")
+        return original_project_dir(project_id)
+
+    def observed_read_artifact(project_id, name):
+        events.append(f"read:{name}")
+        return original_read_artifact(project_id, name)
+
+    ownership_context["app"].dependency_overrides[get_db] = scoped_db
+    monkeypatch.setattr(
+        ProjectRepository,
+        "require_owned_for_read",
+        observed_read_lock,
+        raising=False,
+    )
+    monkeypatch.setattr(store, "assert_project_available", observed_available)
+    monkeypatch.setattr(store, "project_dir", observed_project_dir)
+    monkeypatch.setattr(store, "read_artifact", observed_read_artifact)
+
+    response = _alice(ownership_context).get(f"/api/projects/{project['id']}")
+
+    assert response.status_code == 200, response.text
+    assert events[0:3] == ["session_open", "read_lock", "available"]
+    assert events[-1] == "session_release"
+    release_index = events.index("session_release")
+    assert events.index("project_dir") < release_index
+    assert all(
+        index < release_index
+        for index, event in enumerate(events)
+        if event.startswith("read:")
+    )
+
+
+def test_finite_media_holds_read_lock_through_file_open_and_range_stream(
+    ownership_context, monkeypatch
+):
+    from server.app import main as main_module
+    from starlette import responses as starlette_responses
+
+    project = _create_project(_alice(ownership_context), title="Finite media reader")
+    store = ownership_context["app"].state.store
+    media_path = (
+        store.project_dir(project["id"])
+        / "assets"
+        / "video"
+        / "reader-lock.mp4"
+    )
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"0123456789")
+    events: list[str] = []
+
+    def scoped_db():
+        events.append("session_open")
+        try:
+            yield ownership_context["db"]
+        finally:
+            events.append("session_release")
+
+    original_require_owned = ProjectRepository.require_owned
+    original_available = store.assert_project_available
+    original_safe_media_file = main_module.safe_project_media_file
+    original_open_file = starlette_responses.anyio.open_file
+    original_handle_range = main_module.FileResponse._handle_single_range
+
+    def observed_read_lock(repository, project_id, owner_user_id):
+        result = original_require_owned(repository, project_id, owner_user_id)
+        events.append("read_lock")
+        return result
+
+    def observed_available(project_id):
+        result = original_available(project_id)
+        events.append("available")
+        return result
+
+    def observed_safe_media_file(project_dir, relative_path):
+        events.append("path_validated")
+        return original_safe_media_file(project_dir, relative_path)
+
+    async def observed_open_file(*args, **kwargs):
+        events.append("file_opened")
+        return await original_open_file(*args, **kwargs)
+
+    async def observed_handle_range(response, send, start, end, file_size, header_only):
+        events.append("stream_started")
+        await original_handle_range(response, send, start, end, file_size, header_only)
+        events.append("stream_finished")
+
+    ownership_context["app"].dependency_overrides[get_db] = scoped_db
+    monkeypatch.setattr(
+        ProjectRepository,
+        "require_owned_for_read",
+        observed_read_lock,
+        raising=False,
+    )
+    monkeypatch.setattr(store, "assert_project_available", observed_available)
+    monkeypatch.setattr(main_module, "safe_project_media_file", observed_safe_media_file)
+    monkeypatch.setattr(starlette_responses.anyio, "open_file", observed_open_file)
+    monkeypatch.setattr(
+        main_module.FileResponse,
+        "_handle_single_range",
+        observed_handle_range,
+    )
+
+    response = _alice(ownership_context).get(
+        f"/api/projects/{project['id']}/media/assets/video/reader-lock.mp4",
+        headers={"Range": "bytes=2-5"},
+    )
+
+    assert response.status_code == 206, response.text
+    assert response.content == b"2345"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-range"] == "bytes 2-5/10"
+    assert events[0:3] == ["session_open", "read_lock", "available"]
+    assert events[-1] == "session_release"
+    assert events.index("available") < events.index("path_validated")
+    assert events.index("path_validated") < events.index("file_opened")
+    assert events.index("file_opened") < events.index("stream_finished")
+    assert events.index("stream_finished") < events.index("session_release")
 
 
 def test_workbench_store_does_not_create_or_open_sqlite_metadata(tmp_path):

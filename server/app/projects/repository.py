@@ -63,6 +63,20 @@ class ProjectRepository:
             .with_for_update()
         )
 
+    def get_owned_for_read(
+        self,
+        project_id: str,
+        owner_user_id: str,
+    ) -> ProjectRecord | None:
+        return self.db.scalar(
+            select(ProjectRecord)
+            .where(
+                ProjectRecord.id == project_id,
+                ProjectRecord.owner_user_id == owner_user_id,
+            )
+            .with_for_update(read=True)
+        )
+
     def require_owned(self, project_id: str, owner_user_id: str) -> ProjectRecord:
         project = self.get_owned(project_id, owner_user_id)
         if project is None:
@@ -75,6 +89,16 @@ class ProjectRepository:
         owner_user_id: str,
     ) -> ProjectRecord:
         project = self.get_owned_for_update(project_id, owner_user_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return project
+
+    def require_owned_for_read(
+        self,
+        project_id: str,
+        owner_user_id: str,
+    ) -> ProjectRecord:
+        project = self.get_owned_for_read(project_id, owner_user_id)
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
         return project
