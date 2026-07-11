@@ -8,9 +8,10 @@ import type { ContinuityPlan, ShortDramaProjectResponse, Shot } from "../domain/
 import {
   exportProjectBackup,
   importProjectBackup,
+  importProjectBackupDirectory,
   ProjectImportConflictError,
 } from "./exportProject";
-import { BackupValidationError } from "./backupFormat";
+import { BackupValidationError, type BackupReadProgress } from "./backupFormat";
 import { BackupWorkerUnavailableError, type BackupWorkerRequest, type BackupWorkerResponse } from "./backupArchiveClient";
 import { installBackupImportWorker } from "./backupImport.worker";
 import { resetLocalDbForTests } from "./indexedDb";
@@ -256,6 +257,32 @@ function backupFile(options: {
   return new File([zipSync(files)], "project.omproj", { type: "application/zip" });
 }
 
+function backupDirectoryFiles(options: {
+  project?: ShortDramaProjectResponse;
+  media?: TestMediaEntry[];
+  mediaFiles?: Record<string, Uint8Array>;
+} = {}): File[] {
+  const files = [new File([
+    JSON.stringify({ version: 1, project: options.project ?? snapshot() }),
+  ], "openmontage-project.json", { type: "application/json" })];
+  if (options.media) {
+    files.push(new File([
+      JSON.stringify({ version: 1, media: options.media }),
+    ], "openmontage-media.json", { type: "application/json" }));
+  }
+  for (const [path, bytes] of Object.entries(options.mediaFiles ?? {})) {
+    const pathParts = path.split("/");
+    const bytesBuffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    files.push(new File([bytesBuffer], pathParts[pathParts.length - 1], {
+      type: options.media?.find((entry) => entry.file === path)?.contentType,
+    }));
+  }
+  return files;
+}
+
 function legacyBackupFile(project: unknown): File {
   return new File([zipSync({
     "openmontage-project.json": strToU8(JSON.stringify(project)),
@@ -415,6 +442,100 @@ describe("exportProject", () => {
 
     const recent = await loadRecentProjectSnapshot();
     expect(recent?.snapshot.project.title).toBe("Rain Alley");
+  });
+
+  it("imports ZIP and extracted-directory backups through equivalent facade behavior", async () => {
+    const project = snapshot(null, { id: "equivalent", title: "Equivalent" });
+    const archived = await importProjectBackup(backupFile({ project }));
+    const directoryProgress: BackupReadProgress[] = [];
+    const extracted = await importProjectBackupDirectory(
+      backupDirectoryFiles({ project }),
+      {
+        overwrite: true,
+        onProgress: (progress) => { directoryProgress.push(progress); },
+      },
+    );
+
+    expect(extracted).toEqual(archived);
+    const completedProgress = directoryProgress[directoryProgress.length - 1];
+    expect(completedProgress).toEqual(expect.objectContaining({
+      bytesRead: expect.any(Number),
+      totalBytes: expect.any(Number),
+      entriesRead: 1,
+      totalEntries: 1,
+    }));
+    expect(completedProgress?.bytesRead).toBe(completedProgress?.totalBytes);
+  });
+
+  it("streams extracted-directory media into staged storage before one atomic commit", async () => {
+    const ref = "local://media/extracted-original" as LocalMediaRef;
+    const mediaBytes = new Uint8Array(2.5 * 1024 * 1024).fill(37);
+    const progress: BackupReadProgress[] = [];
+    const imported = await importProjectBackupDirectory(
+      backupDirectoryFiles({
+        project: snapshot(ref, { id: "extracted" }),
+        media: [{
+          ref,
+          file: "media/extracted-original",
+          contentType: "video/mp4",
+          sourcePath: "assets/video/extracted.mp4",
+        }],
+        mediaFiles: { "media/extracted-original": mediaBytes },
+      }),
+      { onProgress: (value) => { progress.push(value); } },
+    );
+
+    const restoredRef = imported.final_path as LocalMediaRef;
+    const restored = await loadMediaBlob(restoredRef);
+    expect(restoredRef).toMatch(/^local:\/\/media\//);
+    expect(restored?.size).toBe(mediaBytes.byteLength);
+    expect(progress.filter((value) => value.bytesRead > 0).length).toBeGreaterThan(3);
+    expect((await loadRecentProjectSnapshot())?.id).toBe("extracted");
+  });
+
+  it("aborts a directory import after staging begins without exposing the project", async () => {
+    await saveProjectSnapshot(snapshot(null, { id: "existing", title: "Existing" }));
+    const opfs = installDelayedOpfs();
+    const ref = "local://media/cancelled" as LocalMediaRef;
+    const controller = new AbortController();
+    const importing = importProjectBackupDirectory(
+      backupDirectoryFiles({
+        project: snapshot(ref, { id: "cancelled" }),
+        media: [{
+          ref,
+          file: "media/cancelled",
+          contentType: "video/mp4",
+          sourcePath: "assets/video/cancelled.mp4",
+        }],
+        mediaFiles: { "media/cancelled": strToU8("staged media") },
+      }),
+      { signal: controller.signal },
+    );
+
+    await opfs.writeStarted;
+    controller.abort();
+    opfs.releaseClose();
+    await expect(importing).rejects.toMatchObject({ name: "AbortError" });
+    expect(await loadProjectSnapshot("cancelled")).toBeNull();
+    expect((await loadRecentProjectSnapshot())?.id).toBe("existing");
+    expect(await mediaRecordCount()).toBe(0);
+    expect(opfs.files.size).toBe(0);
+  });
+
+  it("normalizes a custom directory cancellation reason to AbortError", async () => {
+    const controller = new AbortController();
+    const importing = importProjectBackupDirectory(
+      backupDirectoryFiles({ project: snapshot(null, { id: "custom-cancel" }) }),
+      {
+        signal: controller.signal,
+        onProgress(progress) {
+          if (progress.bytesRead > 0) controller.abort(new Error("stop now"));
+        },
+      },
+    );
+
+    await expect(importing).rejects.toMatchObject({ name: "AbortError" });
+    expect(await loadProjectSnapshot("custom-cancel")).toBeNull();
   });
 
   it("imports a legacy raw snapshot and derives its missing project type", async () => {

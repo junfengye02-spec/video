@@ -38,7 +38,16 @@ export interface UIStrings {
     localStorageNote: string;
     createAction: string;
     importAction: string;
+    importDirectoryAction: string;
     importingAction: string;
+    cancelImportAction: string;
+    importProgress: (
+      bytesRead: number,
+      totalBytes: number,
+      entriesRead: number,
+      totalEntries: number,
+    ) => string;
+    workerUnavailableError: string;
     loading: string;
     emptyState: string;
     shotCount: (count: number) => string;
@@ -366,7 +375,13 @@ const STRINGS: Record<Locale, UIStrings> = {
       localStorageNote: "Projects are stored in this browser.",
       createAction: "New project",
       importAction: "Import project",
+      importDirectoryAction: "Choose extracted backup",
       importingAction: "Importing...",
+      cancelImportAction: "Cancel import",
+      importProgress: (bytesRead, totalBytes, entriesRead, totalEntries) =>
+        `${bytesRead} / ${totalBytes} bytes, ${entriesRead} / ${totalEntries} entries`,
+      workerUnavailableError:
+        "This browser cannot read the compressed backup. Choose the extracted backup folder instead.",
       loading: "Loading local projects...",
       emptyState: "No local projects yet.",
       shotCount: (count: number) => `${count} shots`,
@@ -766,7 +781,13 @@ const STRINGS: Record<Locale, UIStrings> = {
       localStorageNote: "\u9879\u76ee\u4fdd\u5b58\u5728\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d\u3002",
       createAction: "\u65b0\u5efa\u9879\u76ee",
       importAction: "\u5bfc\u5165\u9879\u76ee",
+      importDirectoryAction: "\u9009\u62e9\u5df2\u89e3\u538b\u5907\u4efd",
       importingAction: "\u6b63\u5728\u5bfc\u5165...",
+      cancelImportAction: "\u53d6\u6d88\u5bfc\u5165",
+      importProgress: (bytesRead, totalBytes, entriesRead, totalEntries) =>
+        `${bytesRead} / ${totalBytes} \u5b57\u8282\uff0c${entriesRead} / ${totalEntries} \u4e2a\u6761\u76ee`,
+      workerUnavailableError:
+        "\u5f53\u524d\u6d4f\u89c8\u5668\u65e0\u6cd5\u8bfb\u53d6\u538b\u7f29\u5907\u4efd\uff0c\u8bf7\u9009\u62e9\u5df2\u89e3\u538b\u5907\u4efd\u6587\u4ef6\u5939\u3002",
       loading: "\u6b63\u5728\u52a0\u8f7d\u672c\u5730\u9879\u76ee...",
       emptyState: "\u6682\u65e0\u672c\u5730\u9879\u76ee\u3002",
       shotCount: (count: number) => `${count} \u4e2a\u5206\u955c`,

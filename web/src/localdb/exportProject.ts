@@ -17,11 +17,15 @@ import {
   mediaIdFromRef,
   normalizeAndValidateSnapshot,
   rewriteLocalMediaRefs,
+  type BackupEntryCallbacks,
+  type BackupReadProgress,
   type MediaBackupManifest,
   type ProjectBackupEnvelope,
+  type ValidatedBackup,
   type ValidatedBackupEntry,
 } from "./backupFormat";
 import { readBackupArchive } from "./backupArchiveClient";
+import { readBackupDirectory } from "./backupDirectoryImport";
 import { renewMediaOperationLease } from "./mediaJournal";
 import { beginMediaWrite, loadMediaBlob, runMediaRecovery } from "./mediaStore";
 import {
@@ -43,9 +47,16 @@ async function renewImportSessionLease(sessionId: string): Promise<void> {
     throw new Error(`Import session ${sessionId} lost its owner lease`);
   }
 }
-type ImportProjectBackupOptions = {
+export type ImportProjectBackupOptions = {
   overwrite?: boolean;
+  signal?: AbortSignal;
+  onProgress?: (progress: BackupReadProgress) => void | Promise<void>;
 };
+
+type BackupReader = (
+  callbacks: BackupEntryCallbacks,
+  signal?: AbortSignal,
+) => Promise<ValidatedBackup>;
 
 type BackupBlobEntry = {
   name: string;
@@ -224,8 +235,16 @@ export async function exportProjectBackup(projectId: string): Promise<Blob> {
   return createBackupArchive(entries);
 }
 
-export async function importProjectBackup(
-  file: File,
+function abortError(): DOMException {
+  return new DOMException("The operation was aborted", "AbortError");
+}
+
+function throwIfImportAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+async function importProjectBackupFromReader(
+  readBackup: BackupReader,
   options: ImportProjectBackupOptions = {},
 ): Promise<ShortDramaProjectResponse> {
   const refMap = new Map<LocalMediaRef, LocalMediaRef>();
@@ -239,7 +258,8 @@ export async function importProjectBackup(
     if (current) await current.writer.abort(cause).catch(() => undefined);
   };
   try {
-    const backup = await readBackupArchive(file, {
+    throwIfImportAborted(options.signal);
+    const backup = await readBackup({
       async onEntryStart(entry) {
         if (entry.kind === "project-manifest") {
           if (sessionId) throw new Error("Backup project manifest was streamed more than once");
@@ -286,7 +306,11 @@ export async function importProjectBackup(
           throw error;
         }
       },
-    });
+      async onProgress(progress) {
+        await options.onProgress?.(progress);
+      },
+    }, options.signal);
+    throwIfImportAborted(options.signal);
     if (!sessionId) throw new Error("Backup import session was not established");
 
     const restoredSnapshot =
@@ -294,18 +318,42 @@ export async function importProjectBackup(
         ? (rewriteLocalMediaRefs(backup.project, refMap) as ShortDramaProjectResponse)
         : backup.project;
     const validatedSnapshot = normalizeAndValidateSnapshot(restoredSnapshot);
+    throwIfImportAborted(options.signal);
     await renewImportSessionLease(sessionId);
+    throwIfImportAborted(options.signal);
     await commitImportedProject(validatedSnapshot, sessionId, {
       overwrite: options.overwrite ?? false,
       leaseOwner: sessionId,
     });
     return validatedSnapshot;
   } catch (error) {
+    const wasAborted = options.signal?.aborted ?? false;
     await abortActiveWriter(error);
     if (sessionId) {
       await abortProjectImport(sessionId, error).catch(() => undefined);
       await runMediaRecovery().catch(() => undefined);
     }
+    if (wasAborted) throw abortError();
     throw error;
   }
+}
+
+export function importProjectBackup(
+  file: File,
+  options: ImportProjectBackupOptions = {},
+): Promise<ShortDramaProjectResponse> {
+  return importProjectBackupFromReader(
+    (callbacks, signal) => readBackupArchive(file, callbacks, signal),
+    options,
+  );
+}
+
+export function importProjectBackupDirectory(
+  files: Iterable<File> | ArrayLike<File>,
+  options: ImportProjectBackupOptions = {},
+): Promise<ShortDramaProjectResponse> {
+  return importProjectBackupFromReader(
+    (callbacks, signal) => readBackupDirectory(files, callbacks, signal),
+    options,
+  );
 }

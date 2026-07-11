@@ -53,6 +53,7 @@ textarea:focus {
 .project-actions,
 .button-like,
 .page-actions a,
+.page-actions button,
 .project-actions a,
 .project-actions button,
 .new-project-form button,
@@ -102,6 +103,7 @@ textarea:focus {
 
 .button-like,
 .page-actions a,
+.page-actions button,
 .project-actions a,
 .project-actions button,
 .new-project-form button,
@@ -116,6 +118,18 @@ textarea:focus {
   cursor: pointer;
   font-weight: 700;
   text-decoration: none;
+}
+
+.page-actions .primary-import-action {
+  border-color: var(--om-primary);
+  background: var(--om-primary);
+  color: #ffffff;
+}
+
+.import-progress {
+  margin: 12px 0 0;
+  color: var(--om-text-muted);
+  font-size: 0.86rem;
 }
 
 .page-actions a:last-child,

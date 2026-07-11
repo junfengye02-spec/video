@@ -2,6 +2,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getStrings } from "../i18n";
+import {
+  BackupWorkerProtocolError,
+  BackupWorkerUnavailableError,
+} from "../localdb/backupArchiveClient";
 import { createProjectResponse } from "../test/fixtures";
 import { ProjectsPage } from "./ProjectsPage";
 
@@ -22,6 +26,7 @@ const projectBackupMocks = vi.hoisted(() => {
   return {
     exportProjectBackup: vi.fn(),
     importProjectBackup: vi.fn(),
+    importProjectBackupDirectory: vi.fn(),
     ProjectImportConflictError,
   };
 });
@@ -62,6 +67,7 @@ beforeEach(() => {
   projectStoreMocks.deleteProject.mockReset().mockResolvedValue(undefined);
   projectBackupMocks.exportProjectBackup.mockReset();
   projectBackupMocks.importProjectBackup.mockReset();
+  projectBackupMocks.importProjectBackupDirectory.mockReset();
   downloadMocks.downloadBlob.mockReset();
 });
 
@@ -70,6 +76,15 @@ afterEach(() => {
 });
 
 describe("ProjectsPage", () => {
+  it("always exposes the extracted-directory backup action", () => {
+    render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
+
+    const directoryInput = screen.getByLabelText("选择已解压备份");
+    expect(directoryInput).toHaveAttribute("type", "file");
+    expect(directoryInput).toHaveAttribute("multiple");
+    expect(directoryInput).toHaveAttribute("webkitdirectory");
+  });
+
   it("lists browser-local projects and opens the selected project", async () => {
     projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
@@ -204,7 +219,13 @@ describe("ProjectsPage", () => {
 
     fireEvent.change(screen.getByLabelText("导入项目"), { target: { files: [file] } });
 
-    await waitFor(() => expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledWith(file));
+    await waitFor(() => expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledWith(
+      file,
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        onProgress: expect.any(Function),
+      }),
+    ));
     expect(await screen.findByRole("status", { name: "当前路径" })).toHaveTextContent(
       "/projects/p1/storyboard",
     );
@@ -229,7 +250,10 @@ describe("ProjectsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: strings.cancelAction }));
 
     expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledTimes(1);
-    expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledWith(file);
+    expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledWith(
+      file,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("/projects");
   });
@@ -253,12 +277,133 @@ describe("ProjectsPage", () => {
 
     await waitFor(() => expect(projectBackupMocks.importProjectBackup).toHaveBeenLastCalledWith(
       file,
-      { overwrite: true },
+      expect.objectContaining({
+        overwrite: true,
+        signal: expect.any(AbortSignal),
+        onProgress: expect.any(Function),
+      }),
     ));
     expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledTimes(2);
     expect(await screen.findByRole("status")).toHaveTextContent(
       "/projects/p1/storyboard",
     );
+  });
+
+  it("retries a conflicting directory import through the directory facade", async () => {
+    const files = [
+      new File(["project"], "openmontage-project.json", { type: "application/json" }),
+      new File(["media"], "clip.mp4", { type: "video/mp4" }),
+    ];
+    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    projectBackupMocks.importProjectBackupDirectory
+      .mockRejectedValueOnce(new projectBackupMocks.ProjectImportConflictError("p1"))
+      .mockResolvedValueOnce(createProjectResponse());
+    render(
+      <MemoryRouter future={routerFuture} initialEntries={["/projects"]}>
+        <ProjectsPage />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(screen.getByLabelText("选择已解压备份"), { target: { files } });
+    await screen.findByRole("dialog", { name: "覆盖现有项目" });
+    fireEvent.click(screen.getByRole("button", { name: "确认覆盖" }));
+
+    await waitFor(() => expect(projectBackupMocks.importProjectBackupDirectory)
+      .toHaveBeenLastCalledWith(
+        files,
+        expect.objectContaining({
+          overwrite: true,
+          signal: expect.any(AbortSignal),
+          onProgress: expect.any(Function),
+        }),
+      ));
+    expect(projectBackupMocks.importProjectBackup).not.toHaveBeenCalled();
+    expect(await screen.findByRole("status", { name: "当前路径" })).toHaveTextContent(
+      "/projects/p1/storyboard",
+    );
+  });
+
+  it("keeps the project list and route unchanged when directory validation fails", async () => {
+    const files = [new File(["broken"], "openmontage-project.json")];
+    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    projectBackupMocks.importProjectBackupDirectory.mockRejectedValue(
+      new Error("备份目录不完整，请重新选择。"),
+    );
+    render(
+      <MemoryRouter future={routerFuture} initialEntries={["/projects"]}>
+        <ProjectsPage />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText(summary.title);
+    fireEvent.change(screen.getByLabelText("选择已解压备份"), { target: { files } });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("备份目录不完整，请重新选择。");
+    expect(screen.getByText(summary.title)).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "当前路径" })).toHaveTextContent("/projects");
+    expect(projectBackupMocks.importProjectBackup).not.toHaveBeenCalled();
+  });
+
+  it("promotes the directory action only when the module Worker is unavailable", async () => {
+    const file = new File(["backup"], "project.omproj", { type: "application/zip" });
+    projectBackupMocks.importProjectBackup.mockRejectedValue(
+      new BackupWorkerUnavailableError("Backup module Worker is unavailable"),
+    );
+    render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
+
+    fireEvent.change(screen.getByLabelText(strings.importAction), { target: { files: [file] } });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "当前浏览器无法读取压缩备份，请选择已解压备份文件夹。",
+    );
+    expect(screen.getByText("选择已解压备份").closest("label"))
+      .toHaveClass("primary-import-action");
+  });
+
+  it("keeps protocol failures distinct from Worker unavailability", async () => {
+    const file = new File(["backup"], "project.omproj", { type: "application/zip" });
+    projectBackupMocks.importProjectBackup.mockRejectedValue(
+      new BackupWorkerProtocolError("备份读取协议异常，请重试。"),
+    );
+    render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
+
+    fireEvent.change(screen.getByLabelText(strings.importAction), { target: { files: [file] } });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("备份读取协议异常，请重试。");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("请选择已解压备份文件夹");
+    expect(screen.getByText("选择已解压备份").closest("label"))
+      .not.toHaveClass("primary-import-action");
+  });
+
+  it("shows byte and entry progress and cancels the active import without failure", async () => {
+    const file = new File(["backup"], "project.omproj", { type: "application/zip" });
+    projectBackupMocks.importProjectBackup.mockImplementation((
+      _file: File,
+      options: { signal: AbortSignal; onProgress: (progress: unknown) => void },
+    ) => new Promise((_resolve, reject) => {
+      options.onProgress({ bytesRead: 64, totalBytes: 128, entriesRead: 1, totalEntries: 3 });
+      options.signal.addEventListener("abort", () => {
+        reject(new DOMException("The operation was aborted", "AbortError"));
+      }, { once: true });
+    }));
+    render(
+      <MemoryRouter future={routerFuture} initialEntries={["/projects"]}>
+        <ProjectsPage />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(screen.getByLabelText(strings.importAction), { target: { files: [file] } });
+
+    expect(await screen.findByText("64 / 128 字节，1 / 3 个条目")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消导入" }));
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "取消导入" }))
+      .not.toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "当前路径" })).toHaveTextContent("/projects");
   });
 
   it("shows loading and load failure states", async () => {

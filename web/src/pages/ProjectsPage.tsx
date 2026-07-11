@@ -1,4 +1,4 @@
-import { Download, FilePlus2, FolderOpen, Trash2, Upload } from "lucide-react";
+import { Download, FilePlus2, FolderOpen, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { projectRoutes } from "../app/routes";
@@ -6,8 +6,11 @@ import { getStrings } from "../i18n";
 import {
   exportProjectBackup,
   importProjectBackup,
+  importProjectBackupDirectory,
   ProjectImportConflictError,
 } from "../localdb/exportProject";
+import { BackupWorkerUnavailableError } from "../localdb/backupArchiveClient";
+import type { BackupReadProgress } from "../localdb/backupFormat";
 import { deleteProject, listProjectSummaries } from "../localdb/projectStore";
 import type { LocalProjectSummary } from "../localdb/types";
 import { downloadBlob } from "../utils/downloadBlob";
@@ -15,6 +18,17 @@ import { downloadBlob } from "../utils/downloadBlob";
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
+
+function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  return "name" in error && (error as { name?: unknown }).name === "AbortError";
+}
+
+type ImportSource =
+  | { kind: "archive"; file: File }
+  | { kind: "directory"; files: File[] };
+
+const directoryPickerAttributes = { webkitdirectory: "" } as const;
 
 export function ProjectsPage() {
   const strings = getStrings("zh").projectsPage;
@@ -26,12 +40,15 @@ export function ProjectsPage() {
   const [deleting, setDeleting] = useState(false);
   const [exportingIds, setExportingIds] = useState<Set<string>>(() => new Set());
   const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState<BackupReadProgress | null>(null);
+  const [workerUnavailable, setWorkerUnavailable] = useState(false);
   const [importConflict, setImportConflict] = useState<{
-    file: File;
+    source: ImportSource;
     projectId: string;
   } | null>(null);
   const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
   const exportingIdsRef = useRef(new Set<string>());
+  const importControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -49,6 +66,7 @@ export function ProjectsPage() {
 
     return () => {
       active = false;
+      importControllerRef.current?.abort();
     };
   }, [strings.loadError]);
 
@@ -108,37 +126,64 @@ export function ProjectsPage() {
     }
   }
 
-  async function runImport(file: File, overwrite = false) {
+  async function runImport(source: ImportSource, overwrite = false) {
+    const controller = new AbortController();
+    importControllerRef.current = controller;
     setImporting(true);
+    setImportProgress(null);
     setError(null);
     try {
-      const snapshot = overwrite
-        ? await importProjectBackup(file, { overwrite: true })
-        : await importProjectBackup(file);
+      const options = {
+        ...(overwrite ? { overwrite: true } : {}),
+        signal: controller.signal,
+        onProgress: (progress: BackupReadProgress) => { setImportProgress(progress); },
+      };
+      const snapshot = source.kind === "archive"
+        ? await importProjectBackup(source.file, options)
+        : await importProjectBackupDirectory(source.files, options);
       navigate(projectRoutes.storyboard(snapshot.project.id));
     } catch (importError) {
       if (importError instanceof ProjectImportConflictError && !overwrite) {
-        setImportConflict({ file, projectId: importError.projectId });
+        setImportConflict({ source, projectId: importError.projectId });
+      } else if (isAbortError(importError)) {
+        // Cancellation is an expected user action.
+      } else if (
+        source.kind === "archive" &&
+        importError instanceof BackupWorkerUnavailableError
+      ) {
+        setWorkerUnavailable(true);
+        setError(strings.workerUnavailableError);
       } else {
         setError(errorMessage(importError, strings.importError));
       }
     } finally {
-      setImporting(false);
+      if (importControllerRef.current === controller) {
+        importControllerRef.current = null;
+        setImporting(false);
+        setImportProgress(null);
+      }
     }
   }
 
-  async function handleImport(event: ChangeEvent<HTMLInputElement>) {
+  async function handleArchiveImport(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     event.target.value = "";
-    await runImport(file);
+    await runImport({ kind: "archive", file });
+  }
+
+  async function handleDirectoryImport(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length === 0) return;
+    event.target.value = "";
+    await runImport({ kind: "directory", files });
   }
 
   async function confirmOverwrite() {
     if (!importConflict) return;
-    const { file } = importConflict;
+    const { source } = importConflict;
     setImportConflict(null);
-    await runImport(file, true);
+    await runImport(source, true);
   }
 
   return (
@@ -149,7 +194,7 @@ export function ProjectsPage() {
           <p>{strings.localStorageNote}</p>
         </div>
         <div className="page-actions">
-          <label className="button-like async-action">
+          <label className={`button-like async-action ${workerUnavailable ? "secondary-import-action" : ""}`}>
             <Upload aria-hidden="true" size={16} />
             {importing ? strings.importingAction : strings.importAction}
             <input
@@ -158,9 +203,32 @@ export function ProjectsPage() {
               accept=".omproj,.zip"
               aria-label={strings.importAction}
               disabled={importing}
-              onChange={handleImport}
+              onChange={handleArchiveImport}
             />
           </label>
+          <label className={`button-like async-action ${workerUnavailable ? "primary-import-action" : ""}`}>
+            <FolderOpen aria-hidden="true" size={16} />
+            {strings.importDirectoryAction}
+            <input
+              {...directoryPickerAttributes}
+              className="sr-only"
+              type="file"
+              multiple
+              aria-label={strings.importDirectoryAction}
+              disabled={importing}
+              onChange={handleDirectoryImport}
+            />
+          </label>
+          {importing ? (
+            <button
+              className="cancel-import-action"
+              type="button"
+              onClick={() => importControllerRef.current?.abort()}
+            >
+              <X aria-hidden="true" size={16} />
+              {strings.cancelImportAction}
+            </button>
+          ) : null}
           <Link to={projectRoutes.create}>
             <FilePlus2 aria-hidden="true" size={16} />
             {strings.createAction}
@@ -169,6 +237,16 @@ export function ProjectsPage() {
       </div>
 
       {error ? <p role="alert">{error}</p> : null}
+      {importProgress ? (
+        <p className="import-progress" role="status" aria-live="polite">
+          {strings.importProgress(
+            importProgress.bytesRead,
+            importProgress.totalBytes,
+            importProgress.entriesRead,
+            importProgress.totalEntries,
+          )}
+        </p>
+      ) : null}
       {loading ? <p>{strings.loading}</p> : null}
       {!loading && projects.length === 0 ? <p>{strings.emptyState}</p> : null}
 
