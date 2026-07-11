@@ -62,6 +62,10 @@ class NewApiCallError(NewApiError):
     pass
 
 
+class CapabilityAliasUnavailable(NewApiCallError):
+    pass
+
+
 def _reject_duplicate_json_names(pairs: list[tuple[str, object]]) -> dict[str, object]:
     parsed: dict[str, object] = {}
     for name, value in pairs:
@@ -622,7 +626,9 @@ class NewApiClient:
         expected_task_id = _validate_task_id(task_id)
         token = self._keyrings["video"].get(token_alias)
         if token is None:
-            raise NewApiCallError("NewAPI capability token is unavailable")
+            raise CapabilityAliasUnavailable(
+                "NewAPI capability token is unavailable"
+            )
         destination = Path(destination)
         if not destination.name or not destination.parent.is_dir():
             raise ValueError("video destination directory is invalid")
@@ -708,7 +714,9 @@ class NewApiClient:
     ) -> httpx.Response:
         token = self._keyrings.get(kind, {}).get(token_alias)
         if token is None:
-            raise NewApiCallError("NewAPI capability token is unavailable")
+            raise CapabilityAliasUnavailable(
+                "NewAPI capability token is unavailable"
+            )
         response: httpx.Response | None = None
         try:
             provider_request = self._client.build_request(
@@ -772,7 +780,9 @@ class NewApiClient:
             raise NewApiCallError("NewAPI capability is not configured")
         token = self._keyrings[kind].get(token_alias)
         if token is None:
-            raise NewApiCallError("NewAPI capability token is unavailable")
+            raise CapabilityAliasUnavailable(
+                "NewAPI capability token is unavailable"
+            )
         response: httpx.Response | None = None
         try:
             provider_request = self._client.build_request(

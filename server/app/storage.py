@@ -69,8 +69,20 @@ class HiddenVideoDestination:
         self.operation = operation
         self._directory = store._hidden_video_dir(self.project_id)
         self._artifact_id = uuid.uuid4().hex
-        self.temporary_path = self._directory / f".{self._artifact_id}.partial"
-        self._metadata_partial = self._directory / f".{self._artifact_id}.json.partial"
+        self._staging_directory = self._directory / f".{self._artifact_id}.partial"
+        self._artifact_directory = self._directory / self._artifact_id
+        if self._artifact_directory.exists() or _is_link_or_junction(
+            self._artifact_directory
+        ):
+            raise ValueError("Hidden video artifact already exists")
+        try:
+            self._staging_directory.mkdir()
+        except FileExistsError:
+            raise ValueError("Hidden video artifact already exists") from None
+        if _is_link_or_junction(self._staging_directory):
+            raise ValueError("Hidden video staging directory is invalid")
+        self.temporary_path = self._staging_directory / "video.mp4"
+        self._metadata_path = self._staging_directory / "metadata.json"
         self._committed = False
         with self.temporary_path.open("xb"):
             pass
@@ -98,8 +110,7 @@ class HiddenVideoDestination:
             raise ValueError("Video hash does not match staged content")
 
         locator = f"workbench-hidden-video:{self.project_id}:{self._artifact_id}"
-        final_path = self._directory / f"{self._artifact_id}.mp4"
-        metadata_path = self._directory / f"{self._artifact_id}.json"
+        final_path = self._artifact_directory / "video.mp4"
         metadata = {
             "version": 1,
             "locator": locator,
@@ -109,15 +120,16 @@ class HiddenVideoDestination:
             "capability": "video",
             "hidden": True,
             "sha256": actual_sha256,
-            "filename": final_path.name,
+            "filename": "video.mp4",
         }
-        _write_json_durable(self._metadata_partial, metadata)
-        _publish_without_replacement(self.temporary_path, final_path)
-        try:
-            _publish_without_replacement(self._metadata_partial, metadata_path)
-        except Exception:
-            final_path.unlink(missing_ok=True)
-            raise
+        _write_json_durable(self._metadata_path, metadata)
+        _require_regular_unlinked_file(
+            self._metadata_path, "hidden video metadata"
+        )
+        _fsync_directory(self._staging_directory)
+        _publish_directory_without_replacement(
+            self._staging_directory, self._artifact_directory
+        )
         _fsync_directory(self._directory)
         self._committed = True
         return HiddenVideoArtifact(
@@ -132,11 +144,17 @@ class HiddenVideoDestination:
         )
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        for path in (self.temporary_path, self._metadata_partial):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("Could not remove hidden video partial", exc_info=True)
+        try:
+            if self._staging_directory.exists():
+                if (
+                    self._staging_directory.parent != self._directory
+                    or _is_link_or_junction(self._staging_directory)
+                    or not self._staging_directory.is_dir()
+                ):
+                    raise ValueError("Hidden video staging directory is invalid")
+                shutil.rmtree(self._staging_directory)
+        except (OSError, ValueError):
+            logger.warning("Could not remove hidden video partial", exc_info=True)
 
 
 class ProjectRecoveryRequired(RuntimeError):
@@ -239,8 +257,21 @@ class WorkbenchStore:
             raise ValueError("Hidden video locator is invalid")
         project_id, artifact_id = match.groups()
         directory = self._hidden_video_dir(project_id, create=False)
-        metadata_path = directory / f"{artifact_id}.json"
-        video_path = directory / f"{artifact_id}.mp4"
+        artifact_directory = directory / artifact_id
+        if (
+            artifact_directory.parent != directory
+            or _is_link_or_junction(artifact_directory)
+            or not artifact_directory.is_dir()
+        ):
+            raise ValueError("Hidden video artifact directory is invalid")
+        try:
+            children = {path.name: path for path in artifact_directory.iterdir()}
+        except OSError:
+            raise ValueError("Hidden video artifact directory is invalid") from None
+        if set(children) != {"metadata.json", "video.mp4"}:
+            raise ValueError("Hidden video artifact directory is invalid")
+        metadata_path = children["metadata.json"]
+        video_path = children["video.mp4"]
         _require_regular_unlinked_file(metadata_path, "hidden video metadata")
         _require_regular_unlinked_file(video_path, "hidden video")
         try:
@@ -670,14 +701,17 @@ def _write_json_durable(path: Path, data: dict[str, Any]) -> None:
         os.fsync(output.fileno())
 
 
-def _publish_without_replacement(source: Path, destination: Path) -> None:
+def _publish_directory_without_replacement(
+    source: Path, destination: Path
+) -> None:
+    if destination.exists() or _is_link_or_junction(destination):
+        raise ValueError("Hidden video artifact already exists")
     try:
-        os.link(source, destination, follow_symlinks=False)
+        os.rename(source, destination)
     except OSError as exc:
-        if destination.exists():
+        if destination.exists() or _is_link_or_junction(destination):
             raise ValueError("Hidden video artifact already exists") from None
         raise OSError("Hidden video artifact could not be published") from exc
-    source.unlink()
 
 
 def _fsync_directory(directory: Path) -> None:

@@ -279,7 +279,13 @@ class BillingService:
             raise InvalidBillingState("billing job not found")
         return job
 
-    def _open_reconciliation(self, job: GenerationJob, reason: str) -> None:
+    def _open_reconciliation(
+        self,
+        job: GenerationJob,
+        reason: str,
+        *,
+        last_error: str | None = None,
+    ) -> None:
         existing = self.db.scalar(
             select(BillingReconciliation).where(
                 BillingReconciliation.job_id == job.id,
@@ -294,6 +300,7 @@ class BillingService:
                     reason=reason,
                     status="open",
                     attempts=0,
+                    last_error=last_error,
                 )
             )
 
@@ -761,12 +768,24 @@ class BillingService:
             self.db.rollback()
             raise
 
-    def fail_unsubmitted(self, job_id: str, status: str) -> None:
+    def fail_unsubmitted(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        operator_error: str | None = None,
+    ) -> None:
         if status not in _UNSUBMITTED_TERMINALS:
             raise InvalidBillingState("invalid unsubmitted terminal state")
         try:
             job = self._lock_chargeable_job(job_id)
             if job.status == status:
+                if operator_error is not None:
+                    self._open_reconciliation(
+                        job,
+                        "provider_configuration_unavailable",
+                        last_error=operator_error,
+                    )
                 self.db.commit()
                 return
             if job.status in _TERMINALS:
@@ -783,16 +802,30 @@ class BillingService:
             release_hold(self.db, job.id, reason=status)
             job.status = status
             job.result_visible = False
+            if operator_error is not None:
+                self._open_reconciliation(
+                    job,
+                    "provider_configuration_unavailable",
+                    last_error=operator_error,
+                )
             self.db.commit()
         except Exception:
             self.db.rollback()
             raise
 
-    def fail_missing_result(self, job_id: str) -> None:
+    def fail_missing_result(
+        self, job_id: str, *, operator_error: str | None = None
+    ) -> None:
         target = "provider_result_missing_no_charge"
         try:
             job = self._lock_chargeable_job(job_id)
             if job.status == target:
+                if operator_error is not None:
+                    self._open_reconciliation(
+                        job,
+                        "provider_configuration_unavailable",
+                        last_error=operator_error,
+                    )
                 self.db.commit()
                 return
             if job.status in _TERMINALS:
@@ -810,6 +843,12 @@ class BillingService:
             job.status = target
             job.result_visible = False
             self._open_reconciliation(job, "provider_result_missing")
+            if operator_error is not None:
+                self._open_reconciliation(
+                    job,
+                    "provider_configuration_unavailable",
+                    last_error=operator_error,
+                )
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -875,6 +914,18 @@ class BillingService:
             job.status = target
             job.result_visible = False
             self._open_reconciliation(job, "provider_result_missing")
+            self._open_reconciliation(job, "receipt_pending")
+            reference_rows = self.db.scalars(
+                select(BillingReconciliation).where(
+                    BillingReconciliation.job_id == job.id,
+                    BillingReconciliation.reason == "reference_recovery",
+                    BillingReconciliation.status == "open",
+                )
+            ).all()
+            for row in reference_rows:
+                row.status = "resolved"
+                row.next_retry_at = None
+                row.last_error = None
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
@@ -932,11 +983,19 @@ class BillingService:
             raise InvalidBillingState("failure settlement requires a no-charge receipt")
         self.settle_job(job_id, receipt)
 
-    def fail_missing_receipt(self, job_id: str) -> None:
+    def fail_missing_receipt(
+        self, job_id: str, *, operator_error: str | None = None
+    ) -> None:
         target = "receipt_missing_no_charge"
         try:
             job = self._lock_chargeable_job(job_id)
             if job.status == target:
+                if operator_error is not None:
+                    self._open_reconciliation(
+                        job,
+                        "provider_configuration_unavailable",
+                        last_error=operator_error,
+                    )
                 self.db.commit()
                 return
             if job.status in _TERMINALS or job.status == "payment_required":
@@ -961,6 +1020,27 @@ class BillingService:
             job.status = target
             job.result_visible = False
             self._open_reconciliation(job, "receipt_missing")
+            if operator_error is not None:
+                self._open_reconciliation(
+                    job,
+                    "provider_configuration_unavailable",
+                    last_error=operator_error,
+                )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def record_provider_configuration_unavailable(
+        self, job_id: str, last_error: str
+    ) -> None:
+        try:
+            job = self._lock_chargeable_job(job_id)
+            self._open_reconciliation(
+                job,
+                "provider_configuration_unavailable",
+                last_error=last_error,
+            )
             self.db.commit()
         except Exception:
             self.db.rollback()

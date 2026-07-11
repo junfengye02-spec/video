@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 
-from sqlalchemy import or_, select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import Session
 
 from server.app.billing.models import (
@@ -19,6 +19,7 @@ from server.app.billing.service import BillingService, InvalidBillingState
 from server.app.core.config import get_settings
 from server.app.payments.models import PaymentOrder
 from server.app.provider.newapi import (
+    CapabilityAliasUnavailable,
     NewApiClient,
     NewApiError,
     ReceiptNotFound,
@@ -125,6 +126,15 @@ def recover_provider_reference(
             snapshot.token_alias,
             snapshot.quote_id,
         )
+    except CapabilityAliasUnavailable as exc:
+        if _aware(now) > snapshot.reference_deadline:
+            BillingService(db, settings, _unavailable_artifact).fail_unsubmitted(
+                snapshot.id,
+                "provider_reference_missing_no_charge",
+                operator_error=_sanitize_error(exc),
+            )
+            return "terminal"
+        raise
     except NewApiError:
         if _aware(now) > snapshot.reference_deadline:
             BillingService(db, settings, _unavailable_artifact).fail_unsubmitted(
@@ -230,10 +240,16 @@ def reconcile_job_now(
         recovered_sync = outcome == "undeliverable"
         snapshot = _snapshot_job(db, job_id)
 
-    refund_pending = db.scalar(
+    stored_receipt_status = db.scalar(
         select(CostReceipt.status).where(CostReceipt.job_id == job_id)
-    ) == "refund_pending"
+    )
     db.commit()
+    refund_pending = stored_receipt_status == "refund_pending"
+    recovered_sync_accounting = (
+        snapshot.status == "provider_result_missing_no_charge"
+        and snapshot.provider_reference_type == "request"
+        and stored_receipt_status is None
+    )
     if snapshot.status in {
         "billed",
         "payment_required",
@@ -247,6 +263,7 @@ def reconcile_job_now(
         snapshot.status.endswith("_no_charge")
         and not refund_pending
         and not recovered_sync
+        and not recovered_sync_accounting
     ):
         return "completed"
 
@@ -264,6 +281,15 @@ def reconcile_job_now(
                 media_store,
                 settings=settings,
             )
+        except CapabilityAliasUnavailable as exc:
+            if _aware(now) > snapshot.receipt_deadline:
+                BillingService(
+                    db, settings, media_store.inspect_staged_artifact
+                ).fail_missing_result(
+                    snapshot.id, operator_error=_sanitize_error(exc)
+                )
+                return "completed"
+            raise
         except (NewApiError, InvalidVideoArtifact, OSError, ValueError):
             if _aware(now) > snapshot.receipt_deadline:
                 BillingService(
@@ -277,7 +303,24 @@ def reconcile_job_now(
 
     try:
         final_receipt = _receipt_for(client, snapshot)
+    except CapabilityAliasUnavailable as exc:
+        if _aware(now) > snapshot.receipt_deadline:
+            service = BillingService(
+                db, settings, media_store.inspect_staged_artifact
+            )
+            if recovered_sync_accounting:
+                service.record_provider_configuration_unavailable(
+                    snapshot.id, _sanitize_error(exc)
+                )
+            else:
+                service.fail_missing_receipt(
+                    snapshot.id, operator_error=_sanitize_error(exc)
+                )
+            return "completed"
+        raise
     except (ReceiptNotFound, NewApiError, ValueError):
+        if recovered_sync_accounting:
+            raise
         if _aware(now) > snapshot.receipt_deadline:
             BillingService(
                 db, settings, media_store.inspect_staged_artifact
@@ -291,6 +334,8 @@ def reconcile_job_now(
         _validate_delayed_refund(snapshot, final_receipt)
         return "completed"
     if final_receipt.status == "pending":
+        if recovered_sync_accounting:
+            return "pending"
         BillingService(
             db, settings, media_store.inspect_staged_artifact
         ).settle_job(snapshot.id, final_receipt)
@@ -330,6 +375,11 @@ def _reason_for(job: GenerationJob) -> str | None:
         return "reference_recovery"
     if job.provider_reference_id is None:
         return None
+    if (
+        job.status == "provider_result_missing_no_charge"
+        and job.provider_reference_type == "request"
+    ):
+        return "receipt_pending"
     if job.status not in {
         "reserved",
         "reference_recovery_pending",
@@ -368,19 +418,37 @@ def _expire_non_network_work(db: Session, now: datetime, settings) -> None:
 
 
 def _ensure_reconciliations(db: Session, limit: int) -> None:
+    has_open_machine_row = exists(
+        select(BillingReconciliation.id).where(
+            BillingReconciliation.job_id == GenerationJob.id,
+            BillingReconciliation.status == "open",
+            BillingReconciliation.reason.in_(_MACHINE_REASONS),
+        )
+    )
+    has_stored_receipt = exists(
+        select(CostReceipt.id).where(CostReceipt.job_id == GenerationJob.id)
+    )
     jobs = db.scalars(
         select(GenerationJob)
         .where(
             GenerationJob.chargeable.is_(True),
-            GenerationJob.status.in_(
-                {
-                    "submitted_ambiguous",
-                    "reference_recovery_pending",
-                    "reserved",
-                    "receipt_pending",
-                    "result_pending",
-                }
+            or_(
+                GenerationJob.status.in_(
+                    {
+                        "submitted_ambiguous",
+                        "reference_recovery_pending",
+                        "reserved",
+                        "receipt_pending",
+                        "result_pending",
+                    }
+                ),
+                (
+                    (GenerationJob.status == "provider_result_missing_no_charge")
+                    & (GenerationJob.provider_reference_type == "request")
+                    & ~has_stored_receipt
+                ),
             ),
+            ~has_open_machine_row,
         )
         .order_by(GenerationJob.created_at, GenerationJob.id)
         .limit(limit)

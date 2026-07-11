@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import server.app.storage as storage
 from server.app.storage import WorkbenchStore
 
 
@@ -28,9 +29,10 @@ def test_hidden_video_commit_is_verified_durable_and_restart_readable(tmp_path):
     store = WorkbenchStore(projects_root=projects_root)
 
     with store.hidden_video_destination(project_id, "shot:s1") as destination:
-        assert destination.temporary_path.parent == (
+        assert destination.temporary_path.parent.parent == (
             projects_root / project_id / "assets" / "video" / ".hidden"
         )
+        assert destination.temporary_path.parent.name.endswith(".partial")
         destination.temporary_path.write_bytes(b"valid-video-payload")
         digest = hashlib.sha256(b"valid-video-payload").hexdigest()
         artifact = destination.commit(
@@ -44,6 +46,12 @@ def test_hidden_video_commit_is_verified_durable_and_restart_readable(tmp_path):
     assert artifact.hidden is True
     assert artifact.sha256 == digest
     assert artifact.path.read_bytes() == b"valid-video-payload"
+    assert artifact.path.name == "video.mp4"
+    assert artifact.path.parent.name == artifact.locator.rsplit(":", 1)[-1]
+    assert {path.name for path in artifact.path.parent.iterdir()} == {
+        "metadata.json",
+        "video.mp4",
+    }
     assert not list(artifact.path.parent.glob("*.partial"))
 
     restarted = WorkbenchStore(projects_root=projects_root)
@@ -53,6 +61,36 @@ def test_hidden_video_commit_is_verified_durable_and_restart_readable(tmp_path):
     assert inspected.source_reference == artifact.source_reference
     assert inspected.capability == "video"
     assert restarted.exists(artifact.locator, sha256=digest)
+
+
+def test_hidden_video_publish_failure_never_exposes_half_artifact(
+    tmp_path, monkeypatch
+):
+    store = WorkbenchStore(projects_root=tmp_path / "projects")
+    project_id = uuid.uuid4().hex
+    artifact_id = "2" * 32
+    monkeypatch.setattr(
+        "server.app.storage.uuid.uuid4", lambda: SimpleNamespace(hex=artifact_id)
+    )
+
+    with pytest.raises(OSError, match="could not be published"):
+        with store.hidden_video_destination(project_id, "shot:s6") as destination:
+            destination.temporary_path.write_bytes(b"downloaded")
+            monkeypatch.setattr(
+                storage.os,
+                "rename",
+                lambda *_args: (_ for _ in ()).throw(OSError("crash before rename")),
+            )
+            destination.commit(
+                sha256=hashlib.sha256(b"downloaded").hexdigest(),
+                source_reference="task_00000000000000000000000000000006",
+            )
+
+    locator = f"workbench-hidden-video:{project_id}:{artifact_id}"
+    hidden = store.project_dir(project_id) / "assets" / "video" / ".hidden"
+    assert not store.exists(locator)
+    assert not (hidden / artifact_id).exists()
+    assert not list(hidden.glob(f".{artifact_id}*"))
 
 
 def test_hidden_video_hash_mismatch_cleans_partial_without_replacing_artifact(tmp_path):

@@ -11,6 +11,7 @@ import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
 
+import server.app.provider.newapi as newapi
 from server.app.billing.money import provider_micro_to_charge_units
 from server.app.core.config import AppSettings
 from server.app.provider.newapi import (
@@ -1057,9 +1058,25 @@ def test_receipt_reference_type_must_match_capability_before_network(
 def test_removed_retired_alias_fails_closed_without_current_token_fallback(settings):
     transport = SequenceTransport([])
     client = NewApiClient(settings, transport=transport)
+    unavailable = getattr(newapi, "CapabilityAliasUnavailable", None)
 
-    with pytest.raises(NewApiCallError):
+    assert unavailable is not None
+    with pytest.raises(unavailable, match="capability token is unavailable"):
         client.get_quote_status("video", "video-retired", QUOTE_ID)
+
+    assert transport.requests == []
+
+
+def test_removed_retired_alias_is_typed_for_video_download(settings, tmp_path):
+    transport = SequenceTransport([])
+    client = NewApiClient(settings, transport=transport)
+    unavailable = getattr(newapi, "CapabilityAliasUnavailable", None)
+
+    assert unavailable is not None
+    with pytest.raises(unavailable, match="capability token is unavailable"):
+        client.download_video_content(
+            "video-retired", TASK_ID, tmp_path / "recovered.mp4"
+        )
 
     assert transport.requests == []
 

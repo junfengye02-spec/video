@@ -21,12 +21,16 @@ from server.app.billing.models import (
     CostReceipt,
     GenerationJob,
 )
-from server.app.billing.reconciliation import reconcile_due_jobs
+from server.app.billing.reconciliation import (
+    reconcile_due_jobs,
+    recover_provider_reference,
+)
 from server.app.billing.service import BillingService
 from server.app.db.base import Base
 from server.app.payments.models import PaymentOrder
 from server.app.projects.models import ProjectRecord
 from server.app.provider.newapi import (
+    CapabilityAliasUnavailable,
     NewApiCallError,
     QuoteNotFound,
     ReceiptNotFound,
@@ -82,6 +86,22 @@ def receipt(reference_id: str, *, status: str = "settled") -> UsageReceipt:
         cost_currency="USD",
         cost_amount_micro=2_000_000 if status == "settled" else 0,
         settled_at=int(NOW.timestamp()),
+    )
+
+
+def pending_receipt(reference_id: str) -> UsageReceipt:
+    return UsageReceipt(
+        reference_type="task" if reference_id.startswith("task") else "request",
+        reference_id=reference_id,
+        status="pending",
+        model="video-model" if reference_id.startswith("task") else "text-model",
+        quota=0,
+        refunded_quota=0,
+        quota_per_unit=Decimal("500000"),
+        pricing_version="sha256:pricing",
+        cost_currency="USD",
+        cost_amount_micro=0,
+        settled_at=None,
     )
 
 
@@ -239,6 +259,215 @@ def test_recovered_sync_reference_is_undeliverable_no_charge(billing_context):
     )
     client.quote.assert_not_called()
     client.execute_quoted.assert_not_called()
+
+
+def test_recovered_sync_receipt_accounting_survives_pending_passes_and_restart(
+    billing_context,
+):
+    db, service, store, user_id, project_id = billing_context
+    child = reserve(service, user_id, project_id, capability="text")
+    request_id = valid_request_id()
+    client = fake_client()
+    client.get_quote_status.return_value = UsageQuoteStatus(
+        quote_id=child.quote_id,
+        status="accepted",
+        reference_type="request",
+        reference_id=request_id,
+        created_at=int(NOW.timestamp()),
+        expires_at=int((NOW + timedelta(minutes=2)).timestamp()),
+        consumed_at=int(NOW.timestamp()),
+        updated_at=int(NOW.timestamp()),
+    )
+
+    assert recover_provider_reference(
+        db, client, child.id, NOW, settings=SETTINGS
+    ) == "undeliverable"
+    machine = db.scalar(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == child.id,
+            BillingReconciliation.reason == "receipt_pending",
+        )
+    )
+    assert machine is not None and machine.status == "open"
+
+    client.get_request_receipt.side_effect = [
+        pending_receipt(request_id),
+        pending_receipt(request_id),
+        receipt(request_id),
+    ]
+    current = NOW
+    for _pass in range(2):
+        with Session(db.get_bind(), expire_on_commit=False) as restarted:
+            assert reconcile_due_jobs(
+                restarted,
+                client,
+                current,
+                100,
+                settings=SETTINGS,
+                media_store=store,
+            ) == 1
+            row = restarted.get(BillingReconciliation, machine.id)
+            assert row is not None and row.status == "open"
+            current = row.next_retry_at.replace(tzinfo=timezone.utc)
+
+    with Session(db.get_bind(), expire_on_commit=False) as restarted:
+        assert reconcile_due_jobs(
+            restarted,
+            client,
+            current,
+            100,
+            settings=SETTINGS,
+            media_store=store,
+        ) == 1
+        assert restarted.get(BillingReconciliation, machine.id).status == "resolved"
+        assert restarted.scalar(
+            select(CostReceipt).where(CostReceipt.job_id == child.id)
+        ) is not None
+        operator = restarted.scalar(
+            select(BillingReconciliation).where(
+                BillingReconciliation.job_id == child.id,
+                BillingReconciliation.reason == "provider_result_missing",
+            )
+        )
+        assert operator is not None and operator.status == "open"
+        assert restarted.scalar(
+            select(func.count(WalletEntry.id)).where(
+                WalletEntry.source_id == child.id
+            )
+        ) == 0
+
+
+def test_worker_recovered_sync_hands_off_to_one_receipt_machine(
+    billing_context,
+):
+    db, service, store, user_id, project_id = billing_context
+    child = reserve(service, user_id, project_id, capability="text")
+    request_id = valid_request_id()
+    client = fake_client()
+    client.get_quote_status.return_value = UsageQuoteStatus(
+        quote_id=child.quote_id,
+        status="accepted",
+        reference_type="request",
+        reference_id=request_id,
+        created_at=int(NOW.timestamp()),
+        expires_at=int((NOW + timedelta(minutes=2)).timestamp()),
+        consumed_at=int(NOW.timestamp()),
+        updated_at=int(NOW.timestamp()),
+    )
+    client.get_request_receipt.return_value = pending_receipt(request_id)
+
+    assert reconcile_due_jobs(
+        db, client, NOW, 1, settings=SETTINGS, media_store=store
+    ) == 1
+
+    machines = db.scalars(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == child.id,
+            BillingReconciliation.status == "open",
+            BillingReconciliation.reason.in_(
+                {"reference_recovery", "receipt_pending"}
+            ),
+        )
+    ).all()
+    assert [row.reason for row in machines] == ["receipt_pending"]
+    client.get_request_receipt.assert_called_once()
+
+
+def test_reconciliation_discovery_excludes_covered_jobs_before_limit(
+    billing_context,
+):
+    db, service, store, user_id, project_id = billing_context
+    wallet = db.scalar(
+        select(WalletAccount).where(WalletAccount.user_id == user_id)
+    )
+    wallet.balance_units = 1_000_000_000
+    db.commit()
+    for index in range(100):
+        covered = reserve(service, user_id, project_id, capability="text")
+        covered.created_at = NOW + timedelta(microseconds=index)
+        db.add(
+            BillingReconciliation(
+                id=uuid.uuid4().hex,
+                job_id=covered.id,
+                reason="reference_recovery",
+                status="open",
+                attempts=0,
+                next_retry_at=NOW + timedelta(days=1),
+            )
+        )
+    eligible = reserve(service, user_id, project_id, capability="text")
+    eligible.created_at = NOW + timedelta(minutes=1)
+    db.commit()
+
+    reconcile_due_jobs(
+        db,
+        fake_client(),
+        NOW,
+        100,
+        settings=SETTINGS,
+        media_store=store,
+    )
+
+    assert db.scalar(
+        select(BillingReconciliation.id).where(
+            BillingReconciliation.job_id == eligible.id,
+            BillingReconciliation.reason == "reference_recovery",
+        )
+    ) is not None
+
+
+def test_retired_alias_retries_then_leaves_durable_operator_reconciliation(
+    billing_context,
+):
+    db, service, store, user_id, project_id = billing_context
+    child = reserve(
+        service,
+        user_id,
+        project_id,
+        capability="text",
+        alias="text-retired",
+    )
+    client = fake_client()
+    client.get_quote_status.side_effect = CapabilityAliasUnavailable(
+        "NewAPI capability token is unavailable"
+    )
+
+    reconcile_due_jobs(
+        db, client, NOW, 100, settings=SETTINGS, media_store=store
+    )
+    machine = db.scalar(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == child.id,
+            BillingReconciliation.reason == "reference_recovery",
+        )
+    )
+    assert db.get(GenerationJob, child.id).status == "reference_recovery_pending"
+    assert machine is not None and machine.status == "open"
+    assert "CapabilityAliasUnavailable" in machine.last_error
+
+    reconcile_due_jobs(
+        db,
+        client,
+        child.reference_deadline.replace(tzinfo=timezone.utc)
+        + timedelta(seconds=1),
+        100,
+        settings=SETTINGS,
+        media_store=store,
+    )
+
+    assert db.get(GenerationJob, child.id).status == (
+        "provider_reference_missing_no_charge"
+    )
+    assert db.get(BillingReconciliation, machine.id).status == "resolved"
+    operator = db.scalar(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == child.id,
+            BillingReconciliation.reason == "provider_configuration_unavailable",
+        )
+    )
+    assert operator is not None and operator.status == "open"
+    assert "CapabilityAliasUnavailable" in operator.last_error
+    assert "text-retired" not in operator.last_error
 
 
 def test_reference_and_result_deadlines_release_without_charge(
@@ -648,7 +877,7 @@ def test_postgres_skip_locked_lease_prevents_duplicate_network_and_holds_no_job_
             second = executor.submit(run_once)
             assert second.result(timeout=10) == 0
             release_network.set()
-            assert first.result(timeout=10) == 1
+            assert first.result(timeout=10) == 2
     finally:
         event.remove(postgres_engine, "before_cursor_execute", capture_sql)
         release_network.set()
@@ -656,3 +885,143 @@ def test_postgres_skip_locked_lease_prevents_duplicate_network_and_holds_no_job_
     assert calls == 1
     assert lock_probe_succeeded.is_set()
     assert statements and all("FOR UPDATE SKIP LOCKED" in sql.upper() for sql in statements)
+
+
+def test_postgres_video_file_io_keeps_job_unlocked_and_claim_exclusive(
+    postgres_engine: Engine, tmp_path, monkeypatch
+):
+    user_id = uuid.uuid4().hex
+    project_id = uuid.uuid4().hex
+    task_id = f"task_{uuid.uuid4().hex}"
+    store = WorkbenchStore(projects_root=tmp_path / "pg-video-projects")
+    with Session(postgres_engine, expire_on_commit=False) as db:
+        db.add(
+            User(
+                id=user_id,
+                email="billing-task9-video-pg@example.com",
+                password_hash="hash",
+                role="user",
+                status="active",
+            )
+        )
+        db.flush()
+        db.add_all(
+            [
+                ProjectRecord(
+                    id=project_id,
+                    owner_user_id=user_id,
+                    title="Task 9 PostgreSQL video",
+                    mode="short_drama",
+                    project_type="single_video",
+                ),
+                WalletAccount(
+                    id=uuid.uuid4().hex,
+                    user_id=user_id,
+                    balance_units=100_000_000,
+                    held_units=0,
+                ),
+                BillingSetting(id=1, multiplier_bps=15_000, version=0),
+            ]
+        )
+        db.commit()
+        service = BillingService(
+            db, SETTINGS, store.inspect_staged_artifact, now=lambda: NOW
+        )
+        child = reserve(service, user_id, project_id)
+        service.bind_provider_reference(child.id, "task", task_id)
+        service.mark_receipt_pending(child.id)
+
+    entered_probe = threading.Event()
+    release_probe = threading.Event()
+    lock_probe_succeeded = threading.Event()
+    statements = []
+    calls = {"task": 0, "download": 0, "receipt": 0}
+    calls_lock = threading.Lock()
+
+    class SlowVideoClient:
+        def get_video_task(self, alias, reference_id):
+            assert (alias, reference_id) == ("video-original", task_id)
+            with calls_lock:
+                calls["task"] += 1
+            return VideoTaskStatus(id=task_id, status="completed")
+
+        def download_video_content(self, alias, reference_id, destination):
+            assert (alias, reference_id) == ("video-original", task_id)
+            with calls_lock:
+                calls["download"] += 1
+            destination.write_bytes(b"postgres-video")
+
+        def get_task_receipt(self, kind, alias, reference_id):
+            assert (kind, alias, reference_id) == (
+                "video",
+                "video-original",
+                task_id,
+            )
+            with calls_lock:
+                calls["receipt"] += 1
+            return receipt(task_id)
+
+    def slow_probe(path):
+        assert path.read_bytes() == b"postgres-video"
+        with Session(postgres_engine) as probe:
+            probe.scalar(
+                select(GenerationJob)
+                .where(GenerationJob.id == child.id)
+                .with_for_update(nowait=True)
+            )
+            lock_probe_succeeded.set()
+            probe.rollback()
+        entered_probe.set()
+        assert release_probe.wait(timeout=10)
+        return {"file_size_bytes": path.stat().st_size, "video_width": 16}
+
+    def capture_sql(_conn, _cursor, statement, *_args):
+        if "skip locked" in statement.lower():
+            statements.append(statement)
+
+    monkeypatch.setattr(
+        "server.app.provider.video_recovery.probe_output", slow_probe
+    )
+    event.listen(postgres_engine, "before_cursor_execute", capture_sql)
+    client = SlowVideoClient()
+    try:
+        def run_once():
+            with Session(postgres_engine, expire_on_commit=False) as db:
+                return reconcile_due_jobs(
+                    db, client, NOW, 100, settings=SETTINGS, media_store=store
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(run_once)
+            assert entered_probe.wait(timeout=10)
+            second = executor.submit(run_once)
+            assert second.result(timeout=10) == 0
+            release_probe.set()
+            assert first.result(timeout=10) == 1
+    finally:
+        event.remove(postgres_engine, "before_cursor_execute", capture_sql)
+        release_probe.set()
+
+    with Session(postgres_engine) as db:
+        job = db.get(GenerationJob, child.id)
+        assert job is not None and job.status == "billed"
+        assert job.result_staged is True and job.result_visible is True
+        assert store.exists(job.result_locator, sha256=job.result_sha256)
+        artifact_id = job.result_locator.rsplit(":", 1)[-1]
+        published = (
+            store.project_dir(project_id)
+            / "assets"
+            / "video"
+            / ".hidden"
+            / artifact_id
+        )
+        assert {path.name for path in published.iterdir()} == {
+            "metadata.json",
+            "video.mp4",
+        }
+
+    assert calls == {"task": 1, "download": 1, "receipt": 1}
+    assert lock_probe_succeeded.is_set()
+    assert statements and all(
+        "FOR UPDATE SKIP LOCKED" in sql.upper() for sql in statements
+    )
