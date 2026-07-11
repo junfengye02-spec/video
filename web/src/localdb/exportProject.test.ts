@@ -120,10 +120,11 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function installDelayedOpfs() {
+function installDelayedOpfs(options: { onFirstStorageAccess?: () => Promise<void> } = {}) {
   const files = new Map<string, Blob>();
   const writeStarted = deferred<void>();
   const closeGate = deferred<void>();
+  let storageAccessObserved = false;
   const mediaDirectory = {
     async getFileHandle(name: string, options?: { create?: boolean }) {
       if (!files.has(name) && !options?.create) {
@@ -156,6 +157,10 @@ function installDelayedOpfs() {
     configurable: true,
     value: {
       async getDirectory() {
+        if (!storageAccessObserved) {
+          storageAccessObserved = true;
+          await options.onFirstStorageAccess?.();
+        }
         return {
           async getDirectoryHandle() {
             return mediaDirectory;
@@ -514,6 +519,7 @@ describe("exportProject", () => {
   });
 
   it("restores local media blobs referenced by the manifest", async () => {
+    await saveProjectSnapshot(snapshot());
     const mediaRef = await saveMediaBlob({
       projectId: "p1",
       sourcePath: "assets/video/shot.mp4",
@@ -534,6 +540,47 @@ describe("exportProject", () => {
     expect(restoredBlob ? await blobToText(restoredBlob) : null).toBe("video");
     expect(imported.final_path).toBe(restoredRef);
     expect(imported.series_bible.assets?.[0].reference_images[0]).toBe(restoredRef);
+  });
+
+  it("durably creates the import session before the first media storage access", async () => {
+    let sessionAtFirstStorageAccess: Record<string, unknown> | undefined;
+    const opfs = installDelayedOpfs({
+      onFirstStorageAccess: async () => {
+        const db = await new Promise<IDBDatabase>((resolve, reject) => {
+          const request = indexedDB.open(LOCAL_DB_NAME);
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result);
+        });
+        const records = await new Promise<Record<string, unknown>[]>((resolve, reject) => {
+          const request = db.transaction("mediaOperations", "readonly")
+            .objectStore("mediaOperations").getAll();
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => resolve(request.result);
+        });
+        sessionAtFirstStorageAccess = records.find((record) => record.kind === "import_session");
+        db.close();
+      },
+    });
+    const ref = "local://media/original" as LocalMediaRef;
+    const importing = importProjectBackup(backupFile({
+      project: snapshot(ref, { id: "ordered" }),
+      media: [{
+        ref,
+        file: "media/original",
+        contentType: "video/mp4",
+        sourcePath: "assets/video/shot.mp4",
+      }],
+      mediaFiles: { "media/original": strToU8("media") },
+    }));
+
+    await opfs.writeStarted;
+    expect(sessionAtFirstStorageAccess).toMatchObject({
+      kind: "import_session",
+      projectId: "ordered",
+      state: "importing",
+    });
+    opfs.releaseClose();
+    await expect(importing).resolves.toMatchObject({ project: { id: "ordered" } });
   });
 
   it("rejects backups without a project manifest", async () => {
@@ -760,6 +807,7 @@ describe("exportProject", () => {
   });
 
   it("does not overwrite an existing project or write media without explicit permission", async () => {
+    await saveProjectSnapshot(snapshot(null, { title: "Existing" }));
     const existingRef = await saveMediaBlob({
       projectId: "p1",
       sourcePath: "assets/video/existing.mp4",

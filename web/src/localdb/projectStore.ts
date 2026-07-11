@@ -1,12 +1,18 @@
 import type { ShortDramaProjectResponse } from "../domain/types";
 import { LOCAL_STORES, openLocalDb } from "./indexedDb";
-import { deleteMediaBlob } from "./mediaStore";
+import {
+  createMediaImportSession,
+  markMediaOperationCleanupDue,
+} from "./mediaJournal";
+import { runMediaRecovery } from "./mediaStore";
 import type {
   LocalMediaRecord,
   LocalMediaRef,
   LocalProjectSnapshot,
   LocalProjectSummary,
   LocalSettingsRecord,
+  MediaJournalRecord,
+  MediaOperationRecord,
 } from "./types";
 
 const LOCAL_MEDIA_PREFIX = "local://media/";
@@ -21,17 +27,50 @@ export class ProjectImportConflictError extends Error {
   }
 }
 
-function cleanupError(message: string, causes: unknown[]): Error {
-  const error = new Error(message) as Error & { causes: unknown[] };
-  error.causes = causes;
-  return error;
-}
-
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
   });
+}
+
+async function runTransaction<T>(tx: IDBTransaction, work: () => Promise<T>): Promise<T> {
+  const done = transactionDone(tx);
+  try {
+    const result = await work();
+    await done;
+    return result;
+  } catch (error) {
+    await done.catch(() => undefined);
+    throw error;
+  }
+}
+
+function createId(): string {
+  return globalThis.crypto?.randomUUID?.() ??
+    `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function cleanupDue<T extends MediaJournalRecord>(record: T, timestamp: string): T {
+  if (record.state === "cleanup_due") return record;
+  return {
+    ...record,
+    state: "cleanup_due",
+    updatedAt: timestamp,
+    nextAttemptAt: timestamp,
+    leaseOwner: null,
+    leaseExpiresAt: null,
+  } as T;
+}
+
+function hasActiveLease(
+  record: MediaJournalRecord,
+  expectedOwner: string,
+  now: Date,
+): boolean {
+  if (record.leaseOwner !== expectedOwner || !record.leaseExpiresAt) return false;
+  const expiresAt = Date.parse(record.leaseExpiresAt);
+  return Number.isFinite(expiresAt) && expiresAt > now.getTime();
 }
 
 function transactionDone(tx: IDBTransaction): Promise<void> {
@@ -114,6 +153,105 @@ export async function saveImportedProjectSnapshot(
   await done;
 }
 
+export async function beginProjectImport(projectId: string): Promise<string> {
+  const sessionId = createId();
+  await createMediaImportSession({
+    id: sessionId,
+    projectId,
+    mediaIds: [],
+    leaseOwner: sessionId,
+  });
+  return sessionId;
+}
+
+export async function abortProjectImport(sessionId: string, _cause?: unknown): Promise<void> {
+  await markMediaOperationCleanupDue(sessionId, sessionId);
+}
+
+export async function commitImportedProject(
+  snapshot: ShortDramaProjectResponse,
+  sessionId: string,
+  options: { overwrite: boolean; leaseOwner: string },
+): Promise<void> {
+  const db = await openLocalDb();
+  const tx = db.transaction(
+    [
+      LOCAL_STORES.projects,
+      LOCAL_STORES.settings,
+      LOCAL_STORES.media,
+      LOCAL_STORES.mediaOperations,
+    ],
+    "readwrite",
+  );
+  let rejection: Error | null = null;
+  try {
+    await runTransaction(tx, async () => {
+      const projectStore = tx.objectStore(LOCAL_STORES.projects);
+      const mediaStore = tx.objectStore(LOCAL_STORES.media);
+      const operationStore = tx.objectStore(LOCAL_STORES.mediaOperations);
+      const session = await requestToPromise<MediaJournalRecord | undefined>(
+        operationStore.get(sessionId),
+      );
+      if (!session || session.kind !== "import_session") {
+        throw new Error(`Active import session ${sessionId} was not found`);
+      }
+      if (
+        session.state !== "importing" ||
+        !hasActiveLease(session, options.leaseOwner, new Date())
+      ) {
+        throw new Error(`Import session ${sessionId} no longer holds its owner lease`);
+      }
+      if (session.projectId !== snapshot.project.id) {
+        rejection = new Error(`Import session ${sessionId} belongs to another project`);
+      }
+
+      const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
+        projectStore.get(snapshot.project.id),
+      );
+      if (!rejection && existing && !options.overwrite) {
+        rejection = new ProjectImportConflictError(snapshot.project.id);
+      }
+
+      const allMedia = await requestToPromise<LocalMediaRecord[]>(mediaStore.getAll());
+      const mediaById = new Map(allMedia.map((record) => [record.id, record]));
+      const sessionMediaIds = new Set(session.mediaIds);
+      const linkedMedia = allMedia.filter((record) => record.importSessionId === sessionId);
+      const hasInvalidMedia =
+        sessionMediaIds.size !== session.mediaIds.length ||
+        linkedMedia.length !== sessionMediaIds.size ||
+        linkedMedia.some((record) => !sessionMediaIds.has(record.id)) ||
+        session.mediaIds.some((id) => {
+          const record = mediaById.get(id);
+          return !record || record.projectId !== session.projectId || record.state !== "staged" ||
+            record.importSessionId !== sessionId;
+        });
+      if (!rejection && hasInvalidMedia) {
+        rejection = new Error(`Import session ${sessionId} contains invalid staged media`);
+      }
+
+      if (rejection) {
+        operationStore.put(cleanupDue(session, new Date().toISOString()));
+        return;
+      }
+
+      projectStore.put(toLocalProjectSnapshot(snapshot));
+      tx.objectStore(LOCAL_STORES.settings).put({
+        key: "recentProjectId",
+        value: snapshot.project.id,
+      } satisfies LocalSettingsRecord);
+      for (const mediaId of session.mediaIds) {
+        const record = mediaById.get(mediaId)!;
+        mediaStore.put({ ...record, state: "committed", importSessionId: null });
+      }
+      operationStore.delete(sessionId);
+    });
+    if (rejection) throw rejection;
+  } catch (error) {
+    await abortProjectImport(sessionId, error).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function setRecentProjectId(projectId: string | null): Promise<void> {
   const db = await openLocalDb();
   const tx = db.transaction(LOCAL_STORES.settings, "readwrite");
@@ -162,67 +300,91 @@ export async function listProjectSummaries(): Promise<LocalProjectSummary[]> {
 export async function deleteProject(projectId: string): Promise<void> {
   const db = await openLocalDb();
   const tx = db.transaction(
-    [LOCAL_STORES.projects, LOCAL_STORES.settings, LOCAL_STORES.media],
+    [
+      LOCAL_STORES.projects,
+      LOCAL_STORES.settings,
+      LOCAL_STORES.media,
+      LOCAL_STORES.mediaOperations,
+    ],
     "readwrite",
   );
-  const done = transactionDone(tx);
-  const projectStore = tx.objectStore(LOCAL_STORES.projects);
-  const settingsStore = tx.objectStore(LOCAL_STORES.settings);
-  const mediaStore = tx.objectStore(LOCAL_STORES.media);
-  const [recentSetting, projects, projectMedia] = await Promise.all([
-    requestToPromise<LocalSettingsRecord | undefined>(settingsStore.get("recentProjectId")),
-    requestToPromise<LocalProjectSnapshot[]>(projectStore.getAll()),
-    requestToPromise<LocalMediaRecord[]>(
-      mediaStore.index("projectId").getAll(IDBKeyRange.only(projectId)),
-    ),
-  ]);
+  await runTransaction(tx, async () => {
+    const timestamp = new Date().toISOString();
+    const projectStore = tx.objectStore(LOCAL_STORES.projects);
+    const settingsStore = tx.objectStore(LOCAL_STORES.settings);
+    const mediaStore = tx.objectStore(LOCAL_STORES.media);
+    const operationStore = tx.objectStore(LOCAL_STORES.mediaOperations);
+    const [recentSetting, projects, projectMedia, projectOperations] = await Promise.all([
+      requestToPromise<LocalSettingsRecord | undefined>(settingsStore.get("recentProjectId")),
+      requestToPromise<LocalProjectSnapshot[]>(projectStore.getAll()),
+      requestToPromise<LocalMediaRecord[]>(
+        mediaStore.index("projectId").getAll(IDBKeyRange.only(projectId)),
+      ),
+      requestToPromise<MediaJournalRecord[]>(
+        operationStore.index("projectId").getAll(IDBKeyRange.only(projectId)),
+      ),
+    ]);
 
-  const sharedRefOwners = new Map<LocalMediaRef, string>();
-  for (const project of projects) {
-    if (project.id !== projectId) {
-      for (const ref of collectLocalMediaRefs(project.snapshot)) {
-        if (!sharedRefOwners.has(ref)) sharedRefOwners.set(ref, project.id);
+    const sharedRefOwners = new Map<LocalMediaRef, string>();
+    for (const project of projects) {
+      if (project.id !== projectId) {
+        for (const ref of collectLocalMediaRefs(project.snapshot)) {
+          if (!sharedRefOwners.has(ref)) sharedRefOwners.set(ref, project.id);
+        }
       }
     }
-  }
-  const removableMedia = projectMedia.filter(
-    (record) => !sharedRefOwners.has(`${LOCAL_MEDIA_PREFIX}${record.id}` as LocalMediaRef),
-  );
-  const reassignedMedia = projectMedia.filter(
-    (record) => sharedRefOwners.has(`${LOCAL_MEDIA_PREFIX}${record.id}` as LocalMediaRef),
-  );
 
-  projectStore.delete(projectId);
-  const recentProjectId = recentSetting?.value ?? null;
-  if (recentProjectId === projectId) {
-    settingsStore.put({
-      key: "recentProjectId",
-      value: null,
-    } satisfies LocalSettingsRecord);
-  }
-  for (const media of removableMedia) {
-    if (media.storage === "indexeddb") {
-      mediaStore.delete(media.id);
-    }
-  }
-  for (const media of reassignedMedia) {
-    const ref = `${LOCAL_MEDIA_PREFIX}${media.id}` as LocalMediaRef;
-    mediaStore.put({ ...media, projectId: sharedRefOwners.get(ref)! });
-  }
-  await done;
-
-  const cleanupResults = await Promise.allSettled(
-    removableMedia
-      .filter((media) => media.storage === "opfs")
-      .map((media) => deleteMediaBlob(`${LOCAL_MEDIA_PREFIX}${media.id}` as LocalMediaRef)),
-  );
-  const cleanupErrors = cleanupResults
-    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-    .map((result) => result.reason);
-  if (cleanupErrors.length > 0) {
-    throw cleanupError(
-      "Project was deleted, but OPFS media cleanup was incomplete",
-      cleanupErrors,
+    const mediaOperations = new Map(
+      projectOperations
+        .filter((record): record is MediaOperationRecord => record.kind === "media_write")
+        .map((record) => [record.mediaId, record]),
     );
-  }
+
+    projectStore.delete(projectId);
+    if ((recentSetting?.value ?? null) === projectId) {
+      settingsStore.put({ key: "recentProjectId", value: null } satisfies LocalSettingsRecord);
+    }
+
+    for (const media of projectMedia) {
+      const ref = `${LOCAL_MEDIA_PREFIX}${media.id}` as LocalMediaRef;
+      const survivingOwner = media.state !== "staged" ? sharedRefOwners.get(ref) : undefined;
+      if (survivingOwner) {
+        mediaStore.put({ ...media, projectId: survivingOwner });
+        continue;
+      }
+
+      mediaStore.delete(media.id);
+      if (media.storage !== "opfs" || !media.opfsPath) continue;
+      const existingOperation = mediaOperations.get(media.id);
+      if (existingOperation) {
+        operationStore.put(cleanupDue(existingOperation, timestamp));
+        continue;
+      }
+      const cleanupOperation: MediaOperationRecord = {
+        id: createId(),
+        kind: "media_write",
+        mediaId: media.id,
+        projectId,
+        importSessionId: media.importSessionId ?? null,
+        sourcePath: media.sourcePath,
+        contentType: media.contentType,
+        sizeBytes: media.sizeBytes,
+        opfsPath: media.opfsPath,
+        state: "cleanup_due",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        attempts: 0,
+        nextAttemptAt: timestamp,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      };
+      operationStore.add(cleanupOperation);
+    }
+
+    for (const operation of projectOperations) {
+      operationStore.put(cleanupDue(operation, timestamp));
+    }
+  });
+
+  await runMediaRecovery().catch(() => undefined);
 }

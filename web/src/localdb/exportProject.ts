@@ -11,11 +11,14 @@ import {
   type UnzipFile,
 } from "fflate/browser";
 import type { ShortDramaProjectResponse } from "../domain/types";
-import { deleteMediaBlob, loadMediaBlob, saveMediaBlob } from "./mediaStore";
+import { renewMediaOperationLease } from "./mediaJournal";
+import { beginMediaWrite, loadMediaBlob, runMediaRecovery } from "./mediaStore";
 import {
+  abortProjectImport,
+  beginProjectImport,
+  commitImportedProject,
   loadProjectSnapshot,
   ProjectImportConflictError,
-  saveImportedProjectSnapshot,
 } from "./projectStore";
 import { normalizeAndValidateProjectSnapshot } from "./snapshotSchema";
 import type { LocalMediaRef } from "./types";
@@ -34,6 +37,14 @@ const MAX_TOTAL_UNCOMPRESSED_BYTES = 1024 * MIB;
 const FALLBACK_READ_CHUNK_BYTES = 64 * 1024;
 const FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES = 320_000;
 const MAX_ACTIVE_INFLATE_WORKERS = 2;
+const IMPORT_MEDIA_CHUNK_BYTES = MIB;
+
+async function renewImportSessionLease(sessionId: string): Promise<void> {
+  const renewed = await renewMediaOperationLease(sessionId, sessionId);
+  if (!renewed || renewed.kind !== "import_session" || renewed.state !== "importing") {
+    throw new Error(`Import session ${sessionId} lost its owner lease`);
+  }
+}
 const WORKER_PROBE_TIMEOUT_MS = 2_000;
 const DECODER_IDLE_TIMEOUT_MS = 15_000;
 
@@ -682,20 +693,6 @@ function validateMediaManifest(
   return { version: 1, media };
 }
 
-async function rollbackStagedMedia(refs: LocalMediaRef[], originalError: unknown): Promise<never> {
-  const cleanupResults = await Promise.allSettled(refs.map((ref) => deleteMediaBlob(ref)));
-  const cleanupErrors = cleanupResults
-    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-    .map((result) => result.reason);
-  if (cleanupErrors.length > 0) {
-    throw errorWithCauses(
-      "Import failed and staged media cleanup was incomplete",
-      [originalError, ...cleanupErrors],
-    );
-  }
-  throw originalError;
-}
-
 export async function exportProjectBackup(projectId: string): Promise<Blob> {
   const record = await loadProjectSnapshot(projectId);
   if (!record) {
@@ -773,17 +770,29 @@ export async function importProjectBackup(
     throw new ProjectImportConflictError(snapshot.project.id);
   }
 
-  const stagedRefs: LocalMediaRef[] = [];
+  const sessionId = await beginProjectImport(snapshot.project.id);
   try {
     for (const entry of mediaManifest.media) {
+      await renewImportSessionLease(sessionId);
       const mediaBytes = files[entry.file];
-      const restoredRef = await saveMediaBlob({
+      const writer = await beginMediaWrite({
         projectId: snapshot.project.id,
+        importSessionId: sessionId,
         sourcePath: entry.sourcePath,
         contentType: entry.contentType,
-        blob: new Blob([bytesToArrayBuffer(mediaBytes)], { type: entry.contentType }),
+        sizeBytes: mediaBytes.byteLength,
       });
-      stagedRefs.push(restoredRef);
+      let restoredRef: LocalMediaRef;
+      try {
+        for (let offset = 0; offset < mediaBytes.byteLength; offset += IMPORT_MEDIA_CHUNK_BYTES) {
+          await writer.write(mediaBytes.subarray(offset, offset + IMPORT_MEDIA_CHUNK_BYTES));
+        }
+        restoredRef = await writer.commit();
+      } catch (error) {
+        await writer.abort(error).catch(() => undefined);
+        throw error;
+      }
+      await renewImportSessionLease(sessionId);
       refMap.set(entry.ref, restoredRef);
     }
 
@@ -792,11 +801,15 @@ export async function importProjectBackup(
         ? (rewriteLocalMediaRefs(snapshot, refMap) as ShortDramaProjectResponse)
         : snapshot;
     const validatedSnapshot = normalizeAndValidateSnapshot(restoredSnapshot);
-    await saveImportedProjectSnapshot(validatedSnapshot, {
+    await renewImportSessionLease(sessionId);
+    await commitImportedProject(validatedSnapshot, sessionId, {
       overwrite: options.overwrite ?? false,
+      leaseOwner: sessionId,
     });
     return validatedSnapshot;
   } catch (error) {
-    return rollbackStagedMedia(stagedRefs, error);
+    await abortProjectImport(sessionId, error).catch(() => undefined);
+    await runMediaRecovery().catch(() => undefined);
+    throw error;
   }
 }

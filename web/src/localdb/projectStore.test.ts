@@ -2,7 +2,8 @@ import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ShortDramaProjectResponse, Shot } from "../domain/types";
 import { openLocalDb, resetLocalDbForTests } from "./indexedDb";
-import { loadMediaBlob, saveMediaBlob } from "./mediaStore";
+import { beginMediaWrite, loadMediaBlob, runMediaRecovery, saveMediaBlob } from "./mediaStore";
+import * as task3ProjectStore from "./projectStore";
 import {
   deleteProject,
   listProjectSummaries,
@@ -11,7 +12,20 @@ import {
   saveProjectSnapshot,
   setRecentProjectId,
 } from "./projectStore";
+import type { LocalMediaRecord, LocalMediaRef, MediaJournalRecord } from "./types";
 import { LOCAL_DB_NAME } from "./types";
+
+type ProjectImportApi = {
+  beginProjectImport(projectId: string): Promise<string>;
+  commitImportedProject(
+    snapshot: ShortDramaProjectResponse,
+    sessionId: string,
+    options: { overwrite: boolean; leaseOwner: string },
+  ): Promise<void>;
+  abortProjectImport(sessionId: string, cause?: unknown): Promise<void>;
+};
+
+const projectImportApi = task3ProjectStore as typeof task3ProjectStore & ProjectImportApi;
 
 const originalStorage = Object.getOwnPropertyDescriptor(Navigator.prototype, "storage");
 
@@ -128,6 +142,33 @@ function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
+async function getRecord<T>(storeName: string, id: string): Promise<T | null> {
+  const db = await openLocalDb();
+  const value = await requestToPromise<T | undefined>(
+    db.transaction(storeName, "readonly").objectStore(storeName).get(id),
+  );
+  return value ?? null;
+}
+
+async function getAllRecords<T>(storeName: string): Promise<T[]> {
+  const db = await openLocalDb();
+  return requestToPromise<T[]>(
+    db.transaction(storeName, "readonly").objectStore(storeName).getAll(),
+  );
+}
+
+async function putRecord(storeName: string, value: unknown): Promise<void> {
+  const db = await openLocalDb();
+  const tx = db.transaction(storeName, "readwrite");
+  const done = new Promise<void>((resolve, reject) => {
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+    tx.oncomplete = () => resolve();
+  });
+  tx.objectStore(storeName).put(value);
+  await done;
+}
+
 async function createLegacyDatabase(version: 1 | 2 | 3): Promise<void> {
   const request = indexedDB.open(LOCAL_DB_NAME, version);
   request.onupgradeneeded = () => {
@@ -158,6 +199,7 @@ async function createLegacyDatabase(version: 1 | 2 | 3): Promise<void> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   if (originalStorage) {
     Object.defineProperty(Navigator.prototype, "storage", originalStorage);
@@ -168,6 +210,224 @@ afterEach(async () => {
 });
 
 describe("projectStore", () => {
+  it("keeps imported media staged until one transaction publishes the project and session", async () => {
+    const sessionId = await projectImportApi.beginProjectImport("imported");
+    const writer = await beginMediaWrite({
+      projectId: "imported",
+      importSessionId: sessionId,
+      sourcePath: "assets/imported.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 5,
+    });
+    await writer.write(new TextEncoder().encode("video"));
+    await writer.commit();
+
+    const mediaId = writer.mediaRef.split("/").pop()!;
+    expect(await loadProjectSnapshot("imported")).toBeNull();
+    expect(await loadMediaBlob(writer.mediaRef)).toBeNull();
+    expect(await getRecord<LocalMediaRecord>("media", mediaId)).toMatchObject({
+      projectId: "imported",
+      state: "staged",
+      importSessionId: sessionId,
+    });
+
+    await projectImportApi.commitImportedProject(
+      snapshot("imported", "Imported", { finalPath: writer.mediaRef }),
+      sessionId,
+      { overwrite: false, leaseOwner: sessionId },
+    );
+
+    expect((await loadRecentProjectSnapshot())?.id).toBe("imported");
+    expect(await loadMediaBlob(writer.mediaRef)).not.toBeNull();
+    expect(await getRecord<LocalMediaRecord>("media", mediaId)).toMatchObject({
+      state: "committed",
+      importSessionId: null,
+    });
+    expect(await getRecord("mediaOperations", sessionId)).toBeNull();
+  });
+
+  it("queues the exact import session for cleanup when the final conflict check loses", async () => {
+    const sessionId = await projectImportApi.beginProjectImport("raced");
+    const writer = await beginMediaWrite({
+      projectId: "raced",
+      importSessionId: sessionId,
+      sourcePath: "assets/imported.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await writer.write(new Uint8Array([1]));
+    await writer.commit();
+    await saveProjectSnapshot(snapshot("raced", "Concurrent"));
+
+    await expect(projectImportApi.commitImportedProject(
+      snapshot("raced", "Imported", { finalPath: writer.mediaRef }),
+      sessionId,
+      { overwrite: false, leaseOwner: sessionId },
+    )).rejects.toMatchObject({ name: "ProjectImportConflictError", projectId: "raced" });
+
+    expect(await listProjectSummaries()).toEqual([
+      expect.objectContaining({ id: "raced", title: "Concurrent" }),
+    ]);
+    expect(await getRecord<MediaJournalRecord>("mediaOperations", sessionId)).toMatchObject({
+      id: sessionId,
+      projectId: "raced",
+      state: "cleanup_due",
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    });
+    expect(await loadMediaBlob(writer.mediaRef)).toBeNull();
+  });
+
+  it("atomically overwrites a project and publishes its staged media when allowed", async () => {
+    await saveProjectSnapshot(snapshot("overwrite", "Existing"));
+    const sessionId = await projectImportApi.beginProjectImport("overwrite");
+    const writer = await beginMediaWrite({
+      projectId: "overwrite",
+      importSessionId: sessionId,
+      sourcePath: "assets/replacement.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await writer.write(new Uint8Array([7]));
+    await writer.commit();
+
+    await projectImportApi.commitImportedProject(
+      snapshot("overwrite", "Replacement", { finalPath: writer.mediaRef }),
+      sessionId,
+      { overwrite: true, leaseOwner: sessionId },
+    );
+
+    expect((await loadProjectSnapshot("overwrite"))?.title).toBe("Replacement");
+    expect(await loadMediaBlob(writer.mediaRef)).not.toBeNull();
+    expect(await getRecord("mediaOperations", sessionId)).toBeNull();
+  });
+
+  it("rejects foreign or non-staged session media without partially publishing", async () => {
+    const sessionId = await projectImportApi.beginProjectImport("invalid-import");
+    const writer = await beginMediaWrite({
+      projectId: "invalid-import",
+      importSessionId: sessionId,
+      sourcePath: "assets/invalid.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await writer.write(new Uint8Array([1]));
+    await writer.commit();
+    const mediaId = writer.mediaRef.split("/").pop()!;
+    const staged = await getRecord<LocalMediaRecord>("media", mediaId);
+    await putRecord("media", { ...staged, projectId: "foreign", state: "committed" });
+
+    await expect(projectImportApi.commitImportedProject(
+      snapshot("invalid-import", "Invalid", { finalPath: writer.mediaRef }),
+      sessionId,
+      { overwrite: false, leaseOwner: sessionId },
+    )).rejects.toThrow(/invalid staged media/i);
+
+    expect(await loadProjectSnapshot("invalid-import")).toBeNull();
+    expect(await getRecord<MediaJournalRecord>("mediaOperations", sessionId))
+      .toMatchObject({ state: "cleanup_due" });
+  });
+
+  it("recovers every staged item after an imported project is aborted", async () => {
+    const sessionId = await projectImportApi.beginProjectImport("cancelled");
+    for (const byte of [1, 2]) {
+      const writer = await beginMediaWrite({
+        projectId: "cancelled",
+        importSessionId: sessionId,
+        sourcePath: `assets/${byte}.mp4`,
+        contentType: "video/mp4",
+        sizeBytes: 1,
+      });
+      await writer.write(new Uint8Array([byte]));
+      await writer.commit();
+    }
+
+    await projectImportApi.abortProjectImport(sessionId, new Error("cancelled"));
+    expect(await getRecord<MediaJournalRecord>("mediaOperations", sessionId))
+      .toMatchObject({ state: "cleanup_due" });
+
+    await expect(runMediaRecovery()).resolves.toBe(1);
+    expect(await getAllRecords("media")).toHaveLength(0);
+    expect(await getRecord("mediaOperations", sessionId)).toBeNull();
+    expect(await loadProjectSnapshot("cancelled")).toBeNull();
+  });
+
+  it("keeps a live multi-item import leased beyond its initial recovery window", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-11T00:00:00.000Z"));
+    const sessionId = await projectImportApi.beginProjectImport("long-import");
+    const refs: LocalMediaRef[] = [];
+    for (const [index, elapsedMs] of [
+      [0, 0],
+      [1, 25_000],
+    ] as const) {
+      vi.setSystemTime(new Date(Date.parse("2026-07-11T00:00:00.000Z") + elapsedMs));
+      const writer = await beginMediaWrite({
+        projectId: "long-import",
+        importSessionId: sessionId,
+        sourcePath: `assets/${index}.mp4`,
+        contentType: "video/mp4",
+        sizeBytes: 1,
+      });
+      await writer.write(new Uint8Array([index]));
+      refs.push(await writer.commit());
+    }
+
+    vi.setSystemTime(new Date("2026-07-11T00:00:35.000Z"));
+    await expect(runMediaRecovery({ leaseOwner: "other-tab" })).resolves.toBe(0);
+    await projectImportApi.commitImportedProject(
+      snapshot("long-import", "Long Import", { finalPath: refs[0] }),
+      sessionId,
+      { overwrite: false, leaseOwner: sessionId },
+    );
+
+    expect(await loadProjectSnapshot("long-import")).not.toBeNull();
+    await expect(loadMediaBlob(refs[1])).resolves.not.toBeNull();
+  });
+
+  it("recovers every staged item after an import session lease expires", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-11T00:00:00.000Z"));
+    const sessionId = await projectImportApi.beginProjectImport("crashed-import");
+    const writer = await beginMediaWrite({
+      projectId: "crashed-import",
+      importSessionId: sessionId,
+      sourcePath: "assets/crashed.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await writer.write(new Uint8Array([1]));
+    await writer.commit();
+
+    vi.setSystemTime(new Date("2026-07-11T00:00:31.000Z"));
+    await expect(runMediaRecovery({ leaseOwner: "recovery-tab" })).resolves.toBe(1);
+
+    expect(await getRecord("mediaOperations", sessionId)).toBeNull();
+    expect(await getAllRecords("media")).toHaveLength(0);
+    expect(await loadProjectSnapshot("crashed-import")).toBeNull();
+  });
+
+  it("renews the import session between chunks of one long media item", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-11T00:00:00.000Z"));
+    const sessionId = await projectImportApi.beginProjectImport("chunked-import");
+    const writer = await beginMediaWrite({
+      projectId: "chunked-import",
+      importSessionId: sessionId,
+      sourcePath: "assets/large.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 2,
+    });
+    await writer.write(new Uint8Array([1]));
+
+    vi.setSystemTime(new Date("2026-07-11T00:00:25.000Z"));
+    await writer.write(new Uint8Array([2]));
+    vi.setSystemTime(new Date("2026-07-11T00:00:35.000Z"));
+
+    await expect(runMediaRecovery({ leaseOwner: "other-tab" })).resolves.toBe(0);
+    await expect(writer.commit()).resolves.toBe(writer.mediaRef);
+  });
+
   it("saves and restores the recent project snapshot", async () => {
     await saveProjectSnapshot(snapshot("p1", "Rain Alley"));
 
@@ -381,7 +641,7 @@ describe("projectStore", () => {
     expect(await loadMediaBlob(sharedRef)).toBeNull();
   });
 
-  it("reports OPFS cleanup failure while retaining media data for retry", async () => {
+  it("keeps OPFS cleanup durably queued without failing logical project deletion", async () => {
     installOpfs({ removeError: new Error("OPFS remove failed") });
     const project = snapshot("p1", "First");
     await saveProjectSnapshot(project);
@@ -394,10 +654,83 @@ describe("projectStore", () => {
     project.final_path = ref;
     await saveProjectSnapshot(project);
 
-    await expect(deleteProject("p1")).rejects.toThrow(/cleanup/i);
+    await expect(deleteProject("p1")).resolves.toBeUndefined();
 
     expect(await loadProjectSnapshot("p1")).toBeNull();
-    const retained = await loadMediaBlob(ref);
-    expect(retained ? await blobToText(retained) : null).toBe("first");
+    expect(await loadMediaBlob(ref)).toBeNull();
+    expect(await getAllRecords<MediaJournalRecord>("mediaOperations")).toEqual([
+      expect.objectContaining({
+        kind: "media_write",
+        projectId: "p1",
+        state: "cleanup_due",
+        attempts: 1,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      }),
+    ]);
+  });
+
+  it("prevents an active project writer from publishing after project deletion", async () => {
+    installOpfs();
+    await saveProjectSnapshot(snapshot("p1", "First"));
+    const writer = await beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/active.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await writer.write(new Uint8Array([1]));
+
+    await deleteProject("p1");
+
+    await expect(writer.commit()).rejects.toThrow(/lease|operation/i);
+    expect(await loadMediaBlob(writer.mediaRef)).toBeNull();
+    expect(await loadProjectSnapshot("p1")).toBeNull();
+  });
+
+  it("preserves existing cleanup retry metadata while deleting its project", async () => {
+    await saveProjectSnapshot(snapshot("retrying", "Retrying"));
+    const record: MediaJournalRecord = {
+      id: "retry-operation",
+      kind: "media_write",
+      mediaId: "retry-media",
+      projectId: "retrying",
+      importSessionId: null,
+      sourcePath: "assets/retry.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+      opfsPath: "openmontage-media/retry-media",
+      state: "cleanup_due",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-02T00:00:00.000Z",
+      attempts: 4,
+      nextAttemptAt: "2999-01-01T00:00:00.000Z",
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    };
+    await putRecord("mediaOperations", record);
+
+    await deleteProject("retrying");
+
+    expect(await getRecord("mediaOperations", record.id)).toEqual(record);
+  });
+
+  it("cancels active import writers when their target project is deleted", async () => {
+    installOpfs();
+    const sessionId = await projectImportApi.beginProjectImport("future");
+    const writer = await beginMediaWrite({
+      projectId: "future",
+      importSessionId: sessionId,
+      sourcePath: "assets/active-import.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await writer.write(new Uint8Array([1]));
+
+    await deleteProject("future");
+
+    await expect(writer.commit()).rejects.toThrow(/lease|operation|session/i);
+    expect(await loadMediaBlob(writer.mediaRef)).toBeNull();
+    expect(await loadProjectSnapshot("future")).toBeNull();
   });
 });

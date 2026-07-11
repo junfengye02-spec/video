@@ -373,6 +373,22 @@ async function validateMediaOwner(input: BeginMediaWriteInput): Promise<void> {
   if (!project) throw new Error(`Project ${input.projectId} was not found`);
 }
 
+async function renewManagedImportSession(input: BeginMediaWriteInput): Promise<void> {
+  if (!input.importSessionId) return;
+  const db = await openLocalDb();
+  const session = await requestToPromise<MediaJournalRecord | undefined>(
+    db.transaction(LOCAL_STORES.mediaOperations, "readonly")
+      .objectStore(LOCAL_STORES.mediaOperations)
+      .get(input.importSessionId),
+  );
+  if (!session || session.kind !== "import_session" || session.state !== "importing") {
+    throw new Error(`Active import session ${input.importSessionId} was not found`);
+  }
+  if (session.leaseOwner !== session.id) return;
+  const renewed = await renewMediaOperationLease(session.id, session.id);
+  if (!renewed) throw new Error(`Import session ${session.id} lost its owner lease`);
+}
+
 export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<MediaWriteSession> {
   if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0) {
     throw new Error("Media sizeBytes must be a non-negative safe integer");
@@ -389,6 +405,8 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
   let terminalPromise: Promise<LocalMediaRef> | null = null;
   let abortPromise: Promise<void> | null = null;
   const storage = storageManager();
+
+  await renewManagedImportSession(input);
 
   function stateError(): Error {
     return new Error(`Media write session is not open (${status})`);
@@ -452,8 +470,10 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
       write(chunk) {
         const stableChunk = new Uint8Array(chunk);
         return enqueueWrite(async () => {
+          await renewManagedImportSession(input);
           chunks.push(stableChunk);
           bytesWritten += stableChunk.byteLength;
+          await renewManagedImportSession(input);
         });
       },
       commit() {
@@ -461,6 +481,7 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
           assertExpectedSize(bytesWritten, input.sizeBytes);
           const bytes = concatenateChunks(chunks, bytesWritten);
           await commitIndexedDbMedia(input, id, createdAt, bytes);
+          await renewManagedImportSession(input);
           chunks.length = 0;
           return ref;
         });
@@ -487,6 +508,7 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
   });
 
   async function renewWriterLease(): Promise<void> {
+    await renewManagedImportSession(input);
     const renewed = await renewMediaOperationLease(operation.id, leaseOwner);
     if (!renewed) throw new Error(`Media operation ${operation.id} lost its writer lease`);
   }
@@ -581,6 +603,7 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
           const physicalFile = await fileHandle.getFile();
           assertExpectedSize(storedFileSize(physicalFile), input.sizeBytes);
           await commitOpfsMedia(operation.id, leaseOwner, createdAt);
+          await renewManagedImportSession(input);
           return ref;
         } catch (error) {
           return throwAfterDurableCleanup(error);
