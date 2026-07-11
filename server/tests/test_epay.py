@@ -5,6 +5,7 @@ from decimal import Decimal
 import os
 import re
 from threading import Barrier, Event, Lock
+from time import monotonic
 from urllib.parse import urlencode
 import uuid
 
@@ -502,6 +503,77 @@ def test_duplicate_and_unsupported_post_forms_are_rejected() -> None:
 
     assert duplicate_result is None
     assert unsupported_result is None
+
+
+@pytest.mark.parametrize(
+    ("method", "encoded"),
+    [
+        ("GET", "param=%A"),
+        ("GET", "param=%ZZ"),
+        ("POST", "param=%A"),
+        ("POST", "param=%ZZ"),
+    ],
+)
+def test_malformed_percent_escape_never_reaches_settlement(
+    client: TestClient,
+    monkeypatch,
+    method: str,
+    encoded: str,
+) -> None:
+    settled = False
+
+    def forbidden_settlement(*_args, **_kwargs):
+        nonlocal settled
+        settled = True
+        raise AssertionError("malformed percent escape reached settlement")
+
+    monkeypatch.setattr(
+        payments_router_module,
+        "settle_epay_notify",
+        forbidden_settlement,
+    )
+    if method == "GET":
+        response = client.get(f"/api/payments/epay/notify?{encoded}")
+    else:
+        response = client.post(
+            "/api/payments/epay/notify",
+            content=encoded.encode("ascii"),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+
+    assert response.text == "fail"
+    assert settled is False
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_valid_percent_escape_reaches_structured_callback_fields(
+    client: TestClient,
+    monkeypatch,
+    method: str,
+) -> None:
+    received: list[dict[str, str]] = []
+
+    def record_settlement(_db, *, fields, settings) -> None:
+        del settings
+        received.append(fields)
+
+    monkeypatch.setattr(
+        payments_router_module,
+        "settle_epay_notify",
+        record_settlement,
+    )
+    encoded = "param=%25"
+    if method == "GET":
+        response = client.get(f"/api/payments/epay/notify?{encoded}")
+    else:
+        response = client.post(
+            "/api/payments/epay/notify",
+            content=encoded.encode("ascii"),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+        )
+
+    assert response.text == "success"
+    assert received == [{"param": "%"}]
 
 
 def test_epay_configuration_is_optional_complete_and_secret_safe() -> None:
@@ -1083,7 +1155,6 @@ def test_postgres_concurrent_orders_cannot_share_provider_trade_number(
 
 def test_postgres_notify_holding_order_lock_wins_over_later_expiry_scan(
     postgres_engine: Engine,
-    postgres_app: FastAPI,
     epay_settings: AppSettings,
 ) -> None:
     suffix = uuid.uuid4().hex[:12]
@@ -1103,23 +1174,13 @@ def test_postgres_notify_holding_order_lock_wins_over_later_expiry_scan(
 
     notify_settled = Event()
     allow_notify_commit = Event()
-    expiry_lock_attempted = Event()
-
-    def record_expiry_lock_attempt(
-        _conn, _cursor, statement, _parameters, _context, _many
-    ) -> None:
-        normalized = statement.lower()
-        if (
-            "from payment_orders" not in normalized
-            or "payment_orders.status =" not in normalized
-            or "payment_orders.expires_at <=" not in normalized
-            or "for update" not in normalized
-        ):
-            return
-        expiry_lock_attempted.set()
+    expiry_pid_ready = Event()
+    notify_backend_pid: list[int] = []
+    expiry_backend_pid: list[int] = []
 
     def settle_notify() -> str:
         with Session(postgres_engine) as db:
+            notify_backend_pid.append(db.scalar(select(func.pg_backend_pid())))
             settle_epay_notify(
                 db,
                 fields=signed_callback(order, trade_no="EPAY-PG-EXPIRY"),
@@ -1133,6 +1194,8 @@ def test_postgres_notify_holding_order_lock_wins_over_later_expiry_scan(
 
     def expire_orders() -> list[str]:
         with Session(postgres_engine) as db:
+            expiry_backend_pid.append(db.scalar(select(func.pg_backend_pid())))
+            expiry_pid_ready.set()
             expire_pending_orders(
                 db,
                 user_id=f"u{suffix}",
@@ -1148,17 +1211,23 @@ def test_postgres_notify_holding_order_lock_wins_over_later_expiry_scan(
             db.commit()
             return [item.status for item in orders]
 
-    event.listen(
-        postgres_engine,
-        "before_cursor_execute",
-        record_expiry_lock_attempt,
-    )
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             notify_future = executor.submit(settle_notify)
             assert notify_settled.wait(timeout=15)
             expiry_future = executor.submit(expire_orders)
-            assert expiry_lock_attempted.wait(timeout=15)
+            assert expiry_pid_ready.wait(timeout=15)
+
+            deadline = monotonic() + 15
+            blockers: list[int] = []
+            with postgres_engine.connect() as inspector:
+                while monotonic() < deadline:
+                    blockers = inspector.scalar(
+                        select(func.pg_blocking_pids(expiry_backend_pid[0]))
+                    )
+                    if notify_backend_pid[0] in blockers:
+                        break
+            assert notify_backend_pid[0] in blockers
             assert notify_future.done() is False
             assert expiry_future.done() is False
             allow_notify_commit.set()
@@ -1166,15 +1235,14 @@ def test_postgres_notify_holding_order_lock_wins_over_later_expiry_scan(
             expiry_statuses = expiry_future.result(timeout=15)
     finally:
         allow_notify_commit.set()
-        event.remove(
-            postgres_engine,
-            "before_cursor_execute",
-            record_expiry_lock_attempt,
-        )
 
     with Session(postgres_engine) as db:
         settled = db.get(PaymentOrder, order["id"])
+        wallet = db.scalar(
+            select(WalletAccount).where(WalletAccount.user_id == f"u{suffix}")
+        )
         assert notify_response == "committed"
         assert expiry_statuses == ["paid"]
         assert settled is not None and settled.status == "paid"
+        assert wallet is not None and wallet.balance_units == 75_000
         assert db.scalar(select(func.count(WalletEntry.id))) == 1

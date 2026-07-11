@@ -22,6 +22,7 @@ _CALLBACK_FIELD_LIMITS = {
     "sign_type": 16,
 }
 MAX_EPAY_CALLBACK_BYTES = 4_096
+_ASCII_HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 
 
 def canonical_epay_string(fields: Mapping[str, str]) -> str:
@@ -50,6 +51,22 @@ def parse_epay_money_to_fen(value: str) -> int | None:
     if amount <= 0:
         return None
     return int(amount * 100)
+
+
+def valid_urlencoded_percent_escapes(raw: bytes) -> bool:
+    position = 0
+    while True:
+        marker = raw.find(b"%", position)
+        if marker < 0:
+            return True
+        if marker + 2 >= len(raw):
+            return False
+        if (
+            raw[marker + 1] not in _ASCII_HEX_DIGITS
+            or raw[marker + 2] not in _ASCII_HEX_DIGITS
+        ):
+            return False
+        position = marker + 3
 
 
 def bounded_epay_fields(

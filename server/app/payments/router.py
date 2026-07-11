@@ -11,7 +11,11 @@ from starlette.responses import PlainTextResponse, RedirectResponse
 from server.app.auth.dependencies import CurrentUser, require_csrf, require_user
 from server.app.core.config import AppSettings, get_settings
 from server.app.db.session import get_db
-from server.app.payments.epay import MAX_EPAY_CALLBACK_BYTES, bounded_epay_fields
+from server.app.payments.epay import (
+    MAX_EPAY_CALLBACK_BYTES,
+    bounded_epay_fields,
+    valid_urlencoded_percent_escapes,
+)
 from server.app.payments.service import (
     EpayNotConfigured,
     PaymentOrderNotFound,
@@ -42,6 +46,8 @@ async def _read_epay_fields(request: Request) -> dict[str, str] | None:
         raw_size = len(raw_query)
         if raw_size > MAX_EPAY_CALLBACK_BYTES:
             return None
+        if not valid_urlencoded_percent_escapes(raw_query):
+            return None
         return bounded_epay_fields(
             request.query_params.multi_items(), encoded_size=raw_size
         )
@@ -66,7 +72,10 @@ async def _read_epay_fields(request: Request) -> dict[str, str] | None:
             if len(body) + len(chunk) > MAX_EPAY_CALLBACK_BYTES:
                 return None
             body.extend(chunk)
-        encoded = bytes(body).decode("ascii")
+        raw_body = bytes(body)
+        if not valid_urlencoded_percent_escapes(raw_body):
+            return None
+        encoded = raw_body.decode("ascii")
         items = parse_qsl(
             encoded,
             keep_blank_values=True,
