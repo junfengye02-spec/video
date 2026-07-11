@@ -22,7 +22,7 @@ from server.app.auth.sessions import SessionStore
 from server.app.core.config import AppSettings, get_settings
 from server.app.db.base import Base
 from server.app.db.session import get_db
-from server.app.main import create_app
+from server.app.main import _json_request_openapi, create_app
 from server.app.redis import get_redis
 
 
@@ -498,21 +498,106 @@ def test_authorized_upload_is_bounded_before_file_spooling(
     assert spooled_bytes <= MAX_IMAGE_BYTES
 
 
-def test_project_mutation_openapi_keeps_request_body_contracts(ownership_context):
-    paths = ownership_context["app"].openapi()["paths"]
+def _resolve_openapi_ref(document: dict, ref: str):
+    assert ref.startswith("#/"), f"unsupported OpenAPI reference: {ref}"
+    current = document
+    for raw_token in ref[2:].split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        assert isinstance(current, dict) and token in current, f"dangling OpenAPI reference: {ref}"
+        current = current[token]
+    return current
+
+
+def _assert_openapi_refs_resolve(document: dict, node, resolved: set[str] | None = None):
+    resolved = resolved if resolved is not None else set()
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            target = _resolve_openapi_ref(document, ref)
+            if ref not in resolved:
+                resolved.add(ref)
+                _assert_openapi_refs_resolve(document, target, resolved)
+        for value in node.values():
+            _assert_openapi_refs_resolve(document, value, resolved)
+    elif isinstance(node, list):
+        for value in node:
+            _assert_openapi_refs_resolve(document, value, resolved)
+
+
+def _dereference_openapi_schema(document: dict, schema: dict) -> dict:
+    ref = schema.get("$ref")
+    return _resolve_openapi_ref(document, ref) if isinstance(ref, str) else schema
+
+
+def test_project_request_openapi_schema_fails_fast_on_local_ref_cycles():
+    class CyclicSchemaModel:
+        @classmethod
+        def model_json_schema(cls):
+            return {
+                "$defs": {"Loop": {"$ref": "#/$defs/Loop"}},
+                "$ref": "#/$defs/Loop",
+            }
+
+    with pytest.raises(ValueError, match="Cyclic local schema reference"):
+        _json_request_openapi(CyclicSchemaModel)
+
+
+def test_project_mutation_openapi_keeps_valid_request_body_contracts(ownership_context):
+    document = ownership_context["app"].openapi()
+    paths = document["paths"]
     operations = [
-        ("/api/projects", "post"),
-        ("/api/projects/import", "post"),
-        ("/api/projects/short-drama", "post"),
-        ("/api/projects/{project_id}/continuity", "patch"),
-        ("/api/projects/{project_id}/assets/upload", "post"),
-        ("/api/projects/{project_id}/shots/{shot_id}", "patch"),
-        ("/api/projects/{project_id}/prompt-optimize", "post"),
-        ("/api/projects/{project_id}/shots/{shot_id}/regenerate", "post"),
-        ("/api/projects/{project_id}/render", "post"),
+        ("/api/projects", "post", "application/json"),
+        ("/api/projects/import", "post", "application/json"),
+        ("/api/projects/short-drama", "post", "application/json"),
+        ("/api/projects/{project_id}/continuity", "patch", "application/json"),
+        ("/api/projects/{project_id}/assets/upload", "post", "multipart/form-data"),
+        ("/api/projects/{project_id}/shots/{shot_id}", "patch", "application/json"),
+        ("/api/projects/{project_id}/prompt-optimize", "post", "application/json"),
+        ("/api/projects/{project_id}/shots/{shot_id}/regenerate", "post", "application/json"),
+        ("/api/projects/{project_id}/render", "post", "application/json"),
     ]
 
-    assert all(paths[path][method]["requestBody"]["required"] for path, method in operations)
+    request_schemas = {}
+    for path, method, media_type in operations:
+        request_body = paths[path][method]["requestBody"]
+        assert request_body["required"] is True
+        assert set(request_body["content"]) == {media_type}
+        schema = request_body["content"][media_type]["schema"]
+        assert schema.get("type") == "object"
+        assert schema.get("properties")
+        _assert_openapi_refs_resolve(document, schema)
+        request_schemas[path] = schema
+
+    _assert_openapi_refs_resolve(document, document)
+
+    import_schema = request_schemas["/api/projects/import"]
+    assert import_schema["properties"]["title"]["maxLength"] == 255
+    imported_series = _dereference_openapi_schema(
+        document,
+        import_schema["properties"]["series_bible"],
+    )
+    assert {"title", "characters", "assets"} <= set(imported_series["properties"])
+
+    continuity_schema = request_schemas["/api/projects/{project_id}/continuity"]
+    assert continuity_schema["properties"]["project_type"]["enum"] == [
+        "single_video",
+        "mini_series",
+        "long_series",
+    ]
+    continuity_series = _dereference_openapi_schema(
+        document,
+        continuity_schema["properties"]["series_bible"],
+    )
+    assert "relationship_map" in continuity_series["properties"]
+
+    shot_schema = request_schemas["/api/projects/{project_id}/shots/{shot_id}"]
+    shot_language_option = next(
+        option
+        for option in shot_schema["properties"]["shot_language"]["anyOf"]
+        if option.get("type") != "null"
+    )
+    shot_language = _dereference_openapi_schema(document, shot_language_option)
+    assert "shot_size" in shot_language["properties"]
 
 
 def test_repository_create_list_and_owned_lookup_are_owner_scoped(ownership_context):

@@ -281,11 +281,62 @@ async def _parse_json_request(
         raise RequestValidationError(exc.errors(include_url=False)) from exc
 
 
+def _local_schema_ref_target(
+    definitions: dict[str, Any],
+    ref: str,
+) -> dict[str, Any]:
+    if not ref.startswith("#/"):
+        raise ValueError(f"Unsupported local schema reference: {ref}")
+    current: Any = {"$defs": definitions}
+    for raw_token in ref[2:].split("/"):
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or token not in current:
+            raise ValueError(f"Unknown local schema reference: {ref}")
+        current = current[token]
+    if not isinstance(current, dict):
+        raise ValueError(f"Local schema reference is not an object: {ref}")
+    return current
+
+
+def _inline_local_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    source = deepcopy(schema)
+    definitions = source.pop("$defs", {})
+    if not isinstance(definitions, dict):
+        raise ValueError("Pydantic schema $defs must be an object")
+
+    def inline(value: Any, active_refs: frozenset[str]) -> Any:
+        if isinstance(value, list):
+            return [inline(item, active_refs) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        ref = value.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            if ref in active_refs:
+                raise ValueError(f"Cyclic local schema reference: {ref}")
+            target = _local_schema_ref_target(definitions, ref)
+            resolved = inline(deepcopy(target), active_refs | {ref})
+            siblings = {key: item for key, item in value.items() if key != "$ref"}
+            if siblings:
+                return {
+                    "allOf": [
+                        resolved,
+                        inline(siblings, active_refs),
+                    ]
+                }
+            return resolved
+
+        return {key: inline(item, active_refs) for key, item in value.items()}
+
+    return inline(source, frozenset())
+
+
 def _json_request_openapi(model: type[BaseModel]) -> dict[str, Any]:
+    schema = _inline_local_schema_refs(model.model_json_schema())
     return {
         "requestBody": {
             "required": True,
-            "content": {"application/json": {"schema": model.model_json_schema()}},
+            "content": {"application/json": {"schema": schema}},
         }
     }
 
