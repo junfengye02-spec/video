@@ -9,8 +9,9 @@ import {
   listProjectSummaries,
   loadProjectSnapshot,
   loadRecentProjectSnapshot,
+  saveImportedProjectSnapshot,
   saveProjectSnapshot,
-  saveProjectSnapshotIfRevision,
+  saveProjectSnapshotIfVersion,
   setRecentProjectId,
 } from "./projectStore";
 import type { LocalMediaRecord, LocalMediaRef, MediaJournalRecord } from "./types";
@@ -220,7 +221,19 @@ describe("projectStore", () => {
       snapshot: legacy,
     });
 
-    expect(await loadProjectSnapshot("legacy-revision")).toMatchObject({ revision: 0 });
+    const firstLoad = await loadProjectSnapshot("legacy-revision");
+    const secondLoad = await loadProjectSnapshot("legacy-revision");
+
+    expect(firstLoad).toMatchObject({
+      incarnation: "legacy:legacy-revision",
+      revision: 0,
+    });
+    expect(secondLoad?.incarnation).toBe(firstLoad?.incarnation);
+    const saved = await saveProjectSnapshot(legacy);
+    expect(saved).toMatchObject({
+      incarnation: "legacy:legacy-revision",
+      revision: 1,
+    });
   });
 
   it("increments and returns the durable revision for every normal save", async () => {
@@ -229,6 +242,7 @@ describe("projectStore", () => {
 
     expect(first.revision).toBe(1);
     expect(second.revision).toBe(2);
+    expect(second.incarnation).toBe(first.incarnation);
     expect(await loadProjectSnapshot("revisioned")).toMatchObject({
       revision: 2,
       title: "Second",
@@ -238,9 +252,9 @@ describe("projectStore", () => {
   it("conditionally saves and returns a new revision on an exact match", async () => {
     const initial = await saveProjectSnapshot(snapshot("cas", "Initial"));
 
-    const saved = await saveProjectSnapshotIfRevision(
+    const saved = await saveProjectSnapshotIfVersion(
       snapshot("cas", "Conditional"),
-      initial.revision,
+      { incarnation: initial.incarnation, revision: initial.revision },
     );
 
     expect(saved).toMatchObject({ revision: 2, title: "Conditional" });
@@ -254,9 +268,9 @@ describe("projectStore", () => {
     const initial = await saveProjectSnapshot(snapshot("cas-stale", "Initial"));
     await saveProjectSnapshot(snapshot("cas-stale", "Newer"));
 
-    await expect(saveProjectSnapshotIfRevision(
+    await expect(saveProjectSnapshotIfVersion(
       snapshot("cas-stale", "Stale"),
-      initial.revision,
+      { incarnation: initial.incarnation, revision: initial.revision },
     )).resolves.toBeNull();
     expect(await loadProjectSnapshot("cas-stale")).toMatchObject({
       revision: 2,
@@ -265,12 +279,50 @@ describe("projectStore", () => {
   });
 
   it("does not recreate a missing project through conditional save", async () => {
-    await expect(saveProjectSnapshotIfRevision(
+    await expect(saveProjectSnapshotIfVersion(
       snapshot("cas-deleted", "Deleted"),
-      0,
+      { incarnation: "missing", revision: 0 },
     )).resolves.toBeNull();
 
     expect(await loadProjectSnapshot("cas-deleted")).toBeNull();
+  });
+
+  it("rejects a pending old version after delete and same-id recreation at matching revision", async () => {
+    const original = await saveProjectSnapshot(snapshot("cas-aba", "Original"));
+    const pendingOldVersion = {
+      incarnation: original.incarnation,
+      revision: original.revision,
+    };
+    await deleteProject("cas-aba");
+    const recreated = await saveProjectSnapshot(snapshot("cas-aba", "Recreated"));
+
+    expect(recreated.revision).toBe(pendingOldVersion.revision);
+    expect(recreated.incarnation).not.toBe(pendingOldVersion.incarnation);
+    await expect(saveProjectSnapshotIfVersion(
+      snapshot("cas-aba", "Stale old instance"),
+      pendingOldVersion,
+    )).resolves.toBeNull();
+    expect(await loadProjectSnapshot("cas-aba")).toMatchObject({
+      title: "Recreated",
+      revision: 1,
+    });
+  });
+
+  it("assigns a fresh incarnation when direct import overwrites an existing project", async () => {
+    const original = await saveProjectSnapshot(snapshot("direct-import", "Original"));
+
+    await saveImportedProjectSnapshot(
+      snapshot("direct-import", "Imported replacement"),
+      { overwrite: true },
+    );
+
+    expect(await loadProjectSnapshot("direct-import")).toMatchObject({
+      title: "Imported replacement",
+      revision: 1,
+      incarnation: expect.any(String),
+    });
+    expect((await loadProjectSnapshot("direct-import"))?.incarnation)
+      .not.toBe(original.incarnation);
   });
 
   it("keeps imported media staged until one transaction publishes the project and session", async () => {
@@ -395,7 +447,7 @@ describe("projectStore", () => {
   });
 
   it("atomically overwrites a project and publishes its staged media when allowed", async () => {
-    await saveProjectSnapshot(snapshot("overwrite", "Existing"));
+    const original = await saveProjectSnapshot(snapshot("overwrite", "Existing"));
     const sessionId = await projectImportApi.beginProjectImport("overwrite");
     const writer = await beginMediaWrite({
       projectId: "overwrite",
@@ -413,7 +465,12 @@ describe("projectStore", () => {
       { overwrite: true, leaseOwner: sessionId },
     );
 
-    expect((await loadProjectSnapshot("overwrite"))?.title).toBe("Replacement");
+    expect(await loadProjectSnapshot("overwrite")).toMatchObject({
+      title: "Replacement",
+      revision: 1,
+      incarnation: expect.any(String),
+    });
+    expect((await loadProjectSnapshot("overwrite"))?.incarnation).not.toBe(original.incarnation);
     expect(await loadMediaBlob(writer.mediaRef)).not.toBeNull();
     expect(await getRecord("mediaOperations", sessionId)).toBeNull();
   });

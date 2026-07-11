@@ -47,11 +47,11 @@ import { resolveLocalMediaUrl, revokeLocalMediaUrls } from "../../localdb/mediaU
 import {
   loadProjectSnapshot,
   saveProjectSnapshot,
-  saveProjectSnapshotIfRevision,
+  saveProjectSnapshotIfVersion,
   setRecentProjectId,
 } from "../../localdb/projectStore";
 import { getStorageEstimate } from "../../localdb/storageEstimate";
-import type { LocalMediaRef } from "../../localdb/types";
+import type { LocalMediaRef, LocalProjectSnapshot, LocalProjectVersion } from "../../localdb/types";
 import {
   applyCommittedMediaOverlays,
   collectRemoteMediaSourcePaths,
@@ -267,7 +267,10 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<ShortDramaProjectResponse | null>(null);
   const snapshotRef = useRef<ShortDramaProjectResponse | null>(null);
   const snapshotRevisionRef = useRef(0);
-  const storageRevisionRef = useRef({ projectId: null as string | null, revision: 0 });
+  const storageVersionRef = useRef({
+    projectId: null as string | null,
+    version: null as LocalProjectVersion | null,
+  });
   const projectEpochRef = useRef(0);
   const operationSequencesRef = useRef({ ...INITIAL_OPERATION_SEQUENCES });
   const creationSequenceRef = useRef(0);
@@ -400,8 +403,14 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     });
   }, [resetLocalBackupState]);
 
-  const recordStorageRevision = useCallback((projectId: string, revision: number) => {
-    storageRevisionRef.current = { projectId, revision };
+  const recordStorageVersion = useCallback((record: LocalProjectSnapshot) => {
+    storageVersionRef.current = {
+      projectId: record.id,
+      version: {
+        incarnation: record.incarnation?.trim() || `legacy:${record.id}`,
+        revision: record.revision ?? 0,
+      },
+    };
   }, []);
 
   const refreshStorageEstimate = useCallback(async () => {
@@ -418,7 +427,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       applyProjectSnapshot(next);
       try {
         const saved = await saveProjectSnapshot(next);
-        recordStorageRevision(saved.id, saved.revision ?? 0);
+        recordStorageVersion(saved);
         void refreshStorageEstimate();
       } catch {
         if (isCurrent()) {
@@ -428,7 +437,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     },
     [
       applyProjectSnapshot,
-      recordStorageRevision,
+      recordStorageVersion,
       refreshStorageEstimate,
       strings.errors.localProjectSaveFallback,
     ],
@@ -454,15 +463,20 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       isCurrent: () => boolean,
     ): Promise<boolean> => {
       const current = snapshotRef.current;
-      const stored = storageRevisionRef.current;
-      if (current?.project.id !== projectId || !isCurrent() || stored.projectId !== projectId) {
+      const stored = storageVersionRef.current;
+      if (
+        current?.project.id !== projectId
+        || !isCurrent()
+        || stored.projectId !== projectId
+        || !stored.version
+      ) {
         return true;
       }
       const memoryRevision = snapshotRevisionRef.current;
       const candidate = mutate(current);
       let saved;
       try {
-        saved = await saveProjectSnapshotIfRevision(candidate, stored.revision);
+        saved = await saveProjectSnapshotIfVersion(candidate, stored.version);
       } catch {
         return false;
       }
@@ -476,23 +490,23 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       ) {
         if (latest?.project.id !== projectId) return true;
         try {
-          const repaired = await saveProjectSnapshotIfRevision(
+          const repaired = await saveProjectSnapshotIfVersion(
             latest,
-            saved.revision ?? stored.revision + 1,
+            { incarnation: saved.incarnation, revision: saved.revision },
           );
-          if (repaired) recordStorageRevision(projectId, repaired.revision ?? 0);
+          if (repaired) recordStorageVersion(repaired);
           return true;
         } catch {
           return false;
         }
       }
 
-      recordStorageRevision(projectId, saved.revision ?? stored.revision + 1);
+      recordStorageVersion(saved);
       applyProjectSnapshot(candidate);
       void refreshStorageEstimate();
       return true;
     },
-    [applyProjectSnapshot, recordStorageRevision, refreshStorageEstimate],
+    [applyProjectSnapshot, recordStorageVersion, refreshStorageEstimate],
   );
 
   const refreshAuthoritativeProject = useCallback(
@@ -649,7 +663,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       if (generation !== projectLoadGenerationRef.current) return Boolean(record);
       pendingProjectLoadRef.current = null;
       if (!record) return false;
-      recordStorageRevision(projectId, record.revision ?? 0);
+      recordStorageVersion(record);
 
       const overlays = new Map<string, LocalMediaRef>();
       await Promise.all(collectRemoteMediaSourcePaths(record.snapshot).map(async (sourcePath) => {
@@ -684,7 +698,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     [
       applyProjectSnapshot,
       invalidateProjectOperations,
-      recordStorageRevision,
+      recordStorageVersion,
       strings.errors.localProjectSaveFallback,
     ],
   );

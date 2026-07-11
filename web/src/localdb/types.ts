@@ -6,10 +6,16 @@ export const LOCAL_DB_VERSION = 4;
 export type LocalMediaRef = `local://media/${string}`;
 export type LocalMediaStorage = "opfs" | "indexeddb";
 
+export interface LocalProjectVersion {
+  incarnation: string;
+  revision: number;
+}
+
 export interface LocalProjectSnapshot {
   id: string;
   title: string;
   updatedAt: string;
+  incarnation?: string;
   revision?: number;
   snapshot: ShortDramaProjectResponse;
 }

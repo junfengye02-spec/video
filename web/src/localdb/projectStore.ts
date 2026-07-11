@@ -10,6 +10,7 @@ import type {
   LocalMediaRef,
   LocalProjectSnapshot,
   LocalProjectSummary,
+  LocalProjectVersion,
   LocalSettingsRecord,
   MediaJournalRecord,
   MediaOperationRecord,
@@ -17,7 +18,7 @@ import type {
 
 const LOCAL_MEDIA_PREFIX = "local://media/";
 
-type RevisionedLocalProjectSnapshot = LocalProjectSnapshot & { revision: number };
+type VersionedLocalProjectSnapshot = LocalProjectSnapshot & LocalProjectVersion;
 
 export class ProjectImportConflictError extends Error {
   readonly projectId: string;
@@ -94,21 +95,37 @@ function normalizeProjectRevision(record: LocalProjectSnapshot): number {
     : 0;
 }
 
-function normalizeProjectSnapshot(record: LocalProjectSnapshot): RevisionedLocalProjectSnapshot {
-  return { ...record, revision: normalizeProjectRevision(record) };
+function normalizeProjectIncarnation(record: LocalProjectSnapshot): string {
+  const incarnation = record.incarnation?.trim();
+  return incarnation || `legacy:${record.id}`;
+}
+
+function normalizeProjectVersion(record: LocalProjectSnapshot): LocalProjectVersion {
+  return {
+    incarnation: normalizeProjectIncarnation(record),
+    revision: normalizeProjectRevision(record),
+  };
+}
+
+function normalizeProjectSnapshot(record: LocalProjectSnapshot): VersionedLocalProjectSnapshot {
+  return { ...record, ...normalizeProjectVersion(record) };
 }
 
 function toLocalProjectSnapshot(
   snapshot: ShortDramaProjectResponse,
-  revision: number,
-): RevisionedLocalProjectSnapshot {
+  version: LocalProjectVersion,
+): VersionedLocalProjectSnapshot {
   return {
     id: snapshot.project.id,
     title: snapshot.project.title,
     updatedAt: new Date().toISOString(),
-    revision,
+    ...version,
     snapshot,
   };
+}
+
+function freshProjectVersion(): LocalProjectVersion {
+  return { incarnation: createId(), revision: 1 };
 }
 
 function isLocalMediaRef(value: unknown): value is LocalMediaRef {
@@ -140,7 +157,7 @@ async function loadRecentProjectId(): Promise<string | null> {
 
 export async function saveProjectSnapshot(
   snapshot: ShortDramaProjectResponse,
-): Promise<RevisionedLocalProjectSnapshot> {
+): Promise<VersionedLocalProjectSnapshot> {
   const db = await openLocalDb();
   const tx = db.transaction([LOCAL_STORES.projects, LOCAL_STORES.settings], "readwrite");
   return runTransaction(tx, async () => {
@@ -148,10 +165,11 @@ export async function saveProjectSnapshot(
     const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
       projectStore.get(snapshot.project.id),
     );
-    const record = toLocalProjectSnapshot(
-      snapshot,
-      (existing ? normalizeProjectRevision(existing) : 0) + 1,
-    );
+    const existingVersion = existing ? normalizeProjectVersion(existing) : null;
+    const nextVersion = existingVersion
+      ? { ...existingVersion, revision: existingVersion.revision + 1 }
+      : freshProjectVersion();
+    const record = toLocalProjectSnapshot(snapshot, nextVersion);
     projectStore.put(record);
     tx.objectStore(LOCAL_STORES.settings).put({
       key: "recentProjectId",
@@ -161,10 +179,10 @@ export async function saveProjectSnapshot(
   });
 }
 
-export async function saveProjectSnapshotIfRevision(
+export async function saveProjectSnapshotIfVersion(
   snapshot: ShortDramaProjectResponse,
-  expectedRevision: number,
-): Promise<RevisionedLocalProjectSnapshot | null> {
+  expectedVersion: LocalProjectVersion,
+): Promise<VersionedLocalProjectSnapshot | null> {
   const db = await openLocalDb();
   const tx = db.transaction(LOCAL_STORES.projects, "readwrite");
   return runTransaction(tx, async () => {
@@ -172,8 +190,16 @@ export async function saveProjectSnapshotIfRevision(
     const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
       projectStore.get(snapshot.project.id),
     );
-    if (!existing || normalizeProjectRevision(existing) !== expectedRevision) return null;
-    const record = toLocalProjectSnapshot(snapshot, expectedRevision + 1);
+    if (!existing) return null;
+    const existingVersion = normalizeProjectVersion(existing);
+    if (
+      existingVersion.incarnation !== expectedVersion.incarnation
+      || existingVersion.revision !== expectedVersion.revision
+    ) return null;
+    const record = toLocalProjectSnapshot(snapshot, {
+      incarnation: existingVersion.incarnation,
+      revision: existingVersion.revision + 1,
+    });
     projectStore.put(record);
     return record;
   });
@@ -198,7 +224,7 @@ export async function saveImportedProjectSnapshot(
 
   projectStore.put(toLocalProjectSnapshot(
     snapshot,
-    (existing ? normalizeProjectRevision(existing) : 0) + 1,
+    freshProjectVersion(),
   ));
   tx.objectStore(LOCAL_STORES.settings).put({
     key: "recentProjectId",
@@ -290,7 +316,7 @@ export async function commitImportedProject(
 
       projectStore.put(toLocalProjectSnapshot(
         snapshot,
-        (existing ? normalizeProjectRevision(existing) : 0) + 1,
+        freshProjectVersion(),
       ));
       tx.objectStore(LOCAL_STORES.settings).put({
         key: "recentProjectId",
@@ -321,7 +347,7 @@ export async function setRecentProjectId(projectId: string | null): Promise<void
 
 export async function loadProjectSnapshot(
   projectId: string,
-): Promise<RevisionedLocalProjectSnapshot | null> {
+): Promise<VersionedLocalProjectSnapshot | null> {
   const db = await openLocalDb();
   const tx = db.transaction(LOCAL_STORES.projects, "readonly");
   const value = await requestToPromise<LocalProjectSnapshot | undefined>(
@@ -330,7 +356,7 @@ export async function loadProjectSnapshot(
   return value ? normalizeProjectSnapshot(value) : null;
 }
 
-export async function loadRecentProjectSnapshot(): Promise<RevisionedLocalProjectSnapshot | null> {
+export async function loadRecentProjectSnapshot(): Promise<VersionedLocalProjectSnapshot | null> {
   const recentProjectId = await loadRecentProjectId();
   if (!recentProjectId) {
     return null;

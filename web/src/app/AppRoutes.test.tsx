@@ -33,7 +33,7 @@ const localProjectStoreMocks = vi.hoisted(() => ({
   loadProjectSnapshot: vi.fn(),
   loadRecentProjectSnapshot: vi.fn(),
   saveProjectSnapshot: vi.fn(),
-  saveProjectSnapshotIfRevision: vi.fn(),
+  saveProjectSnapshotIfVersion: vi.fn(),
   setRecentProjectId: vi.fn(),
 }));
 
@@ -140,16 +140,21 @@ describe("App routes", () => {
       id: next.project.id,
       title: next.project.title,
       updatedAt: "2026-07-11T08:00:00Z",
+      incarnation: "incarnation-routes",
       revision: ++storageRevision,
       snapshot: structuredClone(next),
     }));
-    localProjectStoreMocks.saveProjectSnapshotIfRevision.mockImplementation(
-      (next: ShortDramaProjectResponse, expectedRevision: number) => {
-        if (expectedRevision !== storageRevision) return Promise.resolve(null);
+    localProjectStoreMocks.saveProjectSnapshotIfVersion.mockImplementation(
+      (next: ShortDramaProjectResponse, expected: { incarnation: string; revision: number }) => {
+        if (
+          expected.incarnation !== "incarnation-routes"
+          || expected.revision !== storageRevision
+        ) return Promise.resolve(null);
         return Promise.resolve({
           id: next.project.id,
           title: next.project.title,
           updatedAt: "2026-07-11T08:00:00Z",
+          incarnation: expected.incarnation,
           revision: ++storageRevision,
           snapshot: structuredClone(next),
         });

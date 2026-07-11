@@ -41,7 +41,7 @@ const localProjectStoreMocks = vi.hoisted(() => ({
   loadProjectSnapshot: vi.fn(),
   loadRecentProjectSnapshot: vi.fn(),
   saveProjectSnapshot: vi.fn(),
-  saveProjectSnapshotIfRevision: vi.fn(),
+  saveProjectSnapshotIfVersion: vi.fn(),
   setRecentProjectId: vi.fn(),
 }));
 
@@ -149,12 +149,14 @@ function committedMedia(id: string, projectId: string, sourcePath: string): Loca
 function localProjectRecord(
   snapshot: ShortDramaProjectResponse,
   revision: number,
+  incarnation?: string,
 ): LocalProjectSnapshot {
   return {
     id: snapshot.project.id,
     title: snapshot.project.title,
     updatedAt: "2026-07-11T08:00:00Z",
     revision,
+    ...(incarnation ? { incarnation } : {}),
     snapshot: cloneProjectResponse(snapshot),
   };
 }
@@ -321,13 +323,16 @@ describe("App workbench integration", () => {
     let storageRevision = 0;
     localProjectStoreMocks.saveProjectSnapshot.mockImplementation(
       (next: ShortDramaProjectResponse) => Promise.resolve(
-        localProjectRecord(next, ++storageRevision),
+        localProjectRecord(next, ++storageRevision, "incarnation-default"),
       ),
     );
-    localProjectStoreMocks.saveProjectSnapshotIfRevision.mockImplementation(
-      (next: ShortDramaProjectResponse, expectedRevision: number) => {
-        if (expectedRevision !== storageRevision) return Promise.resolve(null);
-        return Promise.resolve(localProjectRecord(next, ++storageRevision));
+    localProjectStoreMocks.saveProjectSnapshotIfVersion.mockImplementation(
+      (next: ShortDramaProjectResponse, expected: { incarnation: string; revision: number }) => {
+        if (
+          expected.incarnation !== "incarnation-default"
+          || expected.revision !== storageRevision
+        ) return Promise.resolve(null);
+        return Promise.resolve(localProjectRecord(next, ++storageRevision, expected.incarnation));
       },
     );
     localProjectStoreMocks.setRecentProjectId.mockResolvedValue(undefined);
@@ -755,7 +760,7 @@ describe("App workbench integration", () => {
       "/api/projects/p1/media/assets/video/shot-1.mp4",
       { projectId: "p1", sourcePath: "assets/video/shot-1.mp4" },
     );
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision).toHaveBeenCalledWith(
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).toHaveBeenCalledWith(
       expect.objectContaining({
         storyboard: expect.objectContaining({
           shots: expect.arrayContaining([
@@ -763,7 +768,7 @@ describe("App workbench integration", () => {
           ]),
         }),
       }),
-      1,
+      { incarnation: "incarnation-default", revision: 1 },
     );
   });
 
@@ -872,7 +877,7 @@ describe("App workbench integration", () => {
     });
 
     expect(localMediaStoreMocks.cacheRemoteMedia).not.toHaveBeenCalled();
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision).not.toHaveBeenCalled();
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).not.toHaveBeenCalled();
   });
 
   it("builds the promotion candidate from a manual save completed before its CAS macrotask", async () => {
@@ -912,15 +917,15 @@ describe("App workbench integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
     await act(flushPromiseQueue);
     expect(screen.getByTestId("snapshot")).toHaveTextContent("Manual edit before promotion CAS");
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision).not.toHaveBeenCalled();
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).not.toHaveBeenCalled();
 
     await act(async () => {
       vi.runOnlyPendingTimers();
       await flushPromiseQueue();
     });
 
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision).toHaveBeenCalledTimes(1);
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision).toHaveBeenCalledWith(
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).toHaveBeenCalledTimes(1);
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).toHaveBeenCalledWith(
       expect.objectContaining({
         storyboard: expect.objectContaining({
           shots: expect.arrayContaining([
@@ -931,7 +936,7 @@ describe("App workbench integration", () => {
           ]),
         }),
       }),
-      2,
+      { incarnation: "incarnation-default", revision: 2 },
     );
   });
 
@@ -949,13 +954,19 @@ describe("App workbench integration", () => {
       storyboard: { ...current.storyboard, shots: [regeneratedShot, current.storyboard.shots[1]] },
       consistency_report: current.consistency_report,
     });
-    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue(localProjectRecord(current, 4));
-    localProjectStoreMocks.saveProjectSnapshot.mockImplementation(
-      (next: ShortDramaProjectResponse) => Promise.resolve(localProjectRecord(next, 5)),
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue(
+      localProjectRecord(current, 4, "incarnation-cas"),
     );
-    localProjectStoreMocks.saveProjectSnapshotIfRevision.mockImplementation(
-      (next: ShortDramaProjectResponse, expectedRevision: number) => Promise.resolve(
-        expectedRevision === 5 ? localProjectRecord(next, 6) : null,
+    localProjectStoreMocks.saveProjectSnapshot.mockImplementation(
+      (next: ShortDramaProjectResponse) => Promise.resolve(
+        localProjectRecord(next, 5, "incarnation-cas"),
+      ),
+    );
+    localProjectStoreMocks.saveProjectSnapshotIfVersion.mockImplementation(
+      (next: ShortDramaProjectResponse, expected: { incarnation: string; revision: number }) => Promise.resolve(
+        expected.incarnation === "incarnation-cas" && expected.revision === 5
+          ? localProjectRecord(next, 6, "incarnation-cas")
+          : null,
       ),
     );
     localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/cas-shot");
@@ -966,14 +977,14 @@ describe("App workbench integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate shot" }));
 
-    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfRevision)
+    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfVersion)
       .toHaveBeenCalledWith(expect.objectContaining({
         storyboard: expect.objectContaining({
           shots: expect.arrayContaining([
             expect.objectContaining({ output_path: "local://media/cas-shot" }),
           ]),
         }),
-      }), 5));
+      }), { incarnation: "incarnation-cas", revision: 5 }));
     expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/cas-shot");
   });
 
@@ -992,14 +1003,18 @@ describe("App workbench integration", () => {
       consistency_report: current.consistency_report,
     });
     localProjectStoreMocks.loadProjectSnapshot
-      .mockResolvedValueOnce(localProjectRecord(current, 9))
-      .mockResolvedValueOnce(localProjectRecord(current, 1));
+      .mockResolvedValueOnce(localProjectRecord(current, 9, "incarnation-before-recreate"))
+      .mockResolvedValueOnce(localProjectRecord(current, 1, "incarnation-after-recreate"));
     localProjectStoreMocks.saveProjectSnapshot.mockImplementation(
-      (next: ShortDramaProjectResponse) => Promise.resolve(localProjectRecord(next, 2)),
+      (next: ShortDramaProjectResponse) => Promise.resolve(
+        localProjectRecord(next, 2, "incarnation-after-recreate"),
+      ),
     );
-    localProjectStoreMocks.saveProjectSnapshotIfRevision.mockImplementation(
-      (next: ShortDramaProjectResponse, expectedRevision: number) => Promise.resolve(
-        expectedRevision === 2 ? localProjectRecord(next, 3) : null,
+    localProjectStoreMocks.saveProjectSnapshotIfVersion.mockImplementation(
+      (next: ShortDramaProjectResponse, expected: { incarnation: string; revision: number }) => Promise.resolve(
+        expected.incarnation === "incarnation-after-recreate" && expected.revision === 2
+          ? localProjectRecord(next, 3, "incarnation-after-recreate")
+          : null,
       ),
     );
     localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/recreated-project");
@@ -1012,8 +1027,11 @@ describe("App workbench integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate shot" }));
 
-    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfRevision)
-      .toHaveBeenCalledWith(expect.any(Object), 2));
+    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfVersion)
+      .toHaveBeenCalledWith(expect.any(Object), {
+        incarnation: "incarnation-after-recreate",
+        revision: 2,
+      }));
     expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/recreated-project");
   });
 
@@ -1032,18 +1050,24 @@ describe("App workbench integration", () => {
       storyboard: { ...current.storyboard, shots: [regeneratedShot, current.storyboard.shots[1]] },
       consistency_report: current.consistency_report,
     });
-    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue(localProjectRecord(current, 3));
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue(
+      localProjectRecord(current, 3, "incarnation-deleted"),
+    );
     localProjectStoreMocks.saveProjectSnapshot.mockImplementation(
-      (next: ShortDramaProjectResponse) => Promise.resolve(localProjectRecord(next, 4)),
+      (next: ShortDramaProjectResponse) => Promise.resolve(
+        localProjectRecord(next, 4, "incarnation-deleted"),
+      ),
     );
     let exists = true;
     localProjectStoreMocks.deleteProject.mockImplementation(() => {
       exists = false;
       return Promise.resolve();
     });
-    localProjectStoreMocks.saveProjectSnapshotIfRevision.mockImplementation(
-      (next: ShortDramaProjectResponse, expectedRevision: number) => Promise.resolve(
-        exists && expectedRevision === 4 ? localProjectRecord(next, 5) : null,
+    localProjectStoreMocks.saveProjectSnapshotIfVersion.mockImplementation(
+      (next: ShortDramaProjectResponse, expected: { incarnation: string; revision: number }) => Promise.resolve(
+        exists && expected.incarnation === "incarnation-deleted" && expected.revision === 4
+          ? localProjectRecord(next, 5, "incarnation-deleted")
+          : null,
       ),
     );
     localMediaStoreMocks.cacheRemoteMedia.mockReturnValue(cache.promise);
@@ -1057,8 +1081,11 @@ describe("App workbench integration", () => {
     await localProjectStoreMocks.deleteProject("p1");
     cache.resolve("local://media/deleted-project");
 
-    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfRevision)
-      .toHaveBeenCalledWith(expect.any(Object), 4));
+    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfVersion)
+      .toHaveBeenCalledWith(expect.any(Object), {
+        incarnation: "incarnation-deleted",
+        revision: 4,
+      }));
     expect(screen.getByTestId("snapshot")).not.toHaveTextContent("local://media/deleted-project");
     expect(localProjectStoreMocks.saveProjectSnapshot).not.toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1069,6 +1096,69 @@ describe("App workbench integration", () => {
         }),
       }),
     );
+  });
+
+  it("does not promote an old pending cache into a same-id recreated project at matching revision", async () => {
+    const current = projectResponse();
+    const cache = deferred<string | null>();
+    const regeneratedShot = {
+      ...current.storyboard.shots[0],
+      output_path: "assets/video/aba-pending.mp4",
+      output_url: null,
+    };
+    apiMocks.regenerateShot.mockResolvedValue({
+      job_id: "aba-pending-regenerate",
+      event: event({ id: "aba-pending-regenerate", stage: "regenerate" }),
+      shot: regeneratedShot,
+      storyboard: { ...current.storyboard, shots: [regeneratedShot, current.storyboard.shots[1]] },
+      consistency_report: current.consistency_report,
+    });
+    let durable = localProjectRecord(current, 1, "incarnation-old");
+    localProjectStoreMocks.loadProjectSnapshot.mockImplementation(() => Promise.resolve(durable));
+    localProjectStoreMocks.saveProjectSnapshot.mockImplementation((next: ShortDramaProjectResponse) => {
+      durable = localProjectRecord(
+        next,
+        (durable.revision ?? 0) + 1,
+        (durable as LocalProjectSnapshot & { incarnation: string }).incarnation,
+      );
+      return Promise.resolve(durable);
+    });
+    const conditionalSave = (
+      next: ShortDramaProjectResponse,
+      expected: { incarnation: string; revision: number },
+    ) => {
+      const currentVersion = {
+        incarnation: (durable as LocalProjectSnapshot & { incarnation: string }).incarnation,
+        revision: durable.revision ?? 0,
+      };
+      const matches = expected.incarnation === currentVersion.incarnation
+        && expected.revision === currentVersion.revision;
+      if (!matches) return Promise.resolve(null);
+      durable = localProjectRecord(next, currentVersion.revision + 1, currentVersion.incarnation);
+      return Promise.resolve(durable);
+    };
+    localProjectStoreMocks.saveProjectSnapshotIfVersion.mockImplementation(conditionalSave);
+    localMediaStoreMocks.cacheRemoteMedia.mockReturnValue(cache.promise);
+    renderProvider();
+    fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+    await waitFor(() => expect(screen.getByTestId("project-id")).toHaveTextContent("p1"));
+    setCredentials();
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate shot" }));
+    await waitFor(() => expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledTimes(1));
+
+    const recreated = cloneProjectResponse(durable.snapshot);
+    recreated.project.title = "Recreated same ID";
+    durable = localProjectRecord(recreated, 2, "incarnation-new");
+    cache.resolve("local://media/aba-pending");
+
+    await waitFor(() => expect(screen.getByTestId("local-backup-status")).toHaveTextContent("idle"));
+    expect(durable).toMatchObject({
+      incarnation: "incarnation-new",
+      revision: 2,
+      title: "Recreated same ID",
+    });
+    expect(durable.snapshot.storyboard.shots[0].output_path).toBe("assets/video/aba-pending.mp4");
+    expect(screen.getByTestId("snapshot")).not.toHaveTextContent("local://media/aba-pending");
   });
 
   it("does not persist a pending regenerated cache result after unmount", async () => {
@@ -1099,7 +1189,7 @@ describe("App workbench integration", () => {
     await flushPromiseQueue();
 
     expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenCalledTimes(primarySaveCount);
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision).not.toHaveBeenCalled();
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).not.toHaveBeenCalled();
   });
 
   it("keeps regenerated remote media successful when background caching fails", async () => {
@@ -1208,26 +1298,45 @@ describe("App workbench integration", () => {
     });
     localMediaStoreMocks.cacheRemoteMedia.mockResolvedValue("local://media/persistence-race");
 
-    let durable = localProjectRecord(current, 1);
+    let durable = localProjectRecord(current, 1, "incarnation-old");
     localProjectStoreMocks.loadProjectSnapshot.mockImplementation(() => Promise.resolve(
-      localProjectRecord(durable.snapshot, durable.revision ?? 0),
+      localProjectRecord(durable.snapshot, durable.revision ?? 0, durable.incarnation),
     ));
     localProjectStoreMocks.saveProjectSnapshot.mockImplementation(
       (next: ShortDramaProjectResponse) => {
-        durable = localProjectRecord(next, (durable.revision ?? 0) + 1);
-        return Promise.resolve(localProjectRecord(durable.snapshot, durable.revision ?? 0));
+        durable = localProjectRecord(
+          next,
+          (durable.revision ?? 0) + 1,
+          durable.incarnation,
+        );
+        return Promise.resolve(localProjectRecord(
+          durable.snapshot,
+          durable.revision ?? 0,
+          durable.incarnation,
+        ));
       },
     );
     let promotionRecord: LocalProjectSnapshot | null = null;
-    localProjectStoreMocks.saveProjectSnapshotIfRevision.mockImplementation(
-      (next: ShortDramaProjectResponse, expectedRevision: number) => {
-        if ((durable.revision ?? 0) !== expectedRevision) return Promise.resolve(null);
-        durable = localProjectRecord(next, expectedRevision + 1);
+    localProjectStoreMocks.saveProjectSnapshotIfVersion.mockImplementation(
+      (next: ShortDramaProjectResponse, expected: { incarnation: string; revision: number }) => {
+        if (
+          durable.incarnation !== expected.incarnation
+          || (durable.revision ?? 0) !== expected.revision
+        ) return Promise.resolve(null);
+        durable = localProjectRecord(next, expected.revision + 1, expected.incarnation);
         if (!promotionRecord) {
-          promotionRecord = localProjectRecord(durable.snapshot, durable.revision ?? 0);
+          promotionRecord = localProjectRecord(
+            durable.snapshot,
+            durable.revision ?? 0,
+            durable.incarnation,
+          );
           return promotionResolution.promise.then(() => promotionRecord);
         }
-        return Promise.resolve(localProjectRecord(durable.snapshot, durable.revision ?? 0));
+        return Promise.resolve(localProjectRecord(
+          durable.snapshot,
+          durable.revision ?? 0,
+          durable.incarnation,
+        ));
       },
     );
     renderProvider();
@@ -1236,14 +1345,14 @@ describe("App workbench integration", () => {
     setCredentials();
 
     fireEvent.click(screen.getByRole("button", { name: "Regenerate shot" }));
-    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfRevision)
+    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfVersion)
       .toHaveBeenCalledWith(expect.objectContaining({
         storyboard: expect.objectContaining({
           shots: expect.arrayContaining([
             expect.objectContaining({ output_path: "local://media/persistence-race" }),
           ]),
         }),
-      }), 2));
+      }), { incarnation: "incarnation-old", revision: 2 }));
 
     for (let index = 1; index <= 5; index += 1) {
       fireEvent.click(screen.getByRole("button", { name: "Save shot" }));
@@ -1252,9 +1361,12 @@ describe("App workbench integration", () => {
     }
 
     promotionResolution.resolve();
-    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfRevision)
+    await waitFor(() => expect(localProjectStoreMocks.saveProjectSnapshotIfVersion)
       .toHaveBeenCalledTimes(2));
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision.mock.calls[1]?.[1]).toBe(3);
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion.mock.calls[1]?.[1]).toEqual({
+      incarnation: "incarnation-old",
+      revision: 3,
+    });
     expect(durable.revision).toBe(8);
     expect(durable.snapshot.storyboard.shots[0].prompt).toBe("Manual durable edit 5");
     expect(durable.snapshot.storyboard.shots[0].output_path).toBe("assets/video/persistence-race.mp4");
@@ -1682,7 +1794,7 @@ describe("App workbench integration", () => {
       "/api/projects/p1/media/renders/final.mp4",
       { projectId: "p1", sourcePath: "renders/final.mp4" },
     );
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision).toHaveBeenLastCalledWith(
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).toHaveBeenLastCalledWith(
       expect.objectContaining({
         continuity_plan: expect.objectContaining({
           series_bible: expect.objectContaining({ worldview: "近未来沿海城市" }),
@@ -1695,7 +1807,7 @@ describe("App workbench integration", () => {
           ]),
         }),
       }),
-      2,
+      { incarnation: "incarnation-default", revision: 2 },
     );
     expect(screen.getByTestId("snapshot")).not.toHaveTextContent("Authoritative world");
     expect(screen.getByTestId("snapshot")).not.toHaveTextContent("authoritative-render.json");
@@ -1943,7 +2055,7 @@ describe("App workbench integration", () => {
     await flushPromiseQueue();
 
     expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenCalledTimes(primarySaveCount);
-    expect(localProjectStoreMocks.saveProjectSnapshotIfRevision).not.toHaveBeenCalled();
+    expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).not.toHaveBeenCalled();
     expect(localMediaStoreMocks.cacheRemoteMedia).not.toHaveBeenCalled();
   });
 
