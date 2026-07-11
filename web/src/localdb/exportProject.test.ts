@@ -7,6 +7,7 @@ import {
   importProjectBackup,
   ProjectImportConflictError,
 } from "./exportProject";
+import { BackupValidationError } from "./backupFormat";
 import { resetLocalDbForTests } from "./indexedDb";
 import { loadMediaBlob, saveMediaBlob } from "./mediaStore";
 import {
@@ -606,7 +607,8 @@ describe("exportProject", () => {
   it("rejects unsupported backup versions before changing visible project state", async () => {
     await saveProjectSnapshot(snapshot(null, { id: "existing", title: "Existing" }));
 
-    await expect(importProjectBackup(backupFile({ version: 2 }))).rejects.toThrow(/version/i);
+    await expect(importProjectBackup(backupFile({ version: 2 })))
+      .rejects.toBeInstanceOf(BackupValidationError);
 
     expect((await loadRecentProjectSnapshot())?.snapshot.project.title).toBe("Existing");
     expect(await loadProjectSnapshot("p1")).toBeNull();
@@ -618,6 +620,14 @@ describe("exportProject", () => {
 
     expect(await loadProjectSnapshot("p1")).toBeNull();
     expect(await mediaRecordCount()).toBe(0);
+  });
+
+  it("classifies invalid manifest JSON as backup validation failure", async () => {
+    const invalidJson = new File([zipSync({
+      "openmontage-project.json": strToU8("{"),
+    })], "invalid-json.omproj", { type: "application/zip" });
+
+    await expect(importProjectBackup(invalidJson)).rejects.toBeInstanceOf(BackupValidationError);
   });
 
   it("rejects project envelopes with malformed shot records", async () => {
@@ -939,7 +949,7 @@ describe("exportProject", () => {
     const backup = backupFile({ project: snapshot(null, { id: "imported" }) });
     Object.defineProperty(backup, "size", { value: 512 * 1024 * 1024 + 1 });
 
-    await expect(importProjectBackup(backup)).rejects.toThrow(/archive.*large|archive.*limit/i);
+    await expect(importProjectBackup(backup)).rejects.toBeInstanceOf(BackupValidationError);
   });
 
   it("rejects export when the actual project manifest exceeds its JSON limit", async () => {

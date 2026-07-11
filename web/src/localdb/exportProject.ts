@@ -11,6 +11,25 @@ import {
   type UnzipFile,
 } from "fflate/browser";
 import type { ShortDramaProjectResponse } from "../domain/types";
+import {
+  BackupValidationError,
+  MANIFEST_NAME,
+  MAX_ARCHIVE_BYTES,
+  MAX_ARCHIVE_ENTRIES,
+  MAX_TOTAL_UNCOMPRESSED_BYTES,
+  MEDIA_MANIFEST_NAME,
+  archiveEntryByteLimit,
+  archiveEntryLimitError,
+  collectLocalMediaRefs,
+  isSafeArchiveEntryName,
+  mediaIdFromRef,
+  normalizeAndValidateSnapshot,
+  rewriteLocalMediaRefs,
+  shouldRetainArchiveEntry,
+  validateBackupManifests,
+  type MediaBackupManifest,
+  type ProjectBackupEnvelope,
+} from "./backupFormat";
 import { renewMediaOperationLease } from "./mediaJournal";
 import { beginMediaWrite, loadMediaBlob, runMediaRecovery } from "./mediaStore";
 import {
@@ -20,20 +39,11 @@ import {
   loadProjectSnapshot,
   ProjectImportConflictError,
 } from "./projectStore";
-import { normalizeAndValidateProjectSnapshot } from "./snapshotSchema";
 import type { LocalMediaRef } from "./types";
 
 export { ProjectImportConflictError } from "./projectStore";
 
-const MANIFEST_NAME = "openmontage-project.json";
-const MEDIA_MANIFEST_NAME = "openmontage-media.json";
-const LOCAL_MEDIA_PREFIX = "local://media/";
 const MIB = 1024 * 1024;
-const MAX_ARCHIVE_BYTES = 512 * MIB;
-const MAX_ARCHIVE_ENTRIES = 512;
-const MAX_ENTRY_BYTES = 256 * MIB;
-const MAX_MANIFEST_BYTES = 8 * MIB;
-const MAX_TOTAL_UNCOMPRESSED_BYTES = 1024 * MIB;
 const FALLBACK_READ_CHUNK_BYTES = 64 * 1024;
 const FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES = 320_000;
 const MAX_ACTIVE_INFLATE_WORKERS = 2;
@@ -47,23 +57,6 @@ async function renewImportSessionLease(sessionId: string): Promise<void> {
 }
 const WORKER_PROBE_TIMEOUT_MS = 2_000;
 const DECODER_IDLE_TIMEOUT_MS = 15_000;
-
-type MediaBackupEntry = {
-  ref: LocalMediaRef;
-  file: string;
-  contentType: string;
-  sourcePath: string;
-};
-
-type MediaBackupManifest = {
-  version: 1;
-  media: MediaBackupEntry[];
-};
-
-type ProjectBackupEnvelope = {
-  version: 1;
-  project: ShortDramaProjectResponse;
-};
 
 type ImportProjectBackupOptions = {
   overwrite?: boolean;
@@ -225,32 +218,9 @@ function errorWithCauses(message: string, causes: unknown[]): Error {
   return error;
 }
 
-function isSafeArchiveEntryName(name: string): boolean {
-  if (!name || name.length > 256 || name.startsWith("/") || name.includes("\\")) {
-    return false;
-  }
-  return name.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
-}
-
-function shouldRetainArchiveEntry(name: string): boolean {
-  return name === MANIFEST_NAME || name === MEDIA_MANIFEST_NAME || name.startsWith("media/");
-}
-
-function archiveEntryByteLimit(name: string): number {
-  return name === MANIFEST_NAME || name === MEDIA_MANIFEST_NAME
-    ? MAX_MANIFEST_BYTES
-    : MAX_ENTRY_BYTES;
-}
-
-function archiveEntryLimitError(name: string): Error {
-  return name === MANIFEST_NAME || name === MEDIA_MANIFEST_NAME
-    ? new Error(`Backup manifest ${name} exceeds the JSON manifest size limit`)
-    : new Error(`Backup entry ${name} exceeds the per-entry size limit`);
-}
-
 async function createBackupArchive(entries: BackupBlobEntry[]): Promise<Blob> {
   if (entries.length > MAX_ARCHIVE_ENTRIES) {
-    throw new Error("Backup entry count exceeds the archive entry limit");
+    throw new BackupValidationError("Backup entry count exceeds the archive entry limit");
   }
   let totalInputBytes = 0;
   for (const entry of entries) {
@@ -262,11 +232,11 @@ async function createBackupArchive(entries: BackupBlobEntry[]): Promise<Blob> {
     }
     totalInputBytes += entry.blob.size;
     if (totalInputBytes > MAX_TOTAL_UNCOMPRESSED_BYTES) {
-      throw new Error("Backup total uncompressed size exceeds the limit");
+      throw new BackupValidationError("Backup total uncompressed size exceeds the limit");
     }
   }
   if (totalInputBytes > MAX_ARCHIVE_BYTES) {
-    throw new Error("Backup archive would exceed the compressed size limit");
+    throw new BackupValidationError("Backup archive would exceed the compressed size limit");
   }
 
   const chunks: Uint8Array[] = [];
@@ -289,7 +259,7 @@ async function createBackupArchive(entries: BackupBlobEntry[]): Promise<Blob> {
     if (outputBytes > MAX_ARCHIVE_BYTES) {
       settled = true;
       zip.terminate();
-      rejectArchive(new Error("Backup archive exceeds the compressed size limit"));
+      rejectArchive(new BackupValidationError("Backup archive exceeds the compressed size limit"));
       return;
     }
     chunks.push(data);
@@ -329,7 +299,7 @@ async function createBackupArchive(entries: BackupBlobEntry[]): Promise<Blob> {
 
 async function extractBackupArchive(file: File): Promise<Record<string, Uint8Array>> {
   if (!Number.isSafeInteger(file.size) || file.size > MAX_ARCHIVE_BYTES) {
-    throw new Error("Backup archive exceeds the compressed size limit");
+    throw new BackupValidationError("Backup archive exceeds the compressed size limit");
   }
   const workerSupported = await canUseInflateWorker();
 
@@ -412,15 +382,15 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
       if (settled) return;
       entryCount += 1;
       if (entryCount > MAX_ARCHIVE_ENTRIES) {
-        fail(new Error("Backup archive has too many entries for the entry limit"));
+        fail(new BackupValidationError("Backup archive has too many entries for the entry limit"));
         return;
       }
       if (!isSafeArchiveEntryName(archiveEntry.name)) {
-        fail(new Error(`Backup archive entry ${archiveEntry.name} is malformed`));
+        fail(new BackupValidationError(`Backup archive entry ${archiveEntry.name} is malformed`));
         return;
       }
       if (seenNames.has(archiveEntry.name)) {
-        fail(new Error(`Backup archive contains duplicate entry ${archiveEntry.name}`));
+        fail(new BackupValidationError(`Backup archive contains duplicate entry ${archiveEntry.name}`));
         return;
       }
       seenNames.add(archiveEntry.name);
@@ -436,7 +406,7 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
         }
         declaredTotal += archiveEntry.originalSize;
         if (declaredTotal > MAX_TOTAL_UNCOMPRESSED_BYTES) {
-          fail(new Error("Backup total uncompressed size exceeds the limit"));
+          fail(new BackupValidationError("Backup total uncompressed size exceeds the limit"));
           return;
         }
       }
@@ -483,7 +453,7 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
           return;
         }
         if (nextActualTotal > MAX_TOTAL_UNCOMPRESSED_BYTES) {
-          fail(new Error("Backup total uncompressed size exceeds the limit"));
+          fail(new BackupValidationError("Backup total uncompressed size exceeds the limit"));
           return;
         }
         entryBytes = nextEntryBytes;
@@ -540,7 +510,7 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
             const chunk = value.subarray(offset, offset + FALLBACK_READ_CHUNK_BYTES);
             archivedBytesRead += chunk.length;
             if (archivedBytesRead > MAX_ARCHIVE_BYTES) {
-              fail(new Error("Backup archive exceeds the compressed size limit"));
+              fail(new BackupValidationError("Backup archive exceeds the compressed size limit"));
               break;
             }
             unzip.push(chunk, false);
@@ -553,144 +523,14 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
   });
 }
 
-function isLocalMediaRef(value: unknown): value is LocalMediaRef {
-  return (
-    typeof value === "string" &&
-    /^local:\/\/media\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)
-  );
-}
-
-function collectLocalMediaRefs(value: unknown, refs = new Set<LocalMediaRef>()): Set<LocalMediaRef> {
-  if (isLocalMediaRef(value)) {
-    refs.add(value);
-    return refs;
+function parseBackupManifest(bytes: Uint8Array, name: string): unknown {
+  try {
+    return JSON.parse(strFromU8(bytes));
+  } catch (error) {
+    throw new BackupValidationError(`Backup manifest ${name} contains invalid JSON`, {
+      cause: error,
+    });
   }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      collectLocalMediaRefs(item, refs);
-    }
-    return refs;
-  }
-  if (value && typeof value === "object") {
-    for (const item of Object.values(value)) {
-      collectLocalMediaRefs(item, refs);
-    }
-  }
-  return refs;
-}
-
-function rewriteLocalMediaRefs(value: unknown, refMap: Map<LocalMediaRef, LocalMediaRef>): unknown {
-  if (isLocalMediaRef(value)) {
-    return refMap.get(value) ?? value;
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => rewriteLocalMediaRefs(item, refMap));
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, rewriteLocalMediaRefs(item, refMap)]),
-    );
-  }
-  return value;
-}
-
-function mediaIdFromRef(ref: LocalMediaRef): string {
-  return ref.slice(LOCAL_MEDIA_PREFIX.length);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function validateLocalMediaRefs(value: unknown, seen = new WeakSet<object>()): void {
-  if (typeof value === "string") {
-    if (value.startsWith(LOCAL_MEDIA_PREFIX) && !isLocalMediaRef(value)) {
-      throw new Error(`Local media reference ${value} is malformed`);
-    }
-    return;
-  }
-  if (!value || typeof value !== "object" || seen.has(value)) return;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (const item of value) validateLocalMediaRefs(item, seen);
-  } else {
-    for (const item of Object.values(value)) validateLocalMediaRefs(item, seen);
-  }
-}
-
-function normalizeAndValidateSnapshot(value: unknown): ShortDramaProjectResponse {
-  const normalized = normalizeAndValidateProjectSnapshot(value);
-  validateLocalMediaRefs(normalized);
-  return normalized;
-}
-
-function validateProjectEnvelope(value: unknown): ShortDramaProjectResponse {
-  if (!isRecord(value)) {
-    throw new Error("Backup format version is unsupported");
-  }
-  const hasExplicitVersion = Object.prototype.hasOwnProperty.call(value, "version");
-  if (!hasExplicitVersion) {
-    const isLegacySnapshot = isRecord(value.project) && typeof value.project.id === "string";
-    if (!isLegacySnapshot) throw new Error("Backup format version is unsupported");
-    return normalizeAndValidateSnapshot(value);
-  }
-  if (value.version !== 1) {
-    throw new Error("Backup format version is unsupported");
-  }
-  return normalizeAndValidateSnapshot(value.project);
-}
-
-function validateMediaManifest(
-  value: unknown,
-  requiredRefs: Set<LocalMediaRef>,
-  files: Record<string, Uint8Array>,
-): MediaBackupManifest {
-  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.media)) {
-    throw new Error("Backup media manifest is invalid or unsupported");
-  }
-
-  const seenRefs = new Set<LocalMediaRef>();
-  const seenFiles = new Set<string>();
-  const media = value.media.map((item): MediaBackupEntry => {
-    if (
-      !isRecord(item) ||
-      !isLocalMediaRef(item.ref) ||
-      typeof item.file !== "string" ||
-      !/^media\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item.file) ||
-      typeof item.contentType !== "string" ||
-      item.contentType.length === 0 ||
-      typeof item.sourcePath !== "string" ||
-      item.sourcePath.length === 0
-    ) {
-      throw new Error("Backup media manifest entry is malformed");
-    }
-    if (seenRefs.has(item.ref) || seenFiles.has(item.file)) {
-      throw new Error("Backup media manifest contains duplicate entries");
-    }
-    if (!files[item.file]) {
-      throw new Error(`Backup is missing required media file ${item.file}`);
-    }
-    seenRefs.add(item.ref);
-    seenFiles.add(item.file);
-    return {
-      ref: item.ref,
-      file: item.file,
-      contentType: item.contentType,
-      sourcePath: item.sourcePath,
-    };
-  });
-
-  if (seenRefs.size !== requiredRefs.size || [...requiredRefs].some((ref) => !seenRefs.has(ref))) {
-    throw new Error("Backup media manifest does not resolve every local media reference");
-  }
-  const archivedMediaFiles = Object.keys(files).filter((name) => name.startsWith("media/"));
-  if (
-    archivedMediaFiles.length !== seenFiles.size ||
-    archivedMediaFiles.some((name) => !seenFiles.has(name))
-  ) {
-    throw new Error("Backup archive contains media files undeclared by the media manifest");
-  }
-  return { version: 1, media };
 }
 
 export async function exportProjectBackup(projectId: string): Promise<Blob> {
@@ -747,23 +587,16 @@ export async function importProjectBackup(
   const files = await extractBackupArchive(file);
   const manifestBytes = files[MANIFEST_NAME];
   if (!manifestBytes) {
-    throw new Error("Backup is missing openmontage-project.json");
+    throw new BackupValidationError("Backup is missing openmontage-project.json");
   }
-
-  const snapshot = validateProjectEnvelope(JSON.parse(strFromU8(manifestBytes)));
-  const requiredRefs = collectLocalMediaRefs(snapshot);
 
   const refMap = new Map<LocalMediaRef, LocalMediaRef>();
   const mediaManifestBytes = files[MEDIA_MANIFEST_NAME];
-  if (requiredRefs.size > 0 && !mediaManifestBytes) {
-    throw new Error("Backup is missing the media manifest required by local media references");
-  }
-  if (!mediaManifestBytes && Object.keys(files).some((name) => name.startsWith("media/"))) {
-    throw new Error("Backup archive contains media files without a media manifest");
-  }
-  const mediaManifest = mediaManifestBytes
-    ? validateMediaManifest(JSON.parse(strFromU8(mediaManifestBytes)), requiredRefs, files)
-    : ({ version: 1, media: [] } satisfies MediaBackupManifest);
+  const { project: snapshot, mediaManifest } = validateBackupManifests(
+    parseBackupManifest(manifestBytes, MANIFEST_NAME),
+    mediaManifestBytes ? parseBackupManifest(mediaManifestBytes, MEDIA_MANIFEST_NAME) : undefined,
+    Object.keys(files),
+  );
 
   const existing = await loadProjectSnapshot(snapshot.project.id);
   if (existing && !options.overwrite) {
