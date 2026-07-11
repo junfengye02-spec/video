@@ -60,7 +60,7 @@ function flatFile(name: string, contents: BlobPart, type = "application/octet-st
   return new File([contents], name, { type });
 }
 
-function backupFiles(options: { relative?: boolean; extra?: File } = {}): File[] {
+function backupFiles(options: { relative?: boolean; extra?: File; root?: string } = {}): File[] {
   const ref = "local://media/original" as LocalMediaRef;
   const project = JSON.stringify({ version: 1, project: snapshot(ref) });
   const media = JSON.stringify({
@@ -72,8 +72,9 @@ function backupFiles(options: { relative?: boolean; extra?: File } = {}): File[]
       sourcePath: "assets/video/original.mp4",
     }],
   });
+  const root = options.root ?? "rain-backup";
   const make = options.relative
-    ? (name: string, value: BlobPart, type?: string) => selectedFile(`rain-backup/${name}`, value, type)
+    ? (name: string, value: BlobPart, type?: string) => selectedFile(`${root}/${name}`, value, type)
     : flatFile;
   return [
     make(BACKUP_PROJECT_MANIFEST_NAME, project, "application/json"),
@@ -127,6 +128,19 @@ describe("readBackupDirectory", () => {
     expect(observed.complete).toHaveBeenCalledWith(result);
   });
 
+  it("streams every declared file from a second slice pass after preflight", async () => {
+    const files = backupFiles({ relative: true });
+    const sliceSpies = files.map((file) => {
+      const slice = vi.fn(file.slice.bind(file));
+      Object.defineProperty(file, "slice", { value: slice });
+      return slice;
+    });
+
+    await readBackupDirectory(files, collectingCallbacks().callbacks);
+
+    for (const slice of sliceSpies) expect(slice.mock.calls.length).toBeGreaterThanOrEqual(4);
+  });
+
   it("matches a multiple-file selection by unique basename", async () => {
     const files = backupFiles().reverse();
     const observed = collectingCallbacks();
@@ -135,6 +149,15 @@ describe("readBackupDirectory", () => {
 
     expect(result.entries[result.entries.length - 1]?.name).toBe("media/original.mp4");
     expect(observed.chunks.get("media/original.mp4")).toBe(5);
+  });
+
+  it("strips a long selected root before enforcing backup-relative path length", async () => {
+    const result = await readBackupDirectory(
+      backupFiles({ relative: true, root: "r".repeat(300) }),
+      collectingCallbacks().callbacks,
+    );
+
+    expect(result.project.project.id).toBe("project-1");
   });
 
   it("rejects duplicate basenames in multiple-file mode", async () => {
@@ -146,10 +169,16 @@ describe("readBackupDirectory", () => {
   });
 
   it("rejects unsafe and duplicate relative paths", async () => {
-    const unsafe = backupFiles({ relative: true });
-    unsafe[2] = selectedFile("rain-backup/media/../original.mp4", "video");
-    await expect(readBackupDirectory(unsafe, collectingCallbacks().callbacks))
-      .rejects.toBeInstanceOf(BackupValidationError);
+    for (const unsafePath of [
+      "rain-backup/media/../original.mp4",
+      "/rain-backup/media/original.mp4",
+      "rain-backup/media//original.mp4",
+    ]) {
+      const unsafe = backupFiles({ relative: true });
+      unsafe[2] = selectedFile(unsafePath, "video");
+      await expect(readBackupDirectory(unsafe, collectingCallbacks().callbacks))
+        .rejects.toBeInstanceOf(BackupValidationError);
+    }
 
     const duplicate = backupFiles({ relative: true });
     duplicate.push(selectedFile("rain-backup/media/original.mp4", "duplicate"));
@@ -190,12 +219,34 @@ describe("readBackupDirectory", () => {
     expect(observed.starts).toHaveLength(0);
   });
 
+  it("rejects invalid UTF-8 manifest JSON before callbacks", async () => {
+    const files = backupFiles({ relative: true });
+    files[0] = selectedFile(
+      `rain-backup/${BACKUP_PROJECT_MANIFEST_NAME}`,
+      new Uint8Array([
+        0x7b, 0x22, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x22, 0x3a, 0x22,
+        0xc3, 0x28, 0x22, 0x7d,
+      ]),
+      "application/json",
+    );
+    const observed = collectingCallbacks();
+
+    await expect(readBackupDirectory(files, observed.callbacks))
+      .rejects.toBeInstanceOf(BackupValidationError);
+    expect(observed.starts).toHaveLength(0);
+    expect(observed.progress).toHaveLength(0);
+    expect(observed.complete).not.toHaveBeenCalled();
+  });
+
   it("reports monotonic byte and entry progress through completion", async () => {
     const observed = collectingCallbacks();
 
     await readBackupDirectory(backupFiles({ relative: true }), observed.callbacks);
 
     expect(observed.progress.length).toBeGreaterThan(0);
+    for (const value of observed.progress) {
+      expect(value.bytesRead).toBeLessThanOrEqual(value.totalBytes);
+    }
     for (let index = 1; index < observed.progress.length; index += 1) {
       expect(observed.progress[index].bytesRead).toBeGreaterThanOrEqual(
         observed.progress[index - 1].bytesRead,
@@ -227,12 +278,22 @@ describe("readBackupDirectory", () => {
     expect(observed.complete).not.toHaveBeenCalled();
   });
 
-  it("rejects actual bytes that exceed a forged declared file size", async () => {
+  it.each([
+    ["project manifest", 0],
+    ["media manifest", 1],
+    ["declared media", 2],
+  ])("rejects forged actual size for %s before every callback", async (_label, index) => {
     const files = backupFiles({ relative: true });
-    Object.defineProperty(files[2], "size", { value: 0 });
+    Object.defineProperty(files[index], "size", { value: 0 });
+    const observed = collectingCallbacks();
 
-    await expect(readBackupDirectory(files, collectingCallbacks().callbacks))
+    await expect(readBackupDirectory(files, observed.callbacks))
       .rejects.toThrow(/size|bytes|length/i);
+    expect(observed.starts).toHaveLength(0);
+    expect(observed.chunks.size).toBe(0);
+    expect(observed.ends).toHaveLength(0);
+    expect(observed.progress).toHaveLength(0);
+    expect(observed.complete).not.toHaveBeenCalled();
   });
 
   it("rejects undeclared non-media directory files before callbacks", async () => {

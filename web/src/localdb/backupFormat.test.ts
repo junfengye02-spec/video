@@ -16,6 +16,7 @@ import {
   collectLocalMediaRefs,
   isSafeArchiveEntryName,
   isSafeBackupPath,
+  parseBackupJson,
   validateBackupManifests,
   validateMediaManifest,
   validateProjectEnvelope,
@@ -78,6 +79,16 @@ describe("backupFormat", () => {
     expect(() => validateProjectEnvelope({ version: 2, project: snapshot() }))
       .toThrow(BackupValidationError);
     expect(() => validateProjectEnvelope({ version: 1, project: { project: { id: "bad" } } }))
+      .toThrow(BackupValidationError);
+  });
+
+  it("rejects invalid UTF-8 JSON with a typed validation error", () => {
+    const invalidUtf8 = new Uint8Array([
+      0x7b, 0x22, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x22, 0x3a, 0x22,
+      0xc3, 0x28, 0x22, 0x7d,
+    ]);
+
+    expect(() => parseBackupJson(invalidUtf8, BACKUP_PROJECT_MANIFEST_NAME))
       .toThrow(BackupValidationError);
   });
 
@@ -180,6 +191,14 @@ describe("backupFormat", () => {
       undefined,
       ["media/orphan"],
     )).toThrow(/without a media manifest/i);
+  });
+
+  it("rejects every undeclared safe entry in the shared manifest inventory", () => {
+    expect(() => validateBackupManifests(
+      { version: 1, project: snapshot() },
+      undefined,
+      [BACKUP_PROJECT_MANIFEST_NAME, "notes.txt"],
+    )).toThrow(/undeclared/i);
   });
 
   it("does not import a ZIP decoder", () => {

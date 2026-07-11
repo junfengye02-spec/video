@@ -1,6 +1,5 @@
 import {
   AsyncInflate,
-  strFromU8,
   strToU8,
   Unzip,
   UnzipInflate,
@@ -24,6 +23,7 @@ import {
   isSafeArchiveEntryName,
   mediaIdFromRef,
   normalizeAndValidateSnapshot,
+  parseBackupJson,
   rewriteLocalMediaRefs,
   shouldRetainArchiveEntry,
   validateBackupManifests,
@@ -65,6 +65,11 @@ type ImportProjectBackupOptions = {
 type BackupBlobEntry = {
   name: string;
   blob: Blob;
+};
+
+type ExtractedBackupArchive = {
+  files: Record<string, Uint8Array>;
+  entryPaths: string[];
 };
 
 function shouldUseAsyncInflate(size?: number, originalSize?: number): boolean {
@@ -297,7 +302,7 @@ async function createBackupArchive(entries: BackupBlobEntry[]): Promise<Blob> {
   return completion;
 }
 
-async function extractBackupArchive(file: File): Promise<Record<string, Uint8Array>> {
+async function extractBackupArchive(file: File): Promise<ExtractedBackupArchive> {
   if (!Number.isSafeInteger(file.size) || file.size > MAX_ARCHIVE_BYTES) {
     throw new BackupValidationError("Backup archive exceeds the compressed size limit");
   }
@@ -353,7 +358,7 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
     const maybeResolve = () => {
       if (!settled && inputDone && pendingEntries === 0) {
         settled = true;
-        resolve(files);
+        resolve({ files, entryPaths: [...seenNames] });
       }
     };
     const fail = (error: unknown) => {
@@ -523,16 +528,6 @@ async function extractBackupArchive(file: File): Promise<Record<string, Uint8Arr
   });
 }
 
-function parseBackupManifest(bytes: Uint8Array, name: string): unknown {
-  try {
-    return JSON.parse(strFromU8(bytes));
-  } catch (error) {
-    throw new BackupValidationError(`Backup manifest ${name} contains invalid JSON`, {
-      cause: error,
-    });
-  }
-}
-
 export async function exportProjectBackup(projectId: string): Promise<Blob> {
   const record = await loadProjectSnapshot(projectId);
   if (!record) {
@@ -584,7 +579,7 @@ export async function importProjectBackup(
   file: File,
   options: ImportProjectBackupOptions = {},
 ): Promise<ShortDramaProjectResponse> {
-  const files = await extractBackupArchive(file);
+  const { files, entryPaths } = await extractBackupArchive(file);
   const manifestBytes = files[MANIFEST_NAME];
   if (!manifestBytes) {
     throw new BackupValidationError("Backup is missing openmontage-project.json");
@@ -593,9 +588,9 @@ export async function importProjectBackup(
   const refMap = new Map<LocalMediaRef, LocalMediaRef>();
   const mediaManifestBytes = files[MEDIA_MANIFEST_NAME];
   const { project: snapshot, mediaManifest } = validateBackupManifests(
-    parseBackupManifest(manifestBytes, MANIFEST_NAME),
-    mediaManifestBytes ? parseBackupManifest(mediaManifestBytes, MEDIA_MANIFEST_NAME) : undefined,
-    Object.keys(files),
+    parseBackupJson(manifestBytes, MANIFEST_NAME),
+    mediaManifestBytes ? parseBackupJson(mediaManifestBytes, MEDIA_MANIFEST_NAME) : undefined,
+    entryPaths,
   );
 
   const existing = await loadProjectSnapshot(snapshot.project.id);

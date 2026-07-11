@@ -6,6 +6,7 @@ import {
   BackupValidationError,
   assertSafeBackupPath,
   collectLocalMediaRefs,
+  parseBackupJson,
   validateBackupManifests,
   validateMediaManifest,
   validateProjectEnvelope,
@@ -45,6 +46,19 @@ function fileRelativePath(file: File): string {
   return typeof file.webkitRelativePath === "string" ? file.webkitRelativePath : "";
 }
 
+function assertSafeSelectionPath(path: string): void {
+  if (
+    !path ||
+    path.startsWith("/") ||
+    /^[A-Za-z]:\//.test(path) ||
+    path.includes("\\") ||
+    path.includes("\0") ||
+    path.split("/").some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    throw new BackupValidationError(`Backup selection path ${path || "<empty>"} is unsafe`);
+  }
+}
+
 function normalizeSelection(files: readonly File[]): {
   mode: "relative-path" | "basename";
   selected: SelectedFile[];
@@ -64,7 +78,7 @@ function normalizeSelection(files: readonly File[]): {
   }
 
   const relativePaths = files.map(fileRelativePath);
-  for (const path of relativePaths) assertSafeBackupPath(path);
+  for (const path of relativePaths) assertSafeSelectionPath(path);
   const roots = relativePaths.map((path) => path.split("/")[0]);
   const commonRoot = roots[0];
   if (!commonRoot || roots.some((root) => root !== commonRoot)) {
@@ -98,13 +112,13 @@ function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
   });
 }
 
-async function readFileChunks(
+async function visitFileChunks(
   selected: SelectedFile,
-  account: BackupByteAccount,
   onChunk: (chunk: Uint8Array) => void | Promise<void>,
   signal?: AbortSignal,
 ): Promise<number> {
   let offset = 0;
+  let actualBytes = 0;
   while (true) {
     throwIfAborted(signal);
     const blob = selected.file.slice(offset, offset + DIRECTORY_READ_CHUNK_BYTES);
@@ -112,11 +126,25 @@ async function readFileChunks(
     const chunk = new Uint8Array(await blobToArrayBuffer(blob));
     throwIfAborted(signal);
     if (chunk.byteLength === 0) break;
-    account.addActualBytes(selected.selectionPath, chunk.byteLength);
     await checkedCallback(() => onChunk(chunk), signal);
     offset += chunk.byteLength;
+    actualBytes += chunk.byteLength;
   }
-  return account.finishEntry(selected.selectionPath, true);
+  return actualBytes;
+}
+
+async function preflightFile(
+  selected: SelectedFile,
+  account: BackupByteAccount,
+  onChunk: (chunk: Uint8Array) => void | Promise<void>,
+  signal?: AbortSignal,
+): Promise<number> {
+  const actualBytes = await visitFileChunks(selected, async (chunk) => {
+    account.addActualBytes(selected.selectionPath, chunk.byteLength);
+    await onChunk(chunk);
+  }, signal);
+  account.finishEntry(selected.selectionPath, true);
+  return actualBytes;
 }
 
 async function readManifest(
@@ -126,7 +154,7 @@ async function readManifest(
 ): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let total = 0;
-  await readFileChunks(selected, account, (chunk) => {
+  await preflightFile(selected, account, (chunk) => {
     chunks.push(chunk);
     total += chunk.byteLength;
   }, signal);
@@ -137,14 +165,6 @@ async function readManifest(
     offset += chunk.byteLength;
   }
   return bytes;
-}
-
-function parseManifest(bytes: Uint8Array, name: string): unknown {
-  try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  } catch (error) {
-    throw new BackupValidationError(`Backup manifest ${name} contains invalid JSON`, { cause: error });
-  }
 }
 
 function findRequiredFile(selected: readonly SelectedFile[], path: string): SelectedFile {
@@ -168,7 +188,9 @@ function mediaSelection(
   if (mode === "relative-path") {
     const availablePaths = selected
       .map((item) => item.selectionPath)
-      .filter((path) => path.startsWith("media/"));
+      .filter((path) => (
+        path !== BACKUP_PROJECT_MANIFEST_NAME && path !== BACKUP_MEDIA_MANIFEST_NAME
+      ));
     return {
       availablePaths,
       byPath: new Map(
@@ -198,28 +220,6 @@ function mediaSelection(
   return { availablePaths, byPath };
 }
 
-function rejectUndeclaredSelectionFiles(
-  mode: "relative-path" | "basename",
-  selected: readonly SelectedFile[],
-  manifest: MediaBackupManifest | undefined,
-): void {
-  const expectedPaths = new Set<string>([
-    BACKUP_PROJECT_MANIFEST_NAME,
-    ...(selected.some((item) => item.selectionPath === BACKUP_MEDIA_MANIFEST_NAME)
-      ? [BACKUP_MEDIA_MANIFEST_NAME]
-      : []),
-    ...(manifest?.media.map((entry) => (
-      mode === "relative-path" ? entry.file : basename(entry.file)
-    )) ?? []),
-  ]);
-  const undeclared = selected.find((item) => !expectedPaths.has(item.selectionPath));
-  if (undeclared) {
-    throw new BackupValidationError(
-      `Backup directory contains undeclared file ${undeclared.selectionPath}`,
-    );
-  }
-}
-
 export async function readBackupDirectory(
   files: Iterable<File> | ArrayLike<File>,
   callbacks: BackupEntryCallbacks,
@@ -243,7 +243,7 @@ export async function readBackupDirectory(
     (item) => item.selectionPath === BACKUP_MEDIA_MANIFEST_NAME,
   );
   const projectBytes = await readManifest(projectFile, account, signal);
-  const projectValue = parseManifest(projectBytes, BACKUP_PROJECT_MANIFEST_NAME);
+  const projectValue = parseBackupJson(projectBytes, BACKUP_PROJECT_MANIFEST_NAME);
   const project = validateProjectEnvelope(projectValue);
 
   let mediaManifestBytes: Uint8Array | undefined;
@@ -251,19 +251,31 @@ export async function readBackupDirectory(
   let preliminaryMediaManifest: MediaBackupManifest | undefined;
   if (mediaManifestFile) {
     mediaManifestBytes = await readManifest(mediaManifestFile, account, signal);
-    mediaManifestValue = parseManifest(mediaManifestBytes, BACKUP_MEDIA_MANIFEST_NAME);
+    mediaManifestValue = parseBackupJson(mediaManifestBytes, BACKUP_MEDIA_MANIFEST_NAME);
     preliminaryMediaManifest = validateMediaManifest(
       mediaManifestValue,
       collectLocalMediaRefs(project),
     );
   }
 
-  rejectUndeclaredSelectionFiles(mode, selected, preliminaryMediaManifest);
   const mediaFiles = mediaSelection(mode, selected, preliminaryMediaManifest);
+  const preflighted = new Set<File>([
+    projectFile.file,
+    ...(mediaManifestFile ? [mediaManifestFile.file] : []),
+  ]);
+  for (const item of selected) {
+    if (!preflighted.has(item.file)) {
+      await preflightFile(item, account, () => undefined, signal);
+    }
+  }
   const validated = validateBackupManifests(
     projectValue,
     mediaManifestValue,
-    mediaFiles.availablePaths,
+    [
+      BACKUP_PROJECT_MANIFEST_NAME,
+      ...(mediaManifestFile ? [BACKUP_MEDIA_MANIFEST_NAME] : []),
+      ...mediaFiles.availablePaths,
+    ],
   );
 
   const entries: ValidatedBackupEntry[] = [{
@@ -312,22 +324,32 @@ export async function readBackupDirectory(
     await checkedCallback(() => callbacks.onProgress?.(progress), signal);
   };
 
-  const emitBufferedEntry = async (entry: ValidatedBackupEntry, bytes: Uint8Array) => {
+  const emitFileEntry = async (entry: ValidatedBackupEntry, selectedFile: SelectedFile) => {
     await checkedCallback(() => callbacks.onEntryStart?.(entry), signal);
-    if (bytes.byteLength > 0) {
-      await checkedCallback(() => callbacks.onEntryChunk?.(entry, bytes), signal);
-      bytesRead += bytes.byteLength;
+    let streamedEntryBytes = 0;
+    const actualBytes = await visitFileChunks(selectedFile, async (chunk) => {
+      const nextEntryBytes = streamedEntryBytes + chunk.byteLength;
+      const nextTotalBytes = bytesRead + chunk.byteLength;
+      if (nextEntryBytes > entry.sizeBytes || nextTotalBytes > totalBytes) {
+        throw new BackupValidationError(`Backup entry ${entry.name} changed after validation`);
+      }
+      await checkedCallback(() => callbacks.onEntryChunk?.(entry, chunk), signal);
+      streamedEntryBytes = nextEntryBytes;
+      bytesRead = nextTotalBytes;
       await reportProgress();
+    }, signal);
+    if (actualBytes !== entry.sizeBytes) {
+      throw new BackupValidationError(`Backup entry ${entry.name} changed after validation`);
     }
-    await checkedCallback(() => callbacks.onEntryEnd?.(entry, bytes.byteLength), signal);
+    await checkedCallback(() => callbacks.onEntryEnd?.(entry, actualBytes), signal);
     entriesRead += 1;
     await reportProgress();
   };
 
-  await emitBufferedEntry(entries[0], projectBytes);
+  await emitFileEntry(entries[0], projectFile);
   let nextEntryIndex = 1;
-  if (mediaManifestBytes) {
-    await emitBufferedEntry(entries[nextEntryIndex], mediaManifestBytes);
+  if (mediaManifestFile) {
+    await emitFileEntry(entries[nextEntryIndex], mediaManifestFile);
     nextEntryIndex += 1;
   }
   for (; nextEntryIndex < entries.length; nextEntryIndex += 1) {
@@ -336,15 +358,7 @@ export async function readBackupDirectory(
     if (!selectedMedia) {
       throw new BackupValidationError(`Backup is missing required media file ${entry.name}`);
     }
-    await checkedCallback(() => callbacks.onEntryStart?.(entry), signal);
-    const actualBytes = await readFileChunks(selectedMedia, account, async (chunk) => {
-      await checkedCallback(() => callbacks.onEntryChunk?.(entry, chunk), signal);
-      bytesRead += chunk.byteLength;
-      await reportProgress();
-    }, signal);
-    await checkedCallback(() => callbacks.onEntryEnd?.(entry, actualBytes), signal);
-    entriesRead += 1;
-    await reportProgress();
+    await emitFileEntry(entry, selectedMedia);
   }
   await checkedCallback(() => callbacks.onComplete?.(result), signal);
   return result;

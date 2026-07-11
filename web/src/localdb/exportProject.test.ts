@@ -630,6 +630,17 @@ describe("exportProject", () => {
     await expect(importProjectBackup(invalidJson)).rejects.toBeInstanceOf(BackupValidationError);
   });
 
+  it("rejects invalid UTF-8 manifest JSON with the shared validation error", async () => {
+    const invalidUtf8 = new File([zipSync({
+      "openmontage-project.json": new Uint8Array([
+        0x7b, 0x22, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x22, 0x3a, 0x22,
+        0xc3, 0x28, 0x22, 0x7d,
+      ]),
+    })], "invalid-utf8.omproj", { type: "application/zip" });
+
+    await expect(importProjectBackup(invalidUtf8)).rejects.toBeInstanceOf(BackupValidationError);
+  });
+
   it("rejects project envelopes with malformed shot records", async () => {
     const malformed = snapshot(null, { id: "imported" }) as unknown as Record<string, unknown>;
     malformed.storyboard = { shots: [{ id: "s1" }] };
@@ -797,6 +808,15 @@ describe("exportProject", () => {
     }))).rejects.toThrow(/undeclared|manifest/i);
 
     expect(await loadProjectSnapshot("imported")).toBeNull();
+  });
+
+  it("rejects safe non-media archive entries undeclared by the backup manifests", async () => {
+    await expect(importProjectBackup(backupFile({
+      project: snapshot(null, { id: "safe-extra" }),
+      mediaFiles: { "notes.txt": strToU8("notes") },
+    }))).rejects.toThrow(/undeclared/i);
+
+    expect(await loadProjectSnapshot("safe-extra")).toBeNull();
   });
 
   it("rejects media manifest entries whose archive file is missing", async () => {
@@ -1047,10 +1067,10 @@ describe("exportProject", () => {
       Array.from({ length: 20 }, (_, index) => [`extra/small-${index}`, strToU8(`small-${index}`)]),
     );
 
-    await importProjectBackup(backupFile({
+    await expect(importProjectBackup(backupFile({
       project: snapshot(null, { id: "small-entries" }),
       mediaFiles,
-    }));
+    }))).rejects.toThrow(/undeclared/i);
 
     expect(workerStats.created).toBe(1);
     expect(workerStats.maxActive).toBe(1);
@@ -1070,7 +1090,7 @@ describe("exportProject", () => {
     });
     await streamAsSingleChunk(backup);
 
-    await importProjectBackup(backup);
+    await expect(importProjectBackup(backup)).rejects.toThrow(/undeclared/i);
 
     expect(workerStats.created).toBe(4);
     expect(workerStats.maxActive).toBeLessThanOrEqual(2);

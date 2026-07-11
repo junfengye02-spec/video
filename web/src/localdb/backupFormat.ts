@@ -344,6 +344,15 @@ export function validateProjectEnvelope(value: unknown): ShortDramaProjectRespon
   return normalizeAndValidateBackupSnapshot(value.project);
 }
 
+export function parseBackupJson(bytes: Uint8Array, name: string): unknown {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text);
+  } catch (error) {
+    throw validationError(`Backup manifest ${name} contains invalid UTF-8 JSON`, error);
+  }
+}
+
 export function validateMediaManifest(
   value: unknown,
   requiredRefs: ReadonlySet<LocalMediaRef>,
@@ -409,11 +418,21 @@ export function validateMediaManifest(
 export function validateBackupManifests(
   projectEnvelope: unknown,
   mediaManifestValue: unknown | undefined,
-  retainedPaths: Iterable<string>,
+  entryPaths: Iterable<string>,
 ): Pick<ValidatedBackup, "project" | "mediaManifest"> {
   const project = validateProjectEnvelope(projectEnvelope);
   const requiredRefs = collectLocalMediaRefs(project);
-  const mediaPaths = [...retainedPaths].filter((path) => path.startsWith("media/"));
+  const paths: string[] = [];
+  const seenPaths = new Set<string>();
+  for (const path of entryPaths) {
+    assertSafeBackupPath(path);
+    if (seenPaths.has(path)) {
+      throw validationError(`Backup contains duplicate entry ${path}`);
+    }
+    seenPaths.add(path);
+    paths.push(path);
+  }
+  const mediaPaths = paths.filter((path) => path.startsWith("media/"));
   if (requiredRefs.size > 0 && mediaManifestValue === undefined) {
     throw validationError("Backup is missing the media manifest required by local media references");
   }
@@ -423,5 +442,14 @@ export function validateBackupManifests(
   const mediaManifest = mediaManifestValue === undefined
     ? ({ version: 1, media: [] } satisfies MediaBackupManifest)
     : validateMediaManifest(mediaManifestValue, requiredRefs, mediaPaths);
+  const declaredPaths = new Set<string>([
+    BACKUP_PROJECT_MANIFEST_NAME,
+    ...(mediaManifestValue === undefined ? [] : [BACKUP_MEDIA_MANIFEST_NAME]),
+    ...mediaManifest.media.map((entry) => entry.file),
+  ]);
+  const undeclared = paths.find((path) => !declaredPaths.has(path));
+  if (undeclared) {
+    throw validationError(`Backup contains undeclared file ${undeclared}`);
+  }
   return { project, mediaManifest };
 }
