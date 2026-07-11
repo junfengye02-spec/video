@@ -54,6 +54,7 @@ export class BackupWorkerProtocolError extends Error {
 }
 
 const WORKER_IDLE_TIMEOUT_MS = 15_000;
+const MAX_QUEUED_WORKER_RESPONSES = 16;
 
 type ActiveEntry = {
   name: string;
@@ -178,6 +179,7 @@ export function readBackupArchive(
     const seenEntries = new Set<string>();
     let tail = Promise.resolve();
     let queuedResponses = 0;
+    let outstandingChunk: { name: string; sequence: number } | null = null;
     let timeoutId: ReturnType<typeof setTimeout>;
 
     const cleanup = () => {
@@ -211,6 +213,7 @@ export function readBackupArchive(
       if (signal?.aborted) throw abortError();
       await callback?.();
       if (signal?.aborted) throw abortError();
+      if (settled) throw protocol("Backup Worker protocol ended during a consumer callback");
     };
     const makeEntry = (name: string, sizeBytes: number): ValidatedBackupEntry => {
       if (name === BACKUP_PROJECT_MANIFEST_NAME) {
@@ -304,7 +307,11 @@ export function readBackupArchive(
         }
         case "entry-chunk": {
           const current = activeEntry;
-          if (!current || current.name !== message.name || message.sequence !== nextSequence) {
+          const pending = outstandingChunk;
+          if (
+            !pending || pending.name !== message.name || pending.sequence !== message.sequence ||
+            !current || current.name !== message.name || message.sequence !== nextSequence
+          ) {
             throw protocol("Backup Worker sent an out-of-order entry chunk");
           }
           const chunk = new Uint8Array(message.chunk);
@@ -325,7 +332,18 @@ export function readBackupArchive(
             await checkedCallback(() => callbacks.onEntryStart?.(current.entry!));
           }
           await checkedCallback(() => callbacks.onEntryChunk?.(current.entry!, chunk));
-          worker.postMessage({ type: "ack", requestId, sequence: message.sequence });
+          try {
+            worker.postMessage({ type: "ack", requestId, sequence: message.sequence });
+          } catch (error) {
+            throw protocol("Backup Worker chunk ACK could not be posted", error);
+          }
+          if (
+            !outstandingChunk || outstandingChunk.name !== message.name ||
+            outstandingChunk.sequence !== message.sequence
+          ) {
+            throw protocol("Backup Worker chunk ACK state was corrupted");
+          }
+          outstandingChunk = null;
           nextSequence += 1;
           return;
         }
@@ -349,6 +367,9 @@ export function readBackupArchive(
         case "complete": {
           if (activeEntry || !project || projectValue === undefined) {
             throw protocol("Backup Worker completed before all required entries");
+          }
+          if (lastCompressedBytes !== file.size || lastEntryCount !== entries.length) {
+            throw protocol("Backup Worker completed without final archive progress");
           }
           const validated = validateBackupManifests(
             projectValue,
@@ -377,11 +398,31 @@ export function readBackupArchive(
     signal?.addEventListener("abort", onAbort, { once: true });
     worker.onmessage = (event: MessageEvent<unknown>) => {
       if (settled) return;
+      let message: BackupWorkerResponse;
+      try {
+        message = validateResponse(event.data);
+        if (message.requestId !== requestId) {
+          throw protocol("Backup Worker response has the wrong request ID");
+        }
+        if (outstandingChunk) {
+          throw protocol("Backup Worker responded before its retained chunk was acknowledged");
+        }
+        if (queuedResponses >= MAX_QUEUED_WORKER_RESPONSES) {
+          throw protocol("Backup Worker response queue exceeded its bound");
+        }
+        if (message.type === "entry-chunk") {
+          outstandingChunk = { name: message.name, sequence: message.sequence };
+        }
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      started = true;
       queuedResponses += 1;
       clearTimeout(timeoutId);
       tail = tail.then(async () => {
         queuedResponses -= 1;
-        await handle(event.data);
+        await handle(message);
         if (!settled && queuedResponses === 0) armTimeout();
       }).catch(fail);
     };

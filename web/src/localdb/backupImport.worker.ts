@@ -1,4 +1,4 @@
-import { Unzip, UnzipInflate, type UnzipFile } from "fflate";
+import { Inflate } from "fflate";
 import {
   BACKUP_LIMITS,
   BACKUP_MEDIA_MANIFEST_NAME,
@@ -12,6 +12,16 @@ import {
 import type { BackupWorkerRequest, BackupWorkerResponse } from "./backupArchiveClient";
 
 const ARCHIVE_READ_CHUNK_BYTES = 64 * 1024;
+const ZIP_LOCAL_FILE_SIGNATURE = 0x04034b50;
+const ZIP_DATA_DESCRIPTOR_SIGNATURE = 0x08074b50;
+const ZIP_CENTRAL_FILE_SIGNATURE = 0x02014b50;
+const ZIP_END_SIGNATURE = 0x06054b50;
+const ZIP_END_MIN_BYTES = 22;
+const ZIP64_EXTRA_ID = 0x0001;
+const ZIP_DATA_DESCRIPTOR_FLAG = 0x0008;
+const ZIP_UTF8_FLAG = 0x0800;
+const ZIP_ENCRYPTED_FLAG = 0x0001;
+const ZIP_SUPPORTED_FLAGS = ZIP_DATA_DESCRIPTOR_FLAG | ZIP_UTF8_FLAG;
 
 export type BackupImportWorkerScope = {
   addEventListener(
@@ -32,37 +42,43 @@ type RequestState = {
   cancelled: boolean;
   sequence: number;
   pendingAck: PendingAck | null;
-  reader: Pick<ReadableStreamDefaultReader<Uint8Array>, "cancel"> | null;
-  activeFiles: Set<UnzipFile>;
 };
 
-type InventoryEntry = {
+type IndexedEntry = {
   name: string;
-  contentLength: number | null;
+  rawName: Uint8Array;
+  flags: number;
+  method: 0 | 8;
+  crc32: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localHeaderOffset: number;
+  payloadOffset: number;
+  endOffset: number;
 };
 
-type PreflightResult = {
+type ArchiveIndex = {
+  entries: IndexedEntry[];
+  byName: Map<string, IndexedEntry>;
+  account: BackupByteAccount;
+};
+
+type PreflightResult = ArchiveIndex & {
   projectManifest: Uint8Array;
   mediaManifest: Uint8Array | null;
   media: MediaBackupManifest;
-  inventory: InventoryEntry[];
 };
-
-type OutputEvent =
-  | { type: "start"; name: string; contentLength: number | null }
-  | { type: "chunk"; name: string; chunk: Uint8Array }
-  | { type: "end"; name: string; actualBytes: number };
 
 class RequestCancelledError extends Error {}
 class WorkerRequestProtocolError extends Error {}
 
-const ZIP_CENTRAL_FILE_SIGNATURE = 0x02014b50;
-const ZIP_END_SIGNATURE = 0x06054b50;
-const ZIP_END_MIN_BYTES = 22;
-const ZIP_MAX_COMMENT_BYTES = 0xffff;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && actual.every((key) => keys.includes(key));
 }
 
 function isFile(value: unknown): value is File {
@@ -93,117 +109,337 @@ function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
   });
 }
 
-async function readBlobBytes(blob: Blob): Promise<Uint8Array> {
-  return new Uint8Array(await blobToArrayBuffer(blob));
+async function readExact(
+  file: File,
+  start: number,
+  length: number,
+  label: string,
+): Promise<Uint8Array> {
+  if (
+    !Number.isSafeInteger(start) || start < 0 ||
+    !Number.isSafeInteger(length) || length < 0 ||
+    start + length > file.size
+  ) {
+    throw new BackupValidationError(`Backup ${label} is outside the archive bounds`);
+  }
+  const bytes = new Uint8Array(await blobToArrayBuffer(file.slice(start, start + length)));
+  if (bytes.byteLength !== length) {
+    throw new BackupValidationError(`Backup ${label} is truncated`);
+  }
+  return bytes;
 }
 
-async function readCentralDirectory(file: File): Promise<Map<string, number>> {
-  const tailStart = Math.max(0, file.size - ZIP_END_MIN_BYTES - ZIP_MAX_COMMENT_BYTES);
-  const tail = await readBlobBytes(file.slice(tailStart));
-  const tailView = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
-  let endOffset = -1;
-  for (let offset = tail.byteLength - ZIP_END_MIN_BYTES; offset >= 0; offset -= 1) {
-    if (tailView.getUint32(offset, true) === ZIP_END_SIGNATURE) {
-      const commentLength = tailView.getUint16(offset + 20, true);
-      if (offset + ZIP_END_MIN_BYTES + commentLength === tail.byteLength) {
-        endOffset = offset;
-        break;
-      }
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
+}
+
+function validateExtra(extra: Uint8Array, label: string): void {
+  const view = new DataView(extra.buffer, extra.byteOffset, extra.byteLength);
+  let offset = 0;
+  while (offset < extra.byteLength) {
+    if (offset + 4 > extra.byteLength) {
+      throw new BackupValidationError(`Backup ${label} extra fields are malformed`);
     }
+    const id = view.getUint16(offset, true);
+    const size = view.getUint16(offset + 2, true);
+    offset += 4;
+    if (offset + size > extra.byteLength) {
+      throw new BackupValidationError(`Backup ${label} extra fields are truncated`);
+    }
+    if (id === ZIP64_EXTRA_ID) {
+      throw new BackupValidationError("ZIP64 backup entries are unsupported");
+    }
+    offset += size;
   }
-  if (endOffset < 0) throw new BackupValidationError("Backup ZIP end record is missing");
-  const diskNumber = tailView.getUint16(endOffset + 4, true);
-  const centralDisk = tailView.getUint16(endOffset + 6, true);
-  const entriesOnDisk = tailView.getUint16(endOffset + 8, true);
-  const entryCount = tailView.getUint16(endOffset + 10, true);
-  const centralBytes = tailView.getUint32(endOffset + 12, true);
-  const centralOffset = tailView.getUint32(endOffset + 16, true);
+}
+
+function validateFlags(flags: number, name: string): void {
+  if ((flags & ZIP_ENCRYPTED_FLAG) !== 0) {
+    throw new BackupValidationError(`Encrypted backup entry ${name} is unsupported`);
+  }
+  if ((flags & ~ZIP_SUPPORTED_FLAGS) !== 0) {
+    throw new BackupValidationError(`Backup entry ${name} uses unsupported ZIP flags`);
+  }
+}
+
+function decodeEntryName(rawName: Uint8Array, flags: number): string {
+  if ((flags & ZIP_UTF8_FLAG) === 0 && rawName.some((value) => value > 0x7f)) {
+    throw new BackupValidationError("Backup entry names must be ASCII or explicitly UTF-8");
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(rawName);
+  } catch (error) {
+    throw new BackupValidationError("Backup contains an invalid UTF-8 entry name", { cause: error });
+  }
+}
+
+async function readEndRecord(file: File): Promise<{
+  entryCount: number;
+  centralOffset: number;
+  centralBytes: number;
+  endOffset: number;
+}> {
+  const endOffset = file.size - ZIP_END_MIN_BYTES;
+  const end = await readExact(file, endOffset, ZIP_END_MIN_BYTES, "ZIP end record");
+  const view = new DataView(end.buffer, end.byteOffset, end.byteLength);
+  if (view.getUint32(0, true) !== ZIP_END_SIGNATURE || view.getUint16(20, true) !== 0) {
+    throw new BackupValidationError("Backup ZIP end record or archive comment is unsupported");
+  }
+  const diskNumber = view.getUint16(4, true);
+  const centralDisk = view.getUint16(6, true);
+  const entriesOnDisk = view.getUint16(8, true);
+  const entryCount = view.getUint16(10, true);
+  const centralBytes = view.getUint32(12, true);
+  const centralOffset = view.getUint32(16, true);
   if (
     diskNumber !== 0 || centralDisk !== 0 || entriesOnDisk !== entryCount ||
     entryCount === 0xffff || centralBytes === 0xffffffff || centralOffset === 0xffffffff
   ) {
     throw new BackupValidationError("Multi-disk and ZIP64 backups are unsupported");
   }
-  if (
-    entryCount > BACKUP_LIMITS.maxEntries ||
-    centralOffset + centralBytes > tailStart + endOffset
-  ) {
-    throw new BackupValidationError("Backup central directory is outside the archive limits");
+  if (entryCount > BACKUP_LIMITS.maxEntries) {
+    throw new BackupValidationError("Backup entry count exceeds the archive entry limit");
   }
+  if (centralOffset + centralBytes !== endOffset) {
+    throw new BackupValidationError("Backup central directory bounds are inconsistent");
+  }
+  return { entryCount, centralOffset, centralBytes, endOffset };
+}
 
-  const central = await readBlobBytes(file.slice(centralOffset, centralOffset + centralBytes));
-  if (central.byteLength !== centralBytes) {
-    throw new BackupValidationError("Backup central directory is truncated");
-  }
-  const view = new DataView(central.buffer, central.byteOffset, central.byteLength);
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  const sizes = new Map<string, number>();
-  let offset = 0;
-  for (let index = 0; index < entryCount; index += 1) {
-    if (offset + 46 > central.byteLength || view.getUint32(offset, true) !== ZIP_CENTRAL_FILE_SIGNATURE) {
+async function readCentralEntries(
+  file: File,
+  end: Awaited<ReturnType<typeof readEndRecord>>,
+): Promise<IndexedEntry[]> {
+  const entries: IndexedEntry[] = [];
+  const seenNames = new Set<string>();
+  let offset = end.centralOffset;
+  for (let index = 0; index < end.entryCount; index += 1) {
+    const header = await readExact(file, offset, 46, "central directory header");
+    const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    if (view.getUint32(0, true) !== ZIP_CENTRAL_FILE_SIGNATURE) {
       throw new BackupValidationError("Backup central directory entry is malformed");
     }
-    const sizeBytes = view.getUint32(offset + 24, true);
-    const nameLength = view.getUint16(offset + 28, true);
-    const extraLength = view.getUint16(offset + 30, true);
-    const commentLength = view.getUint16(offset + 32, true);
-    const nextOffset = offset + 46 + nameLength + extraLength + commentLength;
-    if (sizeBytes === 0xffffffff || nextOffset > central.byteLength) {
-      throw new BackupValidationError("ZIP64 or truncated backup entries are unsupported");
+    const flags = view.getUint16(8, true);
+    const rawMethod = view.getUint16(10, true);
+    const crc32 = view.getUint32(16, true);
+    const compressedSize = view.getUint32(20, true);
+    const uncompressedSize = view.getUint32(24, true);
+    const nameLength = view.getUint16(28, true);
+    const extraLength = view.getUint16(30, true);
+    const commentLength = view.getUint16(32, true);
+    const diskStart = view.getUint16(34, true);
+    const localHeaderOffset = view.getUint32(42, true);
+    if (
+      compressedSize === 0xffffffff || uncompressedSize === 0xffffffff ||
+      diskStart === 0xffff || localHeaderOffset === 0xffffffff
+    ) {
+      throw new BackupValidationError("ZIP64 backup entries are unsupported");
     }
-    let name: string;
-    try {
-      name = decoder.decode(central.subarray(offset + 46, offset + 46 + nameLength));
-    } catch (error) {
-      throw new BackupValidationError("Backup central directory contains an invalid entry name", {
-        cause: error,
-      });
+    if (diskStart !== 0) throw new BackupValidationError("Multi-disk backup entries are unsupported");
+    const variableLength = nameLength + extraLength;
+    const variable = await readExact(file, offset + 46, variableLength, "central entry metadata");
+    const rawName = variable.slice(0, nameLength);
+    const extra = variable.subarray(nameLength);
+    const name = decodeEntryName(rawName, flags);
+    validateFlags(flags, name);
+    validateExtra(extra, `central entry ${name}`);
+    if (rawMethod !== 0 && rawMethod !== 8) {
+      throw new BackupValidationError(`Backup entry ${name} uses unsupported compression method`);
     }
-    if (sizes.has(name)) throw new BackupValidationError(`Backup contains duplicate entry ${name}`);
-    sizes.set(name, sizeBytes);
-    offset = nextOffset;
+    if (rawMethod === 0 && compressedSize !== uncompressedSize) {
+      throw new BackupValidationError(`Stored backup entry ${name} has inconsistent sizes`);
+    }
+    if (seenNames.has(name)) throw new BackupValidationError(`Backup contains duplicate entry ${name}`);
+    seenNames.add(name);
+    entries.push({
+      name,
+      rawName,
+      flags,
+      method: rawMethod,
+      crc32,
+      compressedSize,
+      uncompressedSize,
+      localHeaderOffset,
+      payloadOffset: 0,
+      endOffset: 0,
+    });
+    offset += 46 + variableLength + commentLength;
+    if (offset > end.endOffset) {
+      throw new BackupValidationError("Backup central directory entry exceeds its bounds");
+    }
   }
-  if (offset !== central.byteLength) {
-    throw new BackupValidationError("Backup central directory has trailing records");
+  if (offset !== end.endOffset || offset - end.centralOffset !== end.centralBytes) {
+    throw new BackupValidationError("Backup central directory inventory is incomplete");
   }
-  return sizes;
+  return entries;
 }
 
-async function visitArchiveChunks(
+function isZeroOr(value: number, expected: number): boolean {
+  return value === 0 || value === expected;
+}
+
+async function validateLocalEntry(file: File, entry: IndexedEntry): Promise<void> {
+  const header = await readExact(file, entry.localHeaderOffset, 30, `local header ${entry.name}`);
+  const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+  if (view.getUint32(0, true) !== ZIP_LOCAL_FILE_SIGNATURE) {
+    throw new BackupValidationError(`Backup local header for ${entry.name} is malformed`);
+  }
+  const flags = view.getUint16(6, true);
+  const method = view.getUint16(8, true);
+  const crc32 = view.getUint32(14, true);
+  const compressedSize = view.getUint32(18, true);
+  const uncompressedSize = view.getUint32(22, true);
+  const nameLength = view.getUint16(26, true);
+  const extraLength = view.getUint16(28, true);
+  if (flags !== entry.flags || method !== entry.method) {
+    throw new BackupValidationError(`Backup local header for ${entry.name} disagrees with central metadata`);
+  }
+  validateFlags(flags, entry.name);
+  const variable = await readExact(
+    file,
+    entry.localHeaderOffset + 30,
+    nameLength + extraLength,
+    `local entry metadata ${entry.name}`,
+  );
+  const rawName = variable.slice(0, nameLength);
+  if (!bytesEqual(rawName, entry.rawName)) {
+    throw new BackupValidationError(`Backup local filename for ${entry.name} disagrees with central metadata`);
+  }
+  validateExtra(variable.subarray(nameLength), `local entry ${entry.name}`);
+  entry.payloadOffset = entry.localHeaderOffset + 30 + nameLength + extraLength;
+  const payloadEnd = entry.payloadOffset + entry.compressedSize;
+  if (!Number.isSafeInteger(payloadEnd) || payloadEnd > file.size) {
+    throw new BackupValidationError(`Backup payload for ${entry.name} is outside the archive bounds`);
+  }
+  if ((entry.flags & ZIP_DATA_DESCRIPTOR_FLAG) === 0) {
+    if (
+      crc32 !== entry.crc32 || compressedSize !== entry.compressedSize ||
+      uncompressedSize !== entry.uncompressedSize
+    ) {
+      throw new BackupValidationError(`Backup local sizes or CRC for ${entry.name} disagree with central metadata`);
+    }
+    entry.endOffset = payloadEnd;
+    return;
+  }
+  if (
+    !isZeroOr(crc32, entry.crc32) ||
+    !isZeroOr(compressedSize, entry.compressedSize) ||
+    !isZeroOr(uncompressedSize, entry.uncompressedSize)
+  ) {
+    throw new BackupValidationError(`Backup descriptor placeholders for ${entry.name} are inconsistent`);
+  }
+  const first = await readExact(file, payloadEnd, 4, `data descriptor ${entry.name}`);
+  const firstValue = new DataView(first.buffer, first.byteOffset, first.byteLength).getUint32(0, true);
+  const hasSignature = firstValue === ZIP_DATA_DESCRIPTOR_SIGNATURE;
+  const remainder = await readExact(
+    file,
+    payloadEnd + 4,
+    hasSignature ? 12 : 8,
+    `data descriptor ${entry.name}`,
+  );
+  const descriptor = new DataView(remainder.buffer, remainder.byteOffset, remainder.byteLength);
+  const descriptorCrc = hasSignature ? descriptor.getUint32(0, true) : firstValue;
+  const descriptorCompressed = descriptor.getUint32(hasSignature ? 4 : 0, true);
+  const descriptorUncompressed = descriptor.getUint32(hasSignature ? 8 : 4, true);
+  if (
+    descriptorCrc !== entry.crc32 || descriptorCompressed !== entry.compressedSize ||
+    descriptorUncompressed !== entry.uncompressedSize
+  ) {
+    throw new BackupValidationError(`Backup data descriptor for ${entry.name} disagrees with central metadata`);
+  }
+  entry.endOffset = payloadEnd + (hasSignature ? 16 : 12);
+}
+
+async function buildArchiveIndex(file: File): Promise<ArchiveIndex> {
+  const end = await readEndRecord(file);
+  const entries = await readCentralEntries(file, end);
+  for (const entry of entries) await validateLocalEntry(file, entry);
+  const byOffset = [...entries].sort((left, right) => left.localHeaderOffset - right.localHeaderOffset);
+  for (let index = 0; index < byOffset.length; index += 1) {
+    const entry = byOffset[index];
+    const nextOffset = byOffset[index + 1]?.localHeaderOffset ?? end.centralOffset;
+    if (entry.localHeaderOffset >= end.centralOffset || entry.endOffset > nextOffset) {
+      throw new BackupValidationError(`Backup entry ${entry.name} overlaps another ZIP structure`);
+    }
+  }
+  const account = new BackupByteAccount();
+  for (const entry of entries) account.registerEntry(entry.name, entry.uncompressedSize);
+  return { entries, byName: new Map(entries.map((entry) => [entry.name, entry])), account };
+}
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < table.length; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value & 1) !== 0 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function updateCrc32(crc: number, bytes: Uint8Array): number {
+  let value = crc;
+  for (const byte of bytes) value = CRC_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return value >>> 0;
+}
+
+async function streamEntry(
   file: File,
+  entry: IndexedEntry,
   state: RequestState,
-  onChunk: (chunk: Uint8Array, final: boolean, bytesRead: number) => void | Promise<void>,
-): Promise<void> {
-  let offset = 0;
-  while (offset < file.size) {
-    throwIfCancelled(state);
-    const blob = file.slice(offset, offset + ARCHIVE_READ_CHUNK_BYTES);
-    const chunk = new Uint8Array(await blobToArrayBuffer(blob));
-    throwIfCancelled(state);
-    if (chunk.byteLength === 0) {
-      throw new BackupValidationError("Backup archive ended before its declared compressed size");
+  account: BackupByteAccount,
+  onChunk: (chunk: Uint8Array) => void | Promise<void>,
+): Promise<number> {
+  let crc = 0xffffffff;
+  let actualBytes = 0;
+  const outputQueue: Uint8Array[] = [];
+  let decoderFinal = entry.method === 0;
+  const acceptOutput = (data: Uint8Array) => {
+    if (data.byteLength === 0) return;
+    account.addActualBytes(entry.name, data.byteLength);
+    actualBytes += data.byteLength;
+    crc = updateCrc32(crc, data);
+    outputQueue.push(data.slice());
+  };
+  const inflate = entry.method === 8
+    ? new Inflate((data, final) => {
+      acceptOutput(data);
+      if (final) decoderFinal = true;
+    })
+    : null;
+  const drainOutput = async () => {
+    while (outputQueue.length > 0) {
+      throwIfCancelled(state);
+      await onChunk(outputQueue.shift()!);
     }
-    offset += chunk.byteLength;
-    await onChunk(chunk, offset === file.size, offset);
+  };
+  let compressedRead = 0;
+  while (compressedRead < entry.compressedSize) {
+    throwIfCancelled(state);
+    const length = Math.min(ARCHIVE_READ_CHUNK_BYTES, entry.compressedSize - compressedRead);
+    const chunk = await readExact(
+      file,
+      entry.payloadOffset + compressedRead,
+      length,
+      `payload ${entry.name}`,
+    );
+    compressedRead += length;
+    if (entry.method === 0) acceptOutput(chunk);
+    else inflate!.push(chunk, compressedRead === entry.compressedSize);
+    await drainOutput();
   }
-  if (file.size === 0) await onChunk(new Uint8Array(0), true, 0);
-}
-
-function terminateState(state: RequestState, reason?: unknown): void {
-  if (state.cancelled) return;
-  state.cancelled = true;
-  void state.reader?.cancel(reason).catch(() => undefined);
-  state.reader = null;
-  for (const file of state.activeFiles) {
-    try {
-      file.terminate();
-    } catch {
-      // Preserve the original cancellation or decoder failure.
-    }
+  if (entry.method === 8 && entry.compressedSize === 0) {
+    inflate!.push(new Uint8Array(0), true);
+    await drainOutput();
   }
-  state.activeFiles.clear();
-  state.pendingAck?.reject(reason ?? new RequestCancelledError());
-  state.pendingAck = null;
+  if (!decoderFinal) throw new BackupValidationError(`Backup entry ${entry.name} did not finish inflating`);
+  const finishedBytes = account.finishEntry(entry.name, true);
+  if (finishedBytes !== actualBytes || ((crc ^ 0xffffffff) >>> 0) !== entry.crc32) {
+    throw new BackupValidationError(`Backup entry ${entry.name} failed its CRC32 integrity check`);
+  }
+  return actualBytes;
 }
 
 function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array {
@@ -216,126 +452,45 @@ function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array 
   return result;
 }
 
-async function preflightArchive(
-  scope: BackupImportWorkerScope,
+async function readManifest(
   file: File,
+  entry: IndexedEntry,
   state: RequestState,
-): Promise<PreflightResult> {
-  const account = new BackupByteAccount();
-  const inventory: InventoryEntry[] = [];
-  const manifestChunks = new Map<string, Uint8Array[]>();
-  const manifestSizes = new Map<string, number>();
-  let decoderFailure: unknown;
-  let pendingManifests = 0;
-  const unzip = new Unzip((entry) => {
-    if (decoderFailure || state.cancelled) return;
-    try {
-      const declared = entry.originalSize === undefined ? null : entry.originalSize;
-      account.registerEntry(entry.name, declared);
-      inventory.push({ name: entry.name, contentLength: declared });
-      if (
-        entry.name !== BACKUP_PROJECT_MANIFEST_NAME &&
-        entry.name !== BACKUP_MEDIA_MANIFEST_NAME
-      ) return;
-
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      manifestChunks.set(entry.name, chunks);
-      pendingManifests += 1;
-      state.activeFiles.add(entry);
-      entry.ondata = (error, data, final) => {
-        if (decoderFailure || state.cancelled) return;
-        try {
-          if (error) throw error;
-          account.addActualBytes(entry.name, data.byteLength);
-          if (data.byteLength > 0) {
-            const stable = data.slice();
-            chunks.push(stable);
-            size += stable.byteLength;
-          }
-          if (final) {
-            account.finishEntry(entry.name);
-            manifestSizes.set(entry.name, size);
-            pendingManifests -= 1;
-            state.activeFiles.delete(entry);
-          }
-        } catch (error_) {
-          decoderFailure = error_;
-          try { entry.terminate(); } catch { /* preserve decoder failure */ }
-          state.activeFiles.delete(entry);
-        }
-      };
-      entry.start();
-    } catch (error) {
-      decoderFailure = error;
-    }
+  account: BackupByteAccount,
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  await streamEntry(file, entry, state, account, (chunk) => {
+    chunks.push(chunk);
+    total += chunk.byteLength;
   });
-  unzip.register(UnzipInflate);
+  return concatChunks(chunks, total);
+}
 
-  try {
-    await visitArchiveChunks(file, state, (chunk, final, bytesRead) => {
-      if (decoderFailure) throw decoderFailure;
-      unzip.push(chunk, final);
-      if (decoderFailure) throw decoderFailure;
-      scope.postMessage({
-        type: "progress",
-        requestId: state.requestId,
-        compressedBytes: bytesRead,
-        entries: inventory.length,
-      });
-    });
-  } catch (error) {
-    for (const entry of state.activeFiles) {
-      try { entry.terminate(); } catch { /* preserve read failure */ }
-    }
-    state.activeFiles.clear();
-    throw asValidationError(error);
-  }
-  if (decoderFailure) throw asValidationError(decoderFailure);
-  if (pendingManifests !== 0) {
-    throw new BackupValidationError("Backup archive ended before a manifest completed");
-  }
-
-  const projectChunks = manifestChunks.get(BACKUP_PROJECT_MANIFEST_NAME);
-  const projectSize = manifestSizes.get(BACKUP_PROJECT_MANIFEST_NAME);
-  if (!projectChunks || projectSize === undefined) {
+async function preflightArchive(file: File, state: RequestState): Promise<PreflightResult> {
+  const index = await buildArchiveIndex(file);
+  const projectEntry = index.byName.get(BACKUP_PROJECT_MANIFEST_NAME);
+  if (!projectEntry) {
     throw new BackupValidationError(`Backup is missing ${BACKUP_PROJECT_MANIFEST_NAME}`);
   }
-  const projectManifest = concatChunks(projectChunks, projectSize);
-  const mediaChunks = manifestChunks.get(BACKUP_MEDIA_MANIFEST_NAME);
-  const mediaSize = manifestSizes.get(BACKUP_MEDIA_MANIFEST_NAME);
-  const mediaManifest = mediaChunks && mediaSize !== undefined
-    ? concatChunks(mediaChunks, mediaSize)
+  const projectManifest = await readManifest(file, projectEntry, state, index.account);
+  const mediaEntry = index.byName.get(BACKUP_MEDIA_MANIFEST_NAME);
+  const mediaManifest = mediaEntry
+    ? await readManifest(file, mediaEntry, state, index.account)
     : null;
-  const centralSizes = await readCentralDirectory(file);
-  if (
-    centralSizes.size !== inventory.length ||
-    inventory.some((entry) => !centralSizes.has(entry.name))
-  ) {
-    throw new BackupValidationError("Backup local headers and central directory do not match");
-  }
-  const declaredAccount = new BackupByteAccount();
-  for (const entry of inventory) {
-    entry.contentLength = centralSizes.get(entry.name)!;
-    declaredAccount.registerEntry(entry.name, entry.contentLength);
-  }
-  declaredAccount.addActualBytes(BACKUP_PROJECT_MANIFEST_NAME, projectManifest.byteLength);
-  declaredAccount.finishEntry(BACKUP_PROJECT_MANIFEST_NAME, true);
-  if (mediaManifest) {
-    declaredAccount.addActualBytes(BACKUP_MEDIA_MANIFEST_NAME, mediaManifest.byteLength);
-    declaredAccount.finishEntry(BACKUP_MEDIA_MANIFEST_NAME, true);
-  }
   const validated = validateBackupManifests(
     parseBackupJson(projectManifest, BACKUP_PROJECT_MANIFEST_NAME),
     mediaManifest ? parseBackupJson(mediaManifest, BACKUP_MEDIA_MANIFEST_NAME) : undefined,
-    inventory.map((entry) => entry.name),
+    index.entries.map((entry) => entry.name),
   );
-  return {
-    projectManifest,
-    mediaManifest,
-    media: validated.mediaManifest,
-    inventory,
-  };
+  return { ...index, projectManifest, mediaManifest, media: validated.mediaManifest };
+}
+
+function terminateState(state: RequestState, reason?: unknown): void {
+  if (state.cancelled) return;
+  state.cancelled = true;
+  state.pendingAck?.reject(reason ?? new RequestCancelledError());
+  state.pendingAck = null;
 }
 
 async function sendChunk(
@@ -350,13 +505,7 @@ async function sendChunk(
   const acknowledged = new Promise<void>((resolve, reject) => {
     state.pendingAck = { sequence, resolve, reject };
   });
-  scope.postMessage({
-    type: "entry-chunk",
-    requestId: state.requestId,
-    name,
-    sequence,
-    chunk,
-  }, [chunk]);
+  scope.postMessage({ type: "entry-chunk", requestId: state.requestId, name, sequence, chunk }, [chunk]);
   await acknowledged;
   throwIfCancelled(state);
   state.sequence += 1;
@@ -375,12 +524,7 @@ async function sendBufferedEntry(
     contentLength: bytes.byteLength,
   });
   if (bytes.byteLength > 0) await sendChunk(scope, state, name, bytes);
-  scope.postMessage({
-    type: "entry-end",
-    requestId: state.requestId,
-    name,
-    actualBytes: bytes.byteLength,
-  });
+  scope.postMessage({ type: "entry-end", requestId: state.requestId, name, actualBytes: bytes.byteLength });
 }
 
 async function streamMediaPass(
@@ -389,106 +533,24 @@ async function streamMediaPass(
   preflight: PreflightResult,
   state: RequestState,
 ): Promise<void> {
-  const declaredMedia = new Map(preflight.media.media.map((entry) => [entry.file, entry]));
-  const inventoryByName = new Map(preflight.inventory.map((entry) => [entry.name, entry]));
-  const seen = new Set<string>();
-  const account = new BackupByteAccount();
-  for (const entry of preflight.inventory) account.registerEntry(entry.name, entry.contentLength);
-  account.addActualBytes(BACKUP_PROJECT_MANIFEST_NAME, preflight.projectManifest.byteLength);
-  account.finishEntry(BACKUP_PROJECT_MANIFEST_NAME);
-  if (preflight.mediaManifest) {
-    account.addActualBytes(BACKUP_MEDIA_MANIFEST_NAME, preflight.mediaManifest.byteLength);
-    account.finishEntry(BACKUP_MEDIA_MANIFEST_NAME);
-  }
-
-  const outputQueue: OutputEvent[] = [];
-  let decoderFailure: unknown;
-  let pendingMedia = 0;
-  const unzip = new Unzip((entry) => {
-    if (decoderFailure || state.cancelled || !declaredMedia.has(entry.name)) return;
-    try {
-      if (seen.has(entry.name)) throw new BackupValidationError(`Backup contains duplicate entry ${entry.name}`);
-      seen.add(entry.name);
-      const inventoryEntry = inventoryByName.get(entry.name);
-      const contentLength = inventoryEntry?.contentLength ?? null;
-      if (contentLength === null) {
-        throw new BackupValidationError(`Backup media entry ${entry.name} has no declared size`);
-      }
-      outputQueue.push({ type: "start", name: entry.name, contentLength });
-      pendingMedia += 1;
-      state.activeFiles.add(entry);
-      entry.ondata = (error, data, final) => {
-        if (decoderFailure || state.cancelled) return;
-        try {
-          if (error) throw error;
-          account.addActualBytes(entry.name, data.byteLength);
-          if (data.byteLength > 0) {
-            outputQueue.push({ type: "chunk", name: entry.name, chunk: data.slice() });
-          }
-          if (final) {
-            const actualBytes = account.finishEntry(entry.name, true);
-            outputQueue.push({ type: "end", name: entry.name, actualBytes });
-            pendingMedia -= 1;
-            state.activeFiles.delete(entry);
-          }
-        } catch (error_) {
-          decoderFailure = error_;
-          try { entry.terminate(); } catch { /* preserve decoder failure */ }
-          state.activeFiles.delete(entry);
-        }
-      };
-      entry.start();
-    } catch (error) {
-      decoderFailure = error;
-    }
-  });
-  unzip.register(UnzipInflate);
-
-  const drainOutput = async () => {
-    while (outputQueue.length > 0) {
-      throwIfCancelled(state);
-      const output = outputQueue.shift()!;
-      if (output.type === "start") {
-        scope.postMessage({
-          type: "entry-start",
-          requestId: state.requestId,
-          name: output.name,
-          contentLength: output.contentLength,
-        });
-      } else if (output.type === "chunk") {
-        await sendChunk(scope, state, output.name, output.chunk);
-      } else {
-        scope.postMessage({
-          type: "entry-end",
-          requestId: state.requestId,
-          name: output.name,
-          actualBytes: output.actualBytes,
-        });
-      }
-    }
-  };
-
-  try {
-    await visitArchiveChunks(file, state, async (chunk, final) => {
-      if (decoderFailure) throw decoderFailure;
-      unzip.push(chunk, final);
-      if (decoderFailure) throw decoderFailure;
-      await drainOutput();
+  for (const media of preflight.media.media) {
+    throwIfCancelled(state);
+    const entry = preflight.byName.get(media.file);
+    if (!entry) throw new BackupValidationError(`Backup is missing required media file ${media.file}`);
+    scope.postMessage({
+      type: "entry-start",
+      requestId: state.requestId,
+      name: entry.name,
+      contentLength: entry.uncompressedSize,
     });
-    await drainOutput();
-  } catch (error) {
-    for (const entry of state.activeFiles) {
-      try { entry.terminate(); } catch { /* preserve decoder failure */ }
-    }
-    state.activeFiles.clear();
-    throw asValidationError(error);
-  }
-  if (decoderFailure) throw asValidationError(decoderFailure);
-  if (pendingMedia !== 0 || seen.size !== declaredMedia.size) {
-    const missing = [...declaredMedia.keys()].find((name) => !seen.has(name));
-    throw new BackupValidationError(
-      missing ? `Backup is missing required media file ${missing}` : "Backup media did not complete",
+    const actualBytes = await streamEntry(
+      file,
+      entry,
+      state,
+      preflight.account,
+      (chunk) => sendChunk(scope, state, entry.name, chunk),
     );
+    scope.postMessage({ type: "entry-end", requestId: state.requestId, name: entry.name, actualBytes });
   }
 }
 
@@ -497,30 +559,24 @@ async function runRequest(
   file: File,
   state: RequestState,
 ): Promise<void> {
-  if (!Number.isSafeInteger(file.size) || file.size > BACKUP_LIMITS.maxArchiveBytes) {
+  if (
+    !Number.isSafeInteger(file.size) || file.size < 0 ||
+    file.size > BACKUP_LIMITS.maxArchiveBytes
+  ) {
     throw new BackupValidationError("Backup archive exceeds the compressed size limit");
   }
+  scope.postMessage({ type: "progress", requestId: state.requestId, compressedBytes: 0, entries: 0 });
+  const preflight = await preflightArchive(file, state);
   scope.postMessage({
     type: "progress",
     requestId: state.requestId,
-    compressedBytes: 0,
-    entries: 0,
+    compressedBytes: file.size,
+    entries: preflight.entries.length,
   });
-  const preflight = await preflightArchive(scope, file, state);
   throwIfCancelled(state);
-  await sendBufferedEntry(
-    scope,
-    state,
-    BACKUP_PROJECT_MANIFEST_NAME,
-    preflight.projectManifest,
-  );
+  await sendBufferedEntry(scope, state, BACKUP_PROJECT_MANIFEST_NAME, preflight.projectManifest);
   if (preflight.mediaManifest) {
-    await sendBufferedEntry(
-      scope,
-      state,
-      BACKUP_MEDIA_MANIFEST_NAME,
-      preflight.mediaManifest,
-    );
+    await sendBufferedEntry(scope, state, BACKUP_MEDIA_MANIFEST_NAME, preflight.mediaManifest);
   }
   await streamMediaPass(scope, file, preflight, state);
   throwIfCancelled(state);
@@ -536,7 +592,14 @@ export function installBackupImportWorker(scope: BackupImportWorkerScope): void 
     }
     if (message.type === "ack") {
       const state = requests.get(message.requestId);
-      if (!state || !Number.isSafeInteger(message.sequence)) return;
+      if (!state) return;
+      if (
+        !hasOnlyKeys(message, ["type", "requestId", "sequence"]) ||
+        !Number.isSafeInteger(message.sequence) || (message.sequence as number) < 0
+      ) {
+        terminateState(state, new WorkerRequestProtocolError("Backup chunk ACK was malformed"));
+        return;
+      }
       const pending = state.pendingAck;
       if (!pending || pending.sequence !== message.sequence) {
         terminateState(state, new WorkerRequestProtocolError("Backup chunk ACK was out of order"));
@@ -552,14 +615,11 @@ export function installBackupImportWorker(scope: BackupImportWorkerScope): void 
       return;
     }
     if (message.type !== "start" || !isFile(message.file) || requests.has(message.requestId)) return;
-
     const state: RequestState = {
       requestId: message.requestId,
       cancelled: false,
       sequence: 0,
       pendingAck: null,
-      reader: null,
-      activeFiles: new Set(),
     };
     requests.set(message.requestId, state);
     void runRequest(scope, message.file, state).catch((error: unknown) => {

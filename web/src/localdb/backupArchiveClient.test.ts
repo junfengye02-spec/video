@@ -48,6 +48,7 @@ type WorkerListener = ((event: MessageEvent) => void) | null;
 class ControlledWorker {
   static instances: ControlledWorker[] = [];
   static constructionError: unknown;
+  static postMessageFailure: ((message: BackupWorkerRequest) => unknown) | null = null;
 
   onmessage: WorkerListener = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
@@ -65,6 +66,8 @@ class ControlledWorker {
   }
 
   postMessage(message: BackupWorkerRequest): void {
+    const failure = ControlledWorker.postMessageFailure?.(message);
+    if (failure) throw failure;
     this.requests.push(message);
   }
 
@@ -84,6 +87,7 @@ class ControlledWorker {
 function installControlledWorker(): void {
   ControlledWorker.instances = [];
   ControlledWorker.constructionError = undefined;
+  ControlledWorker.postMessageFailure = null;
   vi.stubGlobal("Worker", ControlledWorker);
 }
 
@@ -102,6 +106,39 @@ function requestId(): string {
 async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
+}
+
+async function completeSingleManifest(finalProgress?: { compressedBytes: number; entries: number }) {
+  installControlledWorker();
+  const file = new File(["zip"], "project.omproj");
+  const reading = readBackupArchive(file, {});
+  const id = requestId();
+  const bytes = new TextEncoder().encode(JSON.stringify({ version: 1, project: snapshot() }));
+  if (finalProgress) {
+    worker().emit({ type: "progress", requestId: id, ...finalProgress });
+  }
+  worker().emit({
+    type: "entry-start",
+    requestId: id,
+    name: "openmontage-project.json",
+    contentLength: bytes.byteLength,
+  });
+  worker().emit({
+    type: "entry-chunk",
+    requestId: id,
+    name: "openmontage-project.json",
+    sequence: 0,
+    chunk: bytes.slice().buffer,
+  });
+  await vi.waitFor(() => expect(worker().requests.some((message) => message.type === "ack")).toBe(true));
+  worker().emit({
+    type: "entry-end",
+    requestId: id,
+    name: "openmontage-project.json",
+    actualBytes: bytes.byteLength,
+  });
+  worker().emit({ type: "complete", requestId: id });
+  return reading;
 }
 
 afterEach(() => {
@@ -128,12 +165,20 @@ describe("readBackupArchive", () => {
     installControlledWorker();
     let releaseChunk!: () => void;
     const chunkGate = new Promise<void>((resolve) => { releaseChunk = resolve; });
-    const reading = readBackupArchive(new File(["zip"], "project.omproj"), {
+    const file = new File(["zip"], "project.omproj");
+    const reading = readBackupArchive(file, {
       onEntryChunk: () => chunkGate,
     });
     const id = requestId();
     const bytes = new TextEncoder().encode(JSON.stringify({ version: 1, project: snapshot() }));
     const buffer = bytes.slice().buffer;
+
+    worker().emit({
+      type: "progress",
+      requestId: id,
+      compressedBytes: file.size,
+      entries: 1,
+    });
 
     worker().emit({
       type: "entry-start",
@@ -261,5 +306,121 @@ describe("readBackupArchive", () => {
     await flush();
     worker().emit({ type: "failure", requestId: id, code: "validation", message: "stop" });
     await expect(reading).rejects.toThrow("stop");
+  });
+
+  it.each(["entry-chunk", "entry-end", "complete"] as const)(
+    "rejects a second %s synchronously while a chunk callback is outstanding",
+    async (violation) => {
+      installControlledWorker();
+      let releaseChunk!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseChunk = resolve; });
+      const callback = vi.fn(() => gate);
+      const file = new File(["zip"], "project.omproj");
+      const reading = readBackupArchive(file, { onEntryChunk: callback });
+      const outcome = reading.then(() => null, (error: unknown) => error);
+      const id = requestId();
+      const bytes = new TextEncoder().encode(JSON.stringify({ version: 1, project: snapshot() }));
+      worker().emit({ type: "progress", requestId: id, compressedBytes: file.size, entries: 1 });
+      worker().emit({
+        type: "entry-start",
+        requestId: id,
+        name: "openmontage-project.json",
+        contentLength: bytes.byteLength,
+      });
+      worker().emit({
+        type: "entry-chunk",
+        requestId: id,
+        name: "openmontage-project.json",
+        sequence: 0,
+        chunk: bytes.slice().buffer,
+      });
+      await vi.waitFor(() => expect(callback).toHaveBeenCalledTimes(1));
+
+      if (violation === "entry-chunk") {
+        worker().emit({
+          type: "entry-chunk",
+          requestId: id,
+          name: "openmontage-project.json",
+          sequence: 1,
+          chunk: new ArrayBuffer(1),
+        });
+      } else if (violation === "entry-end") {
+        worker().emit({
+          type: "entry-end",
+          requestId: id,
+          name: "openmontage-project.json",
+          actualBytes: bytes.byteLength,
+        });
+      } else {
+        worker().emit({ type: "complete", requestId: id });
+      }
+      const terminatedImmediately = worker().terminated;
+      releaseChunk();
+      worker().emit({ type: "complete", requestId: id });
+      const error = await outcome;
+
+      expect(terminatedImmediately).toBe(true);
+      expect(error).toBeInstanceOf(BackupWorkerProtocolError);
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(worker().requests.filter((message) => message.type === "ack")).toHaveLength(0);
+    },
+  );
+
+  it("bounds the synchronous response queue and rejects a progress flood", async () => {
+    installControlledWorker();
+    let releaseProgress!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseProgress = resolve; });
+    const reading = readBackupArchive(new File([new Uint8Array(32)], "project.omproj"), {
+      onProgress: () => gate,
+    });
+    const outcome = reading.then(() => null, (error: unknown) => error);
+    const id = requestId();
+    worker().emit({ type: "progress", requestId: id, compressedBytes: 0, entries: 0 });
+    await flush();
+    for (let index = 0; index < 17; index += 1) {
+      worker().emit({ type: "progress", requestId: id, compressedBytes: 0, entries: 0 });
+    }
+    const terminatedImmediately = worker().terminated;
+    releaseProgress();
+    worker().emit({ type: "complete", requestId: id });
+
+    expect(terminatedImmediately).toBe(true);
+    expect(await outcome).toBeInstanceOf(BackupWorkerProtocolError);
+  });
+
+  it("keeps the chunk outstanding when posting its exact ACK throws", async () => {
+    installControlledWorker();
+    const failure = new DOMException("clone failed", "DataCloneError");
+    ControlledWorker.postMessageFailure = (message) => message.type === "ack" ? failure : null;
+    const file = new File(["zip"], "project.omproj");
+    const reading = readBackupArchive(file, {});
+    const id = requestId();
+    const bytes = new TextEncoder().encode(JSON.stringify({ version: 1, project: snapshot() }));
+    worker().emit({ type: "progress", requestId: id, compressedBytes: file.size, entries: 1 });
+    worker().emit({
+      type: "entry-start",
+      requestId: id,
+      name: "openmontage-project.json",
+      contentLength: bytes.byteLength,
+    });
+    worker().emit({
+      type: "entry-chunk",
+      requestId: id,
+      name: "openmontage-project.json",
+      sequence: 0,
+      chunk: bytes.slice().buffer,
+    });
+
+    await expect(reading).rejects.toBeInstanceOf(BackupWorkerProtocolError);
+    expect(worker().requests.filter((message) => message.type === "ack")).toHaveLength(0);
+    expect(worker().terminated).toBe(true);
+  });
+
+  it.each([
+    ["missing final progress", undefined],
+    ["short final progress", { compressedBytes: 2, entries: 1 }],
+    ["wrong final entry count", { compressedBytes: 3, entries: 2 }],
+  ])("rejects complete with %s", async (_label, progress) => {
+    await expect(completeSingleManifest(progress)).rejects.toBeInstanceOf(BackupWorkerProtocolError);
   });
 });

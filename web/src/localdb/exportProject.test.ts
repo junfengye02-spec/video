@@ -384,7 +384,7 @@ afterEach(async () => {
 
 describe("exportProject", () => {
   it("keeps every production ZIP decoder import inside the dedicated module Worker", () => {
-    const decoderPattern = /\b(?:AsyncInflate|UnzipInflate|new\s+Unzip)\b/;
+    const decoderPattern = /\b(?:AsyncInflate|UnzipInflate|Inflate|new\s+Unzip)\b/;
 
     expect(backupImportWorkerSource).toMatch(decoderPattern);
     expect(backupArchiveClientSource).not.toMatch(decoderPattern);
@@ -483,6 +483,31 @@ describe("exportProject", () => {
     expect(restoredBlob ? await blobToText(restoredBlob) : null).toBe("video");
     expect(imported.final_path).toBe(restoredRef);
     expect(imported.series_bible.assets?.[0].reference_images[0]).toBe(restoredRef);
+  });
+
+  it("roundtrips stored media containing ZIP descriptor and central signatures", async () => {
+    await saveProjectSnapshot(snapshot());
+    const payload = new Uint8Array([
+      0x00, 0x50, 0x4b, 0x07, 0x08, 0xff,
+      0x50, 0x4b, 0x01, 0x02, 0x00, 0x7f,
+    ]);
+    const mediaRef = await saveMediaBlob({
+      projectId: "p1",
+      sourcePath: "assets/video/signatures.bin",
+      contentType: "application/octet-stream",
+      blob: new Blob([payload]),
+    });
+    await saveProjectSnapshot(snapshot(mediaRef));
+    const backup = await exportProjectBackup("p1");
+    await deleteLocalDb();
+
+    const imported = await importProjectBackup(
+      new File([backup], "signatures.omproj", { type: "application/zip" }),
+    );
+    const restored = await loadMediaBlob(imported.final_path as LocalMediaRef);
+
+    expect(restored).not.toBeNull();
+    expect(new Uint8Array(await blobToArrayBuffer(restored!))).toEqual(payload);
   });
 
   it("durably creates the import session before the first media storage access", async () => {
