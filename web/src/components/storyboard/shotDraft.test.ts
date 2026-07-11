@@ -31,6 +31,45 @@ describe("shotDraft", () => {
     expect(undoPromptOptimization(optimized).draft).toEqual(initial.draft);
   });
 
+  it("undoes only AI-owned fields and preserves later manual edits", () => {
+    const initial = createShotDraftState(createShot({
+      prompt: "before prompt",
+      props: ["old prop"],
+      asset_ids: ["asset-1"],
+      shot_intent: "before intent",
+      shot_language: { shot_size: "wide" },
+    }));
+    const optimized = applyPromptOptimization(initial, {
+      project_id: "p1",
+      model: "text-model",
+      optimized_text: "optimized prompt",
+      notes: [],
+      shot_intent: "optimized intent",
+      shot_language: { shot_size: "close_up" },
+    });
+    const edited = {
+      ...optimized,
+      draft: {
+        ...optimized.draft,
+        props: "new prop",
+        assetIds: ["asset-1", "asset-2"],
+        location: "new location",
+      },
+    };
+
+    const undone = undoPromptOptimization(edited);
+
+    expect(undone.draft).toMatchObject({
+      prompt: "before prompt",
+      shotIntent: "before intent",
+      shotLanguage: { shot_size: "wide" },
+      props: "new prop",
+      assetIds: ["asset-1", "asset-2"],
+      location: "new location",
+    });
+    expect(undone.undoOptimization).toBeNull();
+  });
+
   it("keeps source, baseline, and draft collections isolated", () => {
     const source = createShot({ asset_ids: ["asset-1"] });
     const state = createShotDraftState(source);

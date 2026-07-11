@@ -10,11 +10,17 @@ export interface ShotDraftFields {
   shotLanguage: ShotLanguage;
 }
 
+export interface PromptOptimizationUndo {
+  prompt: string;
+  shotIntent: string;
+  shotLanguage: ShotLanguage;
+}
+
 export interface ShotDraftState {
   shotId: string | null;
   baseline: ShotDraftFields;
   draft: ShotDraftFields;
-  undoOptimization: ShotDraftFields | null;
+  undoOptimization: PromptOptimizationUndo | null;
 }
 
 function cloneFields(value: ShotDraftFields): ShotDraftFields {
@@ -22,6 +28,14 @@ function cloneFields(value: ShotDraftFields): ShotDraftFields {
     ...value,
     characters: [...value.characters],
     assetIds: [...value.assetIds],
+    shotLanguage: { ...value.shotLanguage },
+  };
+}
+
+function optimizationFields(value: ShotDraftFields): PromptOptimizationUndo {
+  return {
+    prompt: value.prompt,
+    shotIntent: value.shotIntent,
     shotLanguage: { ...value.shotLanguage },
   };
 }
@@ -49,7 +63,7 @@ export function applyPromptOptimization(
 ): ShotDraftState {
   return {
     ...state,
-    undoOptimization: cloneFields(state.draft),
+    undoOptimization: optimizationFields(state.draft),
     draft: {
       ...state.draft,
       prompt: response.optimized_text,
@@ -63,7 +77,16 @@ export function applyPromptOptimization(
 
 export function undoPromptOptimization(state: ShotDraftState): ShotDraftState {
   if (!state.undoOptimization) return state;
-  return { ...state, draft: cloneFields(state.undoOptimization), undoOptimization: null };
+  return {
+    ...state,
+    draft: {
+      ...state.draft,
+      prompt: state.undoOptimization.prompt,
+      shotIntent: state.undoOptimization.shotIntent,
+      shotLanguage: { ...state.undoOptimization.shotLanguage },
+    },
+    undoOptimization: null,
+  };
 }
 
 export function shotDraftIsDirty(state: ShotDraftState): boolean {
