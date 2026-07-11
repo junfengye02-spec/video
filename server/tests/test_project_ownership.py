@@ -170,6 +170,13 @@ def _link_file(link: Path, target: Path) -> bool:
     return True
 
 
+def _hardlink_file_or_skip(link: Path, target: Path) -> None:
+    try:
+        os.link(target, link)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"hardlinks are not available: {exc}")
+
+
 def _link_directory(link: Path, target: Path) -> None:
     try:
         link.symlink_to(target, target_is_directory=True)
@@ -2376,6 +2383,148 @@ def test_mutation_journal_capture_rejects_linked_project_directory(
             operation="test",
             changed_paths=["artifacts/state.json"],
         )
+
+
+def test_mutation_journal_capture_rejects_hardlinked_file(ownership_context):
+    project_id = "abababababab4abababababababababa"
+    store = ownership_context["app"].state.store
+    store._ensure_project_dirs(project_id)
+    destination = store.project_dir(project_id) / "artifacts" / "state.bin"
+    outside = ownership_context["tmp_path"] / "outside-journal.bin"
+    outside.write_bytes(b"outside-sentinel")
+    _hardlink_file_or_skip(destination, outside)
+
+    with pytest.raises(ValueError, match="Project workspace path is invalid"):
+        store.begin_project_mutation(
+            project_id,
+            operation="test",
+            changed_paths=["artifacts/state.bin"],
+        )
+
+    assert outside.read_bytes() == b"outside-sentinel"
+    store.assert_project_available(project_id)
+
+
+def test_upload_rejects_hardlinked_destination_before_writer_runs(
+    ownership_context, monkeypatch
+):
+    client = _alice(ownership_context)
+    project_id = _create_project(client, title="Hardlink upload")["id"]
+    store = ownership_context["app"].state.store
+
+    class FixedUUID:
+        hex = "a" * 32
+
+    class FixedUUIDModule:
+        @staticmethod
+        def uuid4():
+            return FixedUUID()
+
+    monkeypatch.setattr("server.app.main.uuid", FixedUUIDModule())
+    destination = (
+        store.project_dir(project_id)
+        / "assets"
+        / "images"
+        / "character"
+        / f"asset-{'a' * 32}.png"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    outside = ownership_context["tmp_path"] / "outside-upload.bin"
+    outside.write_bytes(b"outside-sentinel")
+    _hardlink_file_or_skip(destination, outside)
+    calls = []
+
+    async def forbidden_writer(upload, output_path, max_bytes):
+        calls.append((upload, output_path, max_bytes))
+        destination.write_bytes(b"uploaded")
+
+    monkeypatch.setattr("server.app.main.save_upload_file", forbidden_writer)
+
+    response = client.post(
+        f"/api/projects/{project_id}/assets/upload",
+        data={"kind": "character", "label": "Hardlink"},
+        files={"file": ("uploaded.png", b"uploaded", "image/png")},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    assert calls == []
+    assert outside.read_bytes() == b"outside-sentinel"
+    store.assert_project_available(project_id)
+
+
+def test_regenerate_rejects_hardlinked_destination_before_writer_runs(
+    ownership_context, monkeypatch
+):
+    client = _alice(ownership_context)
+    project_id = _create_project(client, title="Hardlink regenerate")["id"]
+    store = ownership_context["app"].state.store
+    generated = _generated_storyboard_result()
+    store.write_artifact(project_id, "series_bible.json", generated["series_bible"])
+    store.write_artifact(project_id, "episode_storyboard.json", generated["storyboard"])
+    destination = store.project_dir(project_id) / "assets" / "video" / "s1.mp4"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    outside = ownership_context["tmp_path"] / "outside-regenerate.bin"
+    outside.write_bytes(b"outside-sentinel")
+    _hardlink_file_or_skip(destination, outside)
+    calls = []
+
+    def forbidden_writer(**kwargs):
+        calls.append(kwargs)
+        destination.write_bytes(b"generated")
+        return {"output_path": str(destination), "tool_result": {}}
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", forbidden_writer)
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/s1/regenerate",
+        json={"video_key": "video-key"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    assert calls == []
+    assert outside.read_bytes() == b"outside-sentinel"
+    store.assert_project_available(project_id)
+
+
+def test_render_rejects_hardlinked_destination_before_writer_runs(
+    ownership_context, monkeypatch
+):
+    client = _alice(ownership_context)
+    project_id = _create_project(client, title="Hardlink render")["id"]
+    store = ownership_context["app"].state.store
+    generated = _generated_storyboard_result()
+    shot_path = store.project_dir(project_id) / "assets" / "video" / "s1.mp4"
+    shot_path.parent.mkdir(parents=True, exist_ok=True)
+    shot_path.write_bytes(b"shot")
+    generated["storyboard"]["shots"][0]["output_path"] = "assets/video/s1.mp4"
+    store.write_artifact(project_id, "series_bible.json", generated["series_bible"])
+    store.write_artifact(project_id, "episode_storyboard.json", generated["storyboard"])
+    destination = store.project_dir(project_id) / "renders" / "final.mp4"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    outside = ownership_context["tmp_path"] / "outside-render.bin"
+    outside.write_bytes(b"outside-sentinel")
+    _hardlink_file_or_skip(destination, outside)
+    calls = []
+
+    def forbidden_writer(**kwargs):
+        calls.append(kwargs)
+        destination.write_bytes(b"rendered")
+        return {}
+
+    monkeypatch.setattr("server.app.main.render_short_drama_project", forbidden_writer)
+
+    response = client.post(
+        f"/api/projects/{project_id}/render",
+        json={"video_key": "video-key"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    assert calls == []
+    assert outside.read_bytes() == b"outside-sentinel"
+    store.assert_project_available(project_id)
 
 
 @pytest.mark.parametrize("link_kind", ["symlink", "junction"])

@@ -11,6 +11,11 @@ from typing import Any, Literal
 
 from lib.shot_prompt_builder import build_shot_prompt
 from server.app.keyring import key_environment
+from server.app.media_files import (
+    atomic_write_text,
+    create_atomic_output,
+    replace_atomic_output,
+)
 from tools.video._shared import probe_output
 
 RenderRuntime = Literal["remotion", "hyperframes", "ffmpeg"]
@@ -325,40 +330,49 @@ def run_single_shot_generation(
     )
     shot_id = str(shot.get("id", "shot"))
     output_path = project_path / "assets" / "video" / f"{shot_id}.mp4"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    selector_inputs = build_video_selector_inputs(
-        project_dir=project_path,
-        shot=shot,
-        prompt=prompt,
-        video_model=video_model,
-        output_path=output_path,
-        asset_lookup=asset_lookup,
+    descriptor, temporary_output, expected_parent = create_atomic_output(
+        output_path,
+        suffix=".generate",
     )
-
-    if emit_event:
-        reference_count = len(selector_inputs.get("reference_image_paths", []))
-        mode = selector_inputs["operation"]
-        emit_event(
-            "assets",
-            "running",
-            f"Generating video for {shot_id} with {mode} ({reference_count} reference images)",
+    os.close(descriptor)
+    try:
+        selector_inputs = build_video_selector_inputs(
+            project_dir=project_path,
+            shot=shot,
+            prompt=prompt,
+            video_model=video_model,
+            output_path=temporary_output,
+            asset_lookup=asset_lookup,
         )
 
-    with _patched_environment(key_environment(video_key, base_url)):
-        result = VideoSelector().execute(selector_inputs)
-
-    if not result.success:
         if emit_event:
-            emit_event("assets", "failed", result.error or f"Generation failed for {shot_id}")
-        raise RuntimeError(result.error or f"Generation failed for {shot_id}")
+            reference_count = len(selector_inputs.get("reference_image_paths", []))
+            mode = selector_inputs["operation"]
+            emit_event(
+                "assets",
+                "running",
+                f"Generating video for {shot_id} with {mode} ({reference_count} reference images)",
+            )
+
+        with _patched_environment(key_environment(video_key, base_url)):
+            result = VideoSelector().execute(selector_inputs)
+
+        if not result.success:
+            if emit_event:
+                emit_event("assets", "failed", result.error or f"Generation failed for {shot_id}")
+            raise RuntimeError(result.error or f"Generation failed for {shot_id}")
+        replace_atomic_output(temporary_output, output_path, expected_parent)
+    finally:
+        temporary_output.unlink(missing_ok=True)
+
+    result.data["output"] = str(output_path)
 
     if emit_event:
         emit_event("assets", "complete", f"Generated video for {shot_id}")
 
     return {
         "shot_id": shot_id,
-        "output_path": result.data.get("output") or str(output_path),
+        "output_path": str(output_path),
         "tool_result": result.data,
         "cost_usd": result.cost_usd,
         "operation": selector_inputs["operation"],
@@ -492,8 +506,8 @@ def render_short_drama_project(
         ],
         "render_grammar": "cinematic-trailer",
     }
-    (project_path / "artifacts").mkdir(parents=True, exist_ok=True)
-    (project_path / "artifacts" / "render_report.json").write_text(
+    atomic_write_text(
+        project_path / "artifacts" / "render_report.json",
         json.dumps(render_report, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -510,7 +524,6 @@ def render_short_drama_project(
 def compose_final_video(project_dir: str | Path, storyboard: dict[str, Any]) -> Path:
     project_path = Path(project_dir)
     output_path = project_path / "renders" / "final.mp4"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     shot_paths = [
         resolved_path
         for shot in sorted(storyboard.get("shots", []), key=lambda item: int(item.get("index", 0)))
@@ -522,16 +535,25 @@ def compose_final_video(project_dir: str | Path, storyboard: dict[str, Any]) -> 
     if missing:
         raise RuntimeError(f"Generated shot video missing: {missing[0]}")
 
-    cmd = _build_ffmpeg_compose_command(shot_paths, output_path)
-    subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=600,
-        check=True,
+    descriptor, temporary_output, expected_parent = create_atomic_output(
+        output_path,
+        suffix=".render",
     )
+    os.close(descriptor)
+    try:
+        cmd = _build_ffmpeg_compose_command(shot_paths, temporary_output)
+        subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            check=True,
+        )
+        replace_atomic_output(temporary_output, output_path, expected_parent)
+    finally:
+        temporary_output.unlink(missing_ok=True)
     return output_path
 
 

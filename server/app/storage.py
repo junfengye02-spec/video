@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import unicodedata
 import uuid
@@ -285,8 +286,10 @@ class ProjectMutationJournal:
         existed = destination.exists()
         if destination.is_symlink() or _is_link_or_junction(destination):
             raise ValueError("Project workspace path is invalid")
-        if existed and not destination.is_file():
-            raise ValueError("Project mutation paths must be files")
+        if existed:
+            destination_stat = destination.stat(follow_symlinks=False)
+            if not stat.S_ISREG(destination_stat.st_mode) or destination_stat.st_nlink != 1:
+                raise ValueError("Project workspace path is invalid")
         self._entries.append({"path": normalized, "existed": existed})
         if existed:
             backup = self._backup_path(normalized, create_parents=True)

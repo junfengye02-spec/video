@@ -645,9 +645,11 @@ def test_postgres_project_lock_keeps_failed_restore_before_later_commit(
 
         store = WorkbenchStore(projects_root=tmp_path / "postgres-projects")
         store.write_artifact(project_id, "state.json", {"value": "initial"})
-        b_attempting = Event()
+        b_pid_ready = Event()
         b_acquired = Event()
+        b_journal_started = Event()
         b_committed = Event()
+        b_backend_pid: list[int] = []
         schedule: list[str] = []
         schedule_lock = Lock()
         restore_observations: list[tuple[str, bool, bool]] = []
@@ -677,8 +679,12 @@ def test_postgres_project_lock_keeps_failed_restore_before_later_commit(
 
         def mutate_b() -> None:
             with Session(schema_engine) as db_b:
-                record("b_attempting")
-                b_attempting.set()
+                backend_pid = db_b.scalar(text("SELECT pg_backend_pid()"))
+                assert isinstance(backend_pid, int)
+                b_backend_pid.append(backend_pid)
+                record("b_pid_exposed")
+                b_pid_ready.set()
+                record("b_lock_attempt")
                 ProjectRepository(db_b).require_owned_for_update(project_id, owner_id)
                 record("b_acquired")
                 b_acquired.set()
@@ -691,6 +697,7 @@ def test_postgres_project_lock_keeps_failed_restore_before_later_commit(
                     failure_detail="B mutation failed",
                 ):
                     record("b_journal_started")
+                    b_journal_started.set()
                     store.write_artifact(project_id, "state.json", {"value": "B"})
                     record("b_written")
                 record("b_committed")
@@ -704,6 +711,8 @@ def test_postgres_project_lock_keeps_failed_restore_before_later_commit(
                 original_a_rollback()
 
             monkeypatch.setattr(db_a, "rollback", observed_a_rollback)
+            a_backend_pid = db_a.scalar(text("SELECT pg_backend_pid()"))
+            assert isinstance(a_backend_pid, int)
             ProjectRepository(db_a).require_owned_for_update(project_id, owner_id)
             record("a_locked")
             with pytest.raises(HTTPException, match="A mutation failed"):
@@ -719,16 +728,29 @@ def test_postgres_project_lock_keeps_failed_restore_before_later_commit(
                     store.write_artifact(project_id, "state.json", {"value": "A"})
                     record("a_written")
                     b_future = executor.submit(mutate_b)
-                    assert b_attempting.wait(timeout=5)
-                    acquired_while_a_held_lock = b_acquired.wait(timeout=0.25)
-                    committed_while_a_held_lock = b_committed.is_set()
+                    assert b_pid_ready.wait(timeout=5), "writer B did not expose its backend PID"
+                    with admin_engine.connect() as observer_connection:
+                        lock_wait_observation = _wait_for_postgres_for_update_lock_wait(
+                            observer_connection,
+                            blocked_backend_pid=b_backend_pid[0],
+                            blocking_backend_pid=a_backend_pid,
+                            timeout_seconds=10,
+                        )
+                    record("b_lock_wait_observed")
+                    assert not b_acquired.is_set()
+                    assert not b_journal_started.is_set()
+                    assert not b_committed.is_set()
                     raise RuntimeError("force A restore")
 
-            b_future.result(timeout=5)
+            b_future.result(timeout=15)
 
         assert store.read_artifact(project_id, "state.json") == {"value": "B"}
-        assert acquired_while_a_held_lock is False
-        assert committed_while_a_held_lock is False
+        assert lock_wait_observation["pid"] == b_backend_pid[0]
+        assert lock_wait_observation["state"] == "active"
+        assert lock_wait_observation["wait_event_type"] == "Lock"
+        assert "FOR UPDATE" in lock_wait_observation["query"].upper()
+        assert a_backend_pid in lock_wait_observation["blocking_pids"]
+        assert lock_wait_observation["blocked_by_expected"] is True
         assert restore_observations == [
             ("before", False, False),
             ("after", False, False),
@@ -737,7 +759,9 @@ def test_postgres_project_lock_keeps_failed_restore_before_later_commit(
             "a_locked",
             "a_journal_started",
             "a_written",
-            "b_attempting",
+            "b_pid_exposed",
+            "b_lock_attempt",
+            "b_lock_wait_observed",
             "a_restore_started",
             "a_restore_finished",
             "a_rollback_started",
