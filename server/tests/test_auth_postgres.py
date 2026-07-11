@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -8,6 +10,8 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import make_url
 
 os.environ.setdefault("AUTH_HMAC_SECRET", "x" * 32)
 
@@ -26,73 +30,103 @@ UNOWNED_IDS = (
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-DESTRUCTIVE_POSTGRES_ACK = "I_UNDERSTAND_THIS_DROPS_THE_TEST_PUBLIC_SCHEMA"
-
-
-class _RecordedScalars:
-    def __init__(self, values: tuple[str, ...]):
-        self._values = values
-
-    def all(self) -> list[str]:
-        return list(self._values)
+DESTRUCTIVE_POSTGRES_ACK = "I_UNDERSTAND_THIS_CREATES_AND_DROPS_A_TEST_SCHEMA"
+_SCHEMA_NAME_PATTERN = re.compile(r"openmontage_task8_[0-9a-f]{32}")
 
 
 class _RecordingPostgresConnection:
-    def __init__(self, *, objects: tuple[str, ...] = ()) -> None:
-        self.objects = objects
+    def __init__(
+        self,
+        *,
+        version: str = "16.13",
+        database_name: str = "openmontage_guard_test",
+        schema_exists: bool = False,
+    ) -> None:
+        self.version = version
+        self.database_name = database_name
+        self.schema_exists = schema_exists
         self.statements: list[str] = []
+        self.parameters: list[dict[str, object] | None] = []
+        self.dialect = postgresql.dialect()
 
-    def scalar(self, statement):
+    def scalar(self, statement, parameters=None):
         sql = str(statement)
         self.statements.append(sql)
+        self.parameters.append(parameters)
         if "server_version" in sql:
-            return "16.13"
+            return self.version
         if "current_database" in sql:
-            return "openmontage_guard_test"
+            return self.database_name
+        if "pg_namespace" in sql:
+            return self.schema_exists
         raise AssertionError(f"Unexpected scalar query: {sql}")
-
-    def scalars(self, statement):
-        self.statements.append(str(statement))
-        return _RecordedScalars(self.objects)
 
     def execute(self, statement):
         self.statements.append(str(statement))
 
-    def commit(self) -> None:
-        self.statements.append("COMMIT")
+
+def _new_disposable_schema_name() -> str:
+    return f"openmontage_task8_{secrets.token_hex(16)}"
 
 
-def _reset_disposable_postgres_schema(connection, acknowledgement: str | None) -> None:
+def _validate_schema_name(schema_name: str) -> None:
+    if _SCHEMA_NAME_PATTERN.fullmatch(schema_name) is None:
+        raise ValueError("Unsafe disposable PostgreSQL schema name")
+
+
+def _quoted_schema_name(connection, schema_name: str) -> str:
+    _validate_schema_name(schema_name)
+    return connection.dialect.identifier_preparer.quote_identifier(schema_name)
+
+
+def _create_owned_test_schema(
+    connection,
+    *,
+    acknowledgement: str | None,
+    schema_name: str,
+) -> None:
     if acknowledgement != DESTRUCTIVE_POSTGRES_ACK:
         raise RuntimeError(
             "Destructive PostgreSQL test acknowledgement is missing or invalid"
         )
+    _validate_schema_name(schema_name)
     version = connection.scalar(text("SHOW server_version"))
     database_name = connection.scalar(text("SELECT current_database()"))
     if str(version).split(".", 1)[0] != "16":
         raise RuntimeError("Destructive PostgreSQL test requires PostgreSQL 16")
     if "test" not in str(database_name).lower():
         raise RuntimeError("Destructive PostgreSQL target database must contain 'test'")
-    existing_objects = connection.scalars(
+    schema_exists = connection.scalar(
         text(
             """
-            SELECT child.relname
-            FROM pg_class AS child
-            JOIN pg_namespace AS namespace ON namespace.oid = child.relnamespace
-            WHERE namespace.nspname = 'public'
-              AND child.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
-            ORDER BY child.relname
+            SELECT EXISTS (
+                SELECT 1 FROM pg_namespace WHERE nspname = :schema_name
+            )
             """
-        )
-    ).all()
-    if existing_objects:
-        raise RuntimeError(
-            "Destructive PostgreSQL target schema is not empty: "
-            + ", ".join(existing_objects)
-        )
-    connection.execute(text("DROP SCHEMA public CASCADE"))
-    connection.execute(text("CREATE SCHEMA public"))
-    connection.commit()
+        ),
+        {"schema_name": schema_name},
+    )
+    if schema_exists:
+        raise RuntimeError("Disposable PostgreSQL schema already exists")
+    connection.execute(
+        text(f"CREATE SCHEMA {_quoted_schema_name(connection, schema_name)}")
+    )
+
+
+def _drop_owned_test_schema(connection, schema_name: str) -> None:
+    connection.execute(
+        text(f"DROP SCHEMA {_quoted_schema_name(connection, schema_name)} CASCADE")
+    )
+
+
+def _database_url_for_schema(database_url: str, schema_name: str) -> str:
+    _validate_schema_name(schema_name)
+    url = make_url(database_url)
+    existing_options = url.query.get("options", "")
+    scoped_options = f"{existing_options} -csearch_path={schema_name}".strip()
+    return url.update_query_dict(
+        {"options": scoped_options}
+    ).render_as_string(hide_password=False)
 
 
 def test_list_unowned_projects_prints_every_remaining_id(
@@ -139,25 +173,107 @@ def test_list_unowned_projects_prints_every_remaining_id(
     assert capsys.readouterr().out.splitlines() == list(UNOWNED_IDS)
 
 
-def test_postgres_reset_requires_explicit_destructive_acknowledgement():
+def test_postgres_schema_create_requires_explicit_destructive_acknowledgement():
     connection = _RecordingPostgresConnection()
+    schema_name = "openmontage_task8_0123456789abcdef0123456789abcdef"
 
     with pytest.raises(RuntimeError, match="acknowledgement"):
-        _reset_disposable_postgres_schema(connection, acknowledgement=None)
-
-    assert not any("DROP SCHEMA" in statement for statement in connection.statements)
-
-
-def test_postgres_reset_refuses_a_nonempty_schema_before_drop():
-    connection = _RecordingPostgresConnection(objects=("users",))
-
-    with pytest.raises(RuntimeError, match="not empty"):
-        _reset_disposable_postgres_schema(
+        _create_owned_test_schema(
             connection,
-            acknowledgement=DESTRUCTIVE_POSTGRES_ACK,
+            acknowledgement=None,
+            schema_name=schema_name,
         )
 
-    assert not any("DROP SCHEMA" in statement for statement in connection.statements)
+    assert connection.statements == []
+
+
+@pytest.mark.parametrize(
+    ("connection", "message"),
+    [
+        (_RecordingPostgresConnection(version="15.8"), "PostgreSQL 16"),
+        (
+            _RecordingPostgresConnection(database_name="openmontage_production"),
+            "must contain 'test'",
+        ),
+    ],
+)
+def test_postgres_schema_create_retains_version_and_database_guards(
+    connection, message
+):
+    schema_name = "openmontage_task8_0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(RuntimeError, match=message):
+        _create_owned_test_schema(
+            connection,
+            acknowledgement=DESTRUCTIVE_POSTGRES_ACK,
+            schema_name=schema_name,
+        )
+
+    assert not any("CREATE SCHEMA" in statement for statement in connection.statements)
+
+
+def test_postgres_schema_create_refuses_an_existing_exact_schema():
+    connection = _RecordingPostgresConnection(schema_exists=True)
+    schema_name = "openmontage_task8_0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        _create_owned_test_schema(
+            connection,
+            acknowledgement=DESTRUCTIVE_POSTGRES_ACK,
+            schema_name=schema_name,
+        )
+
+    assert not any("CREATE SCHEMA" in statement for statement in connection.statements)
+
+
+@pytest.mark.parametrize("schema_name", ["public", "unsafe; DROP SCHEMA public"])
+def test_postgres_schema_helpers_reject_unsafe_identifiers(schema_name):
+    connection = _RecordingPostgresConnection()
+
+    with pytest.raises(ValueError, match="Unsafe"):
+        _drop_owned_test_schema(connection, schema_name)
+
+    assert connection.statements == []
+
+
+def test_generated_schema_identifier_is_random_safe_and_force_quoted():
+    first = _new_disposable_schema_name()
+    second = _new_disposable_schema_name()
+    connection = _RecordingPostgresConnection()
+
+    _create_owned_test_schema(
+        connection,
+        acknowledgement=DESTRUCTIVE_POSTGRES_ACK,
+        schema_name=first,
+    )
+
+    assert first != second
+    assert re.fullmatch(r"openmontage_task8_[0-9a-f]{32}", first)
+    assert connection.statements[-1] == f'CREATE SCHEMA "{first}"'
+
+
+def test_schema_cleanup_targets_only_the_exact_owned_schema():
+    connection = _RecordingPostgresConnection()
+    schema_name = "openmontage_task8_0123456789abcdef0123456789abcdef"
+
+    _drop_owned_test_schema(connection, schema_name)
+
+    assert connection.statements == [f'DROP SCHEMA "{schema_name}" CASCADE']
+    assert all("public" not in statement for statement in connection.statements)
+
+
+def test_schema_database_url_scopes_every_connection_to_the_owned_schema():
+    schema_name = "openmontage_task8_0123456789abcdef0123456789abcdef"
+
+    scoped = make_url(
+        _database_url_for_schema(
+            "postgresql+psycopg://user:password@127.0.0.1/openmontage_test",
+            schema_name,
+        )
+    )
+
+    assert scoped.query["options"] == f"-csearch_path={schema_name}"
+    assert scoped.password == "password"
 
 
 def test_deployment_and_billing_handoff_contract_is_documented():
@@ -270,60 +386,80 @@ def test_postgres_16_migration_blocks_unowned_projects(tmp_path):
     if not database_url:
         pytest.skip("OPENMONTAGE_TEST_POSTGRES_URL is not configured")
 
-    engine = create_engine(database_url)
-    with engine.connect() as connection:
-        _reset_disposable_postgres_schema(
-            connection,
-            acknowledgement=os.getenv("OPENMONTAGE_DESTRUCTIVE_TEST_ACK"),
+    schema_name = _new_disposable_schema_name()
+    admin_engine = create_engine(database_url)
+    schema_engine = None
+    schema_created = False
+    try:
+        with admin_engine.begin() as connection:
+            _create_owned_test_schema(
+                connection,
+                acknowledgement=os.getenv("OPENMONTAGE_DESTRUCTIVE_TEST_ACK"),
+                schema_name=schema_name,
+            )
+        schema_created = True
+        scoped_database_url = _database_url_for_schema(database_url, schema_name)
+        schema_engine = create_engine(scoped_database_url)
+
+        env = os.environ.copy()
+        env["DATABASE_URL"] = scoped_database_url
+        env.setdefault("AUTH_HMAC_SECRET", "x" * 32)
+        env.setdefault("REDIS_URL", "redis://127.0.0.1:6379/15")
+        env.setdefault("REDIS_PREFIX", "openmontage-task8-test:")
+        legacy_path = tmp_path / "legacy.sqlite3"
+        _legacy_sqlite(legacy_path)
+
+        phase_one = _run(
+            [sys.executable, "-m", "alembic", "upgrade", "002"], env=env
         )
-
-    env = os.environ.copy()
-    env["DATABASE_URL"] = database_url
-    env.setdefault("AUTH_HMAC_SECRET", "x" * 32)
-    env.setdefault("REDIS_URL", "redis://127.0.0.1:6379/15")
-    env.setdefault("REDIS_PREFIX", "openmontage-task8-test:")
-    legacy_path = tmp_path / "legacy.sqlite3"
-    _legacy_sqlite(legacy_path)
-
-    phase_one = _run([sys.executable, "-m", "alembic", "upgrade", "002"], env=env)
-    assert phase_one.returncode == 0, phase_one.stderr
-    migrated = _run(
-        [
-            sys.executable,
-            "-m",
-            "server.manage",
-            "migrate-legacy-projects",
-            "--sqlite-path",
-            str(legacy_path),
-        ],
-        env=env,
-    )
-    assert migrated.returncode == 0, migrated.stderr
-    assert f"Imported project ID: {UNOWNED_IDS[0]}" in migrated.stdout
-
-    listed = _run(
-        [sys.executable, "-m", "server.manage", "list-unowned-projects"], env=env
-    )
-    assert listed.returncode == 0, listed.stderr
-    assert listed.stdout.splitlines() == [UNOWNED_IDS[0]]
-
-    blocked = _run([sys.executable, "-m", "alembic", "upgrade", "003"], env=env)
-    assert blocked.returncode != 0
-    assert "1 unowned projects remain" in blocked.stderr
-
-    with engine.begin() as connection:
-        connection.execute(
-            text("DELETE FROM projects WHERE id = :project_id"),
-            {"project_id": UNOWNED_IDS[0]},
+        assert phase_one.returncode == 0, phase_one.stderr
+        migrated = _run(
+            [
+                sys.executable,
+                "-m",
+                "server.manage",
+                "migrate-legacy-projects",
+                "--sqlite-path",
+                str(legacy_path),
+            ],
+            env=env,
         )
+        assert migrated.returncode == 0, migrated.stderr
+        assert f"Imported project ID: {UNOWNED_IDS[0]}" in migrated.stdout
 
-    phase_two = _run([sys.executable, "-m", "alembic", "upgrade", "003"], env=env)
-    assert phase_two.returncode == 0, phase_two.stderr
-    current = _run([sys.executable, "-m", "alembic", "current"], env=env)
-    assert current.returncode == 0, current.stderr
-    assert "003 (head)" in current.stdout
-    check = _run([sys.executable, "-m", "alembic", "check"], env=env)
-    assert check.returncode == 0, check.stderr
-    assert "No new upgrade operations detected" in check.stdout
+        listed = _run(
+            [sys.executable, "-m", "server.manage", "list-unowned-projects"],
+            env=env,
+        )
+        assert listed.returncode == 0, listed.stderr
+        assert listed.stdout.splitlines() == [UNOWNED_IDS[0]]
 
-    engine.dispose()
+        blocked = _run(
+            [sys.executable, "-m", "alembic", "upgrade", "003"], env=env
+        )
+        assert blocked.returncode != 0
+        assert "1 unowned projects remain" in blocked.stderr
+
+        with schema_engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM projects WHERE id = :project_id"),
+                {"project_id": UNOWNED_IDS[0]},
+            )
+
+        phase_two = _run(
+            [sys.executable, "-m", "alembic", "upgrade", "003"], env=env
+        )
+        assert phase_two.returncode == 0, phase_two.stderr
+        current = _run([sys.executable, "-m", "alembic", "current"], env=env)
+        assert current.returncode == 0, current.stderr
+        assert "003 (head)" in current.stdout
+        check = _run([sys.executable, "-m", "alembic", "check"], env=env)
+        assert check.returncode == 0, check.stderr
+        assert "No new upgrade operations detected" in check.stdout
+    finally:
+        if schema_engine is not None:
+            schema_engine.dispose()
+        if schema_created:
+            with admin_engine.begin() as connection:
+                _drop_owned_test_schema(connection, schema_name)
+        admin_engine.dispose()
