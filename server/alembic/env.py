@@ -4,9 +4,12 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from server.app.auth import models
+from server.app.billing import models as billing_models
 from server.app.core.config import get_settings
 from server.app.db.base import Base
+from server.app.payments import models as payment_models
 from server.app.projects import models as project_models
+from server.app.wallet import models as wallet_models
 
 
 config = context.config

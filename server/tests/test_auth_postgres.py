@@ -576,7 +576,16 @@ def test_postgres_16_migration_blocks_unowned_projects(tmp_path):
         assert phase_two.returncode == 0, phase_two.stderr
         current = _run([sys.executable, "-m", "alembic", "current"], env=env)
         assert current.returncode == 0, current.stderr
-        assert "003 (head)" in current.stdout
+        assert current.stdout.strip() == "003"
+        upgraded_head = _run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"], env=env
+        )
+        assert upgraded_head.returncode == 0, upgraded_head.stderr
+        current_head = _run(
+            [sys.executable, "-m", "alembic", "current"], env=env
+        )
+        assert current_head.returncode == 0, current_head.stderr
+        assert current_head.stdout.strip() == "012 (head)"
         check = _run([sys.executable, "-m", "alembic", "check"], env=env)
         assert check.returncode == 0, check.stderr
         assert "No new upgrade operations detected" in check.stdout
