@@ -72,6 +72,18 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
+async function runTransaction<T>(tx: IDBTransaction, work: () => Promise<T>): Promise<T> {
+  const completion = transactionDone(tx);
+  try {
+    const result = await work();
+    await completion;
+    return result;
+  } catch (error) {
+    await completion.catch(() => undefined);
+    throw error;
+  }
+}
+
 async function database(options: MediaJournalOptions): Promise<IDBDatabase> {
   return options.db ?? openLocalDb();
 }
@@ -129,16 +141,14 @@ export async function createMediaOperation(
     leaseExpiresAt: input.leaseOwner ? leaseExpiry(now, options) : null,
   };
 
-  let completion: Promise<void> | null = null;
   try {
     const db = await database(options);
     const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
-    completion = transactionDone(tx);
-    await requestToPromise(tx.objectStore(LOCAL_STORES.mediaOperations).add(record));
-    await completion;
+    await runTransaction(tx, async () => {
+      await requestToPromise(tx.objectStore(LOCAL_STORES.mediaOperations).add(record));
+    });
     return record;
   } catch (error) {
-    await completion?.catch(() => undefined);
     throw new MediaDurabilityError(record.id, error);
   }
 }
@@ -161,16 +171,14 @@ export async function createMediaImportSession(
     leaseExpiresAt: input.leaseOwner ? leaseExpiry(now, options) : null,
   };
 
-  let completion: Promise<void> | null = null;
   try {
     const db = await database(options);
     const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
-    completion = transactionDone(tx);
-    await requestToPromise(tx.objectStore(LOCAL_STORES.mediaOperations).add(record));
-    await completion;
+    await runTransaction(tx, async () => {
+      await requestToPromise(tx.objectStore(LOCAL_STORES.mediaOperations).add(record));
+    });
     return record;
   } catch (error) {
-    await completion?.catch(() => undefined);
     throw new MediaDurabilityError(record.id, error);
   }
 }
@@ -183,28 +191,27 @@ export async function renewMediaOperationLease(
   const db = await database(options);
   const now = currentTime(options);
   const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
-  const done = transactionDone(tx);
-  const store = tx.objectStore(LOCAL_STORES.mediaOperations);
-  const record = await readRecord(store, id);
-  if (
-    !record ||
-    record.id !== id ||
-    !isActiveRecord(record) ||
-    record.leaseOwner !== leaseOwner ||
-    !hasActiveLease(record, now)
-  ) {
-    await done;
-    return null;
-  }
+  return runTransaction(tx, async () => {
+    const store = tx.objectStore(LOCAL_STORES.mediaOperations);
+    const record = await readRecord(store, id);
+    if (
+      !record ||
+      record.id !== id ||
+      !isActiveRecord(record) ||
+      record.leaseOwner !== leaseOwner ||
+      !hasActiveLease(record, now)
+    ) {
+      return null;
+    }
 
-  const updated: MediaJournalRecord = {
-    ...record,
-    updatedAt: now.toISOString(),
-    leaseExpiresAt: leaseExpiry(now, options),
-  };
-  await requestToPromise(store.put(updated));
-  await done;
-  return updated;
+    const updated: MediaJournalRecord = {
+      ...record,
+      updatedAt: now.toISOString(),
+      leaseExpiresAt: leaseExpiry(now, options),
+    };
+    await requestToPromise(store.put(updated));
+    return updated;
+  });
 }
 
 export async function markMediaOperationCleanupDue(
@@ -216,30 +223,29 @@ export async function markMediaOperationCleanupDue(
   const now = currentTime(options);
   const timestamp = now.toISOString();
   const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
-  const done = transactionDone(tx);
-  const store = tx.objectStore(LOCAL_STORES.mediaOperations);
-  const record = await readRecord(store, id);
-  if (
-    !record ||
-    record.id !== id ||
-    !isActiveRecord(record) ||
-    record.leaseOwner !== leaseOwner
-  ) {
-    await done;
-    return null;
-  }
+  return runTransaction(tx, async () => {
+    const store = tx.objectStore(LOCAL_STORES.mediaOperations);
+    const record = await readRecord(store, id);
+    if (
+      !record ||
+      record.id !== id ||
+      !isActiveRecord(record) ||
+      record.leaseOwner !== leaseOwner
+    ) {
+      return null;
+    }
 
-  const updated: MediaJournalRecord = {
-    ...record,
-    state: "cleanup_due",
-    updatedAt: timestamp,
-    nextAttemptAt: timestamp,
-    leaseOwner: null,
-    leaseExpiresAt: null,
-  };
-  await requestToPromise(store.put(updated));
-  await done;
-  return updated;
+    const updated: MediaJournalRecord = {
+      ...record,
+      state: "cleanup_due",
+      updatedAt: timestamp,
+      nextAttemptAt: timestamp,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    };
+    await requestToPromise(store.put(updated));
+    return updated;
+  });
 }
 
 export async function claimNextDueMediaOperation(
@@ -250,37 +256,36 @@ export async function claimNextDueMediaOperation(
   const now = currentTime(options);
   const timestamp = now.toISOString();
   const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
-  const done = transactionDone(tx);
-  const store = tx.objectStore(LOCAL_STORES.mediaOperations);
-  const dueRecords = await requestToPromise<MediaJournalRecord[]>(
-    store.index("nextAttemptAt").getAll(IDBKeyRange.upperBound(timestamp)),
-  );
+  return runTransaction(tx, async () => {
+    const store = tx.objectStore(LOCAL_STORES.mediaOperations);
+    const dueRecords = await requestToPromise<MediaJournalRecord[]>(
+      store.index("nextAttemptAt").getAll(IDBKeyRange.upperBound(timestamp)),
+    );
 
-  for (const candidate of dueRecords) {
-    const record = await readRecord(store, candidate.id);
-    if (
-      !record ||
-      record.id !== candidate.id ||
-      record.nextAttemptAt > timestamp ||
-      hasActiveLease(record, now)
-    ) {
-      continue;
+    for (const candidate of dueRecords) {
+      const record = await readRecord(store, candidate.id);
+      if (
+        !record ||
+        record.id !== candidate.id ||
+        record.nextAttemptAt > timestamp ||
+        hasActiveLease(record, now)
+      ) {
+        continue;
+      }
+
+      const updated: MediaJournalRecord = {
+        ...record,
+        state: "cleanup_due",
+        updatedAt: timestamp,
+        leaseOwner,
+        leaseExpiresAt: leaseExpiry(now, options),
+      };
+      await requestToPromise(store.put(updated));
+      return updated;
     }
 
-    const updated: MediaJournalRecord = {
-      ...record,
-      state: "cleanup_due",
-      updatedAt: timestamp,
-      leaseOwner,
-      leaseExpiresAt: leaseExpiry(now, options),
-    };
-    await requestToPromise(store.put(updated));
-    await done;
-    return updated;
-  }
-
-  await done;
-  return null;
+    return null;
+  });
 }
 
 export async function recordMediaOperationFailure(
@@ -291,32 +296,31 @@ export async function recordMediaOperationFailure(
   const db = await database(options);
   const now = currentTime(options);
   const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
-  const done = transactionDone(tx);
-  const store = tx.objectStore(LOCAL_STORES.mediaOperations);
-  const record = await readRecord(store, id);
-  if (
-    !record ||
-    record.id !== id ||
-    record.state !== "cleanup_due" ||
-    record.leaseOwner !== leaseOwner ||
-    !hasActiveLease(record, now)
-  ) {
-    await done;
-    return null;
-  }
+  return runTransaction(tx, async () => {
+    const store = tx.objectStore(LOCAL_STORES.mediaOperations);
+    const record = await readRecord(store, id);
+    if (
+      !record ||
+      record.id !== id ||
+      record.state !== "cleanup_due" ||
+      record.leaseOwner !== leaseOwner ||
+      !hasActiveLease(record, now)
+    ) {
+      return null;
+    }
 
-  const attempts = record.attempts + 1;
-  const updated: MediaJournalRecord = {
-    ...record,
-    attempts,
-    updatedAt: now.toISOString(),
-    nextAttemptAt: new Date(now.getTime() + retryDelay(attempts)).toISOString(),
-    leaseOwner: null,
-    leaseExpiresAt: null,
-  };
-  await requestToPromise(store.put(updated));
-  await done;
-  return updated;
+    const attempts = record.attempts + 1;
+    const updated: MediaJournalRecord = {
+      ...record,
+      attempts,
+      updatedAt: now.toISOString(),
+      nextAttemptAt: new Date(now.getTime() + retryDelay(attempts)).toISOString(),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    };
+    await requestToPromise(store.put(updated));
+    return updated;
+  });
 }
 
 export async function completeMediaJournalRecord(
@@ -327,21 +331,20 @@ export async function completeMediaJournalRecord(
   const db = await database(options);
   const now = currentTime(options);
   const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
-  const done = transactionDone(tx);
-  const store = tx.objectStore(LOCAL_STORES.mediaOperations);
-  const record = await readRecord(store, id);
-  if (
-    !record ||
-    record.id !== id ||
-    record.state !== "cleanup_due" ||
-    record.leaseOwner !== leaseOwner ||
-    !hasActiveLease(record, now)
-  ) {
-    await done;
-    return false;
-  }
+  return runTransaction(tx, async () => {
+    const store = tx.objectStore(LOCAL_STORES.mediaOperations);
+    const record = await readRecord(store, id);
+    if (
+      !record ||
+      record.id !== id ||
+      record.state !== "cleanup_due" ||
+      record.leaseOwner !== leaseOwner ||
+      !hasActiveLease(record, now)
+    ) {
+      return false;
+    }
 
-  await requestToPromise(store.delete(id));
-  await done;
-  return true;
+    await requestToPromise(store.delete(id));
+    return true;
+  });
 }

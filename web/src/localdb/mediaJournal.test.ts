@@ -43,6 +43,40 @@ async function openExtraConnection(): Promise<IDBDatabase> {
   return db;
 }
 
+async function openMutationFailureDatabase(): Promise<IDBDatabase> {
+  const request = indexedDB.open(LOCAL_DB_NAME, LOCAL_DB_VERSION);
+  request.onupgradeneeded = () => {
+    const store = request.result.createObjectStore("mediaOperations", { keyPath: "id" });
+    store.createIndex("nextAttemptAt", "nextAttemptAt", { unique: false });
+    store.createIndex("leaseOwner", "leaseOwner", { unique: true });
+    store.add({
+      ...operationInput("a-blocker"),
+      kind: "media_write",
+      state: "cleanup_due",
+      createdAt: BASE_TIME,
+      updatedAt: BASE_TIME,
+      attempts: 0,
+      nextAttemptAt: BASE_TIME,
+      leaseOwner: "tab-a",
+      leaseExpiresAt: "2026-07-11T00:00:10.000Z",
+    });
+    store.add({
+      ...operationInput("b-target"),
+      kind: "media_write",
+      state: "cleanup_due",
+      createdAt: BASE_TIME,
+      updatedAt: BASE_TIME,
+      attempts: 0,
+      nextAttemptAt: BASE_TIME,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    });
+  };
+  const db = await requestToPromise(request);
+  extraConnections.push(db);
+  return db;
+}
+
 async function loadJournalRecord(id: string): Promise<MediaJournalRecord | null> {
   const db = await openLocalDb();
   const record = await requestToPromise<MediaJournalRecord | undefined>(
@@ -195,6 +229,25 @@ describe("media journal guarded mutations", () => {
       await completeMediaJournalRecord("operation-1", "recovery-1", { now: at(1_000) }),
     ).toBe(true);
     expect(await loadJournalRecord("operation-1")).toBeNull();
+  });
+
+  it("drains an aborted mutation transaction without replacing the request error", async () => {
+    const db = await openMutationFailureDatabase();
+
+    await expect(
+      claimNextDueMediaOperation("tab-a", {
+        db,
+        now: at(),
+        leaseDurationMs: 1_000,
+      }),
+    ).rejects.toMatchObject({ name: "ConstraintError" });
+
+    const target = await requestToPromise<MediaJournalRecord>(
+      db.transaction("mediaOperations", "readonly")
+        .objectStore("mediaOperations")
+        .get("b-target"),
+    );
+    expect(target.leaseOwner).toBeNull();
   });
 });
 
