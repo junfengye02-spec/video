@@ -17,6 +17,8 @@ import type {
 
 const LOCAL_MEDIA_PREFIX = "local://media/";
 
+type RevisionedLocalProjectSnapshot = LocalProjectSnapshot & { revision: number };
+
 export class ProjectImportConflictError extends Error {
   readonly projectId: string;
 
@@ -86,11 +88,25 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
-function toLocalProjectSnapshot(snapshot: ShortDramaProjectResponse): LocalProjectSnapshot {
+function normalizeProjectRevision(record: LocalProjectSnapshot): number {
+  return Number.isSafeInteger(record.revision) && (record.revision ?? -1) >= 0
+    ? record.revision as number
+    : 0;
+}
+
+function normalizeProjectSnapshot(record: LocalProjectSnapshot): RevisionedLocalProjectSnapshot {
+  return { ...record, revision: normalizeProjectRevision(record) };
+}
+
+function toLocalProjectSnapshot(
+  snapshot: ShortDramaProjectResponse,
+  revision: number,
+): RevisionedLocalProjectSnapshot {
   return {
     id: snapshot.project.id,
     title: snapshot.project.title,
     updatedAt: new Date().toISOString(),
+    revision,
     snapshot,
   };
 }
@@ -122,15 +138,45 @@ async function loadRecentProjectId(): Promise<string | null> {
   return setting?.value ?? null;
 }
 
-export async function saveProjectSnapshot(snapshot: ShortDramaProjectResponse): Promise<void> {
+export async function saveProjectSnapshot(
+  snapshot: ShortDramaProjectResponse,
+): Promise<RevisionedLocalProjectSnapshot> {
   const db = await openLocalDb();
   const tx = db.transaction([LOCAL_STORES.projects, LOCAL_STORES.settings], "readwrite");
-  tx.objectStore(LOCAL_STORES.projects).put(toLocalProjectSnapshot(snapshot));
-  tx.objectStore(LOCAL_STORES.settings).put({
-    key: "recentProjectId",
-    value: snapshot.project.id,
-  } satisfies LocalSettingsRecord);
-  await transactionDone(tx);
+  return runTransaction(tx, async () => {
+    const projectStore = tx.objectStore(LOCAL_STORES.projects);
+    const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
+      projectStore.get(snapshot.project.id),
+    );
+    const record = toLocalProjectSnapshot(
+      snapshot,
+      (existing ? normalizeProjectRevision(existing) : 0) + 1,
+    );
+    projectStore.put(record);
+    tx.objectStore(LOCAL_STORES.settings).put({
+      key: "recentProjectId",
+      value: snapshot.project.id,
+    } satisfies LocalSettingsRecord);
+    return record;
+  });
+}
+
+export async function saveProjectSnapshotIfRevision(
+  snapshot: ShortDramaProjectResponse,
+  expectedRevision: number,
+): Promise<RevisionedLocalProjectSnapshot | null> {
+  const db = await openLocalDb();
+  const tx = db.transaction(LOCAL_STORES.projects, "readwrite");
+  return runTransaction(tx, async () => {
+    const projectStore = tx.objectStore(LOCAL_STORES.projects);
+    const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
+      projectStore.get(snapshot.project.id),
+    );
+    if (!existing || normalizeProjectRevision(existing) !== expectedRevision) return null;
+    const record = toLocalProjectSnapshot(snapshot, expectedRevision + 1);
+    projectStore.put(record);
+    return record;
+  });
 }
 
 export async function saveImportedProjectSnapshot(
@@ -150,7 +196,10 @@ export async function saveImportedProjectSnapshot(
     throw new ProjectImportConflictError(snapshot.project.id);
   }
 
-  projectStore.put(toLocalProjectSnapshot(snapshot));
+  projectStore.put(toLocalProjectSnapshot(
+    snapshot,
+    (existing ? normalizeProjectRevision(existing) : 0) + 1,
+  ));
   tx.objectStore(LOCAL_STORES.settings).put({
     key: "recentProjectId",
     value: snapshot.project.id,
@@ -239,7 +288,10 @@ export async function commitImportedProject(
         return;
       }
 
-      projectStore.put(toLocalProjectSnapshot(snapshot));
+      projectStore.put(toLocalProjectSnapshot(
+        snapshot,
+        (existing ? normalizeProjectRevision(existing) : 0) + 1,
+      ));
       tx.objectStore(LOCAL_STORES.settings).put({
         key: "recentProjectId",
         value: snapshot.project.id,
@@ -267,16 +319,18 @@ export async function setRecentProjectId(projectId: string | null): Promise<void
   await transactionDone(tx);
 }
 
-export async function loadProjectSnapshot(projectId: string): Promise<LocalProjectSnapshot | null> {
+export async function loadProjectSnapshot(
+  projectId: string,
+): Promise<RevisionedLocalProjectSnapshot | null> {
   const db = await openLocalDb();
   const tx = db.transaction(LOCAL_STORES.projects, "readonly");
   const value = await requestToPromise<LocalProjectSnapshot | undefined>(
     tx.objectStore(LOCAL_STORES.projects).get(projectId),
   );
-  return value ?? null;
+  return value ? normalizeProjectSnapshot(value) : null;
 }
 
-export async function loadRecentProjectSnapshot(): Promise<LocalProjectSnapshot | null> {
+export async function loadRecentProjectSnapshot(): Promise<RevisionedLocalProjectSnapshot | null> {
   const recentProjectId = await loadRecentProjectId();
   if (!recentProjectId) {
     return null;

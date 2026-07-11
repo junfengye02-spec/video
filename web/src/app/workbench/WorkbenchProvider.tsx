@@ -47,6 +47,7 @@ import { resolveLocalMediaUrl, revokeLocalMediaUrls } from "../../localdb/mediaU
 import {
   loadProjectSnapshot,
   saveProjectSnapshot,
+  saveProjectSnapshotIfRevision,
   setRecentProjectId,
 } from "../../localdb/projectStore";
 import { getStorageEstimate } from "../../localdb/storageEstimate";
@@ -266,6 +267,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<ShortDramaProjectResponse | null>(null);
   const snapshotRef = useRef<ShortDramaProjectResponse | null>(null);
   const snapshotRevisionRef = useRef(0);
+  const storageRevisionRef = useRef({ projectId: null as string | null, revision: 0 });
   const projectEpochRef = useRef(0);
   const operationSequencesRef = useRef({ ...INITIAL_OPERATION_SEQUENCES });
   const creationSequenceRef = useRef(0);
@@ -281,6 +283,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const backgroundCacheGenerationRef = useRef(0);
   const nextBackgroundCacheJobRef = useRef(0);
   const backgroundCacheJobsRef = useRef(new Map<number, LocalBackupStatus>());
+  const scheduledBackgroundTasksRef = useRef(new Set<ReturnType<typeof setTimeout>>());
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null);
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -295,6 +298,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(INITIAL_BUSY);
 
   const updateLocalBackupStatus = useCallback(() => {
+    if (!mediaMountedRef.current) return;
     const jobs = Array.from(backgroundCacheJobsRef.current.values());
     setLocalBackupStatus(
       jobs.includes("saving") ? "saving" : jobs.includes("retrying") ? "retrying" : "idle",
@@ -305,6 +309,21 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     backgroundCacheGenerationRef.current += 1;
     backgroundCacheJobsRef.current.clear();
     setLocalBackupStatus("idle");
+  }, []);
+
+  const clearScheduledBackgroundTasks = useCallback(() => {
+    scheduledBackgroundTasksRef.current.forEach((timer) => clearTimeout(timer));
+    scheduledBackgroundTasksRef.current.clear();
+  }, []);
+
+  const scheduleBackgroundTask = useCallback((task: () => void) => {
+    const generation = backgroundCacheGenerationRef.current;
+    const timer = setTimeout(() => {
+      scheduledBackgroundTasksRef.current.delete(timer);
+      if (!mediaMountedRef.current || generation !== backgroundCacheGenerationRef.current) return;
+      task();
+    }, 0);
+    scheduledBackgroundTasksRef.current.add(timer);
   }, []);
 
   const beginBackgroundCacheJob = useCallback((): BackgroundCacheJobToken => {
@@ -335,7 +354,11 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   );
 
   const invalidateProjectOperations = useCallback(() => {
+    clearScheduledBackgroundTasks();
     projectEpochRef.current += 1;
+    (Object.keys(operationSequencesRef.current) as ProjectOperationName[]).forEach((name) => {
+      operationSequencesRef.current[name] += 1;
+    });
     projectLoadGenerationRef.current += 1;
     creationSequenceRef.current += 1;
     resetLocalBackupState();
@@ -343,7 +366,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       ...INITIAL_BUSY,
       savingProvider: current.savingProvider,
     }));
-  }, [resetLocalBackupState]);
+  }, [clearScheduledBackgroundTasks, resetLocalBackupState]);
 
   const beginProjectOperation = useCallback(
     (name: ProjectOperationName, projectId: string): ProjectOperationToken => {
@@ -355,7 +378,8 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   );
 
   const isProjectOperationCurrent = useCallback((token: ProjectOperationToken): boolean => (
-    token.epoch === projectEpochRef.current
+    mediaMountedRef.current
+    && token.epoch === projectEpochRef.current
     && token.sequence === operationSequencesRef.current[token.name]
     && token.projectId === snapshotRef.current?.project.id
   ), []);
@@ -376,6 +400,10 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     });
   }, [resetLocalBackupState]);
 
+  const recordStorageRevision = useCallback((projectId: string, revision: number) => {
+    storageRevisionRef.current = { projectId, revision };
+  }, []);
+
   const refreshStorageEstimate = useCallback(async () => {
     try {
       await getStorageEstimate();
@@ -389,7 +417,8 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       if (!isCurrent()) return;
       applyProjectSnapshot(next);
       try {
-        await saveProjectSnapshot(next);
+        const saved = await saveProjectSnapshot(next);
+        recordStorageRevision(saved.id, saved.revision ?? 0);
         void refreshStorageEstimate();
       } catch {
         if (isCurrent()) {
@@ -397,7 +426,12 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [applyProjectSnapshot, refreshStorageEstimate, strings.errors.localProjectSaveFallback],
+    [
+      applyProjectSnapshot,
+      recordStorageRevision,
+      refreshStorageEstimate,
+      strings.errors.localProjectSaveFallback,
+    ],
   );
 
   const persistIfCurrent = useCallback(
@@ -419,48 +453,46 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       mutate: (current: ShortDramaProjectResponse) => ShortDramaProjectResponse,
       isCurrent: () => boolean,
     ): Promise<boolean> => {
-      const repairCurrentSnapshot = async (): Promise<boolean> => {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          const latest = snapshotRef.current;
-          if (latest?.project.id !== projectId) return false;
-          const revision = snapshotRevisionRef.current;
-          try {
-            await saveProjectSnapshot(latest);
-          } catch {
-            return false;
-          }
-          if (snapshotRef.current?.project.id !== projectId) return false;
-          if (revision === snapshotRevisionRef.current) return true;
-        }
+      const current = snapshotRef.current;
+      const stored = storageRevisionRef.current;
+      if (current?.project.id !== projectId || !isCurrent() || stored.projectId !== projectId) {
+        return true;
+      }
+      const memoryRevision = snapshotRevisionRef.current;
+      const candidate = mutate(current);
+      let saved;
+      try {
+        saved = await saveProjectSnapshotIfRevision(candidate, stored.revision);
+      } catch {
         return false;
-      };
+      }
+      if (!saved) return true;
 
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const current = snapshotRef.current;
-        if (current?.project.id !== projectId || !isCurrent()) return false;
-        const revision = snapshotRevisionRef.current;
-        const next = mutate(current);
+      const latest = snapshotRef.current;
+      if (
+        latest?.project.id !== projectId
+        || !isCurrent()
+        || memoryRevision !== snapshotRevisionRef.current
+      ) {
+        if (latest?.project.id !== projectId) return true;
         try {
-          await saveProjectSnapshot(next);
+          const repaired = await saveProjectSnapshotIfRevision(
+            latest,
+            saved.revision ?? stored.revision + 1,
+          );
+          if (repaired) recordStorageRevision(projectId, repaired.revision ?? 0);
+          return true;
         } catch {
           return false;
         }
-        const latest = snapshotRef.current;
-        if (latest?.project.id !== projectId) return false;
-        if (!isCurrent()) {
-          return repairCurrentSnapshot();
-        }
-        if (revision !== snapshotRevisionRef.current) continue;
-        applyProjectSnapshot(next);
-        if (snapshotRef.current?.project.id === projectId) {
-          void refreshStorageEstimate();
-          return true;
-        }
       }
-      await repairCurrentSnapshot();
-      return false;
+
+      recordStorageRevision(projectId, saved.revision ?? stored.revision + 1);
+      applyProjectSnapshot(candidate);
+      void refreshStorageEstimate();
+      return true;
     },
-    [applyProjectSnapshot, refreshStorageEstimate],
+    [applyProjectSnapshot, recordStorageRevision, refreshStorageEstimate],
   );
 
   const refreshAuthoritativeProject = useCallback(
@@ -508,13 +540,24 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     }
   }, [resetMediaResolver, snapshot?.project.id]);
 
-  useEffect(() => () => {
-    mediaMountedRef.current = false;
-    backgroundCacheGenerationRef.current += 1;
-    backgroundCacheJobsRef.current.clear();
-    failedMediaRefsRef.current.clear();
-    revokeLocalMediaUrls();
-  }, []);
+  useEffect(() => {
+    mediaMountedRef.current = true;
+    return () => {
+      mediaMountedRef.current = false;
+      projectEpochRef.current += 1;
+      (Object.keys(operationSequencesRef.current) as ProjectOperationName[]).forEach((name) => {
+        operationSequencesRef.current[name] += 1;
+      });
+      projectLoadGenerationRef.current += 1;
+      creationSequenceRef.current += 1;
+      providerSaveSequenceRef.current += 1;
+      clearScheduledBackgroundTasks();
+      backgroundCacheGenerationRef.current += 1;
+      backgroundCacheJobsRef.current.clear();
+      failedMediaRefsRef.current.clear();
+      revokeLocalMediaUrls();
+    };
+  }, [clearScheduledBackgroundTasks]);
 
   useEffect(() => {
     if (mediaResetSnapshotRef.current === snapshot) {
@@ -530,10 +573,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     const projectId = snapshot?.project.id ?? null;
     const generation = mediaGenerationRef.current;
     const refs = Array.from(collectLocalMediaRefs(snapshot));
-    const hasStaleResolution = Array.from(resolvingMediaRefsRef.current).some(
-      (key) => !key.startsWith(`${generation}:`),
-    );
-    if (hasStaleResolution) return;
     const unresolved = refs.filter((ref) => {
       const pendingKey = `${generation}:${projectId ?? ""}:${ref}`;
       return !localMediaUrls[ref]
@@ -610,6 +649,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       if (generation !== projectLoadGenerationRef.current) return Boolean(record);
       pendingProjectLoadRef.current = null;
       if (!record) return false;
+      recordStorageRevision(projectId, record.revision ?? 0);
 
       const overlays = new Map<string, LocalMediaRef>();
       await Promise.all(collectRemoteMediaSourcePaths(record.snapshot).map(async (sourcePath) => {
@@ -641,7 +681,12 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       }
       return true;
     },
-    [applyProjectSnapshot, invalidateProjectOperations, strings.errors.localProjectSaveFallback],
+    [
+      applyProjectSnapshot,
+      invalidateProjectOperations,
+      recordStorageRevision,
+      strings.errors.localProjectSaveFallback,
+    ],
   );
 
   const createProject = useCallback(
@@ -878,40 +923,42 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
         const entityVersion = result.shot.version;
         const publishedRevision = snapshotRevisionRef.current;
         const cacheJob = beginBackgroundCacheJob();
-        void (async () => {
-          try {
-            const localRef = await cacheRemoteMedia(url, { projectId, sourcePath });
-            if (!localRef) throw new Error("Remote media was not cached");
-            const promotionIsCurrent = () => {
-              if (!isCurrent() || snapshotRevisionRef.current < publishedRevision) return false;
-              const currentShot = snapshotRef.current?.storyboard.shots.find(
-                (item) => item.id === entityId,
+        scheduleBackgroundTask(() => {
+          void (async () => {
+            try {
+              const localRef = await cacheRemoteMedia(url, { projectId, sourcePath });
+              if (!localRef) throw new Error("Remote media was not cached");
+              const promotionIsCurrent = () => {
+                if (!isCurrent() || snapshotRevisionRef.current < publishedRevision) return false;
+                const currentShot = snapshotRef.current?.storyboard.shots.find(
+                  (item) => item.id === entityId,
+                );
+                return currentShot?.version === entityVersion
+                  && currentShot.output_path === sourcePath;
+              };
+              if (!promotionIsCurrent()) {
+                finishBackgroundCacheJob(cacheJob, false);
+                return;
+              }
+              const persisted = await persistBackgroundIfCurrent(
+                projectId,
+                (currentSnapshot) => ({
+                  ...currentSnapshot,
+                  storyboard: {
+                    ...currentSnapshot.storyboard,
+                    shots: currentSnapshot.storyboard.shots.map((item) => item.id === entityId
+                      ? { ...item, output_path: localRef, output_url: null }
+                      : item),
+                  },
+                }),
+                promotionIsCurrent,
               );
-              return currentShot?.version === entityVersion
-                && currentShot.output_path === sourcePath;
-            };
-            if (!promotionIsCurrent()) {
-              finishBackgroundCacheJob(cacheJob, false);
-              return;
+              finishBackgroundCacheJob(cacheJob, !persisted);
+            } catch {
+              finishBackgroundCacheJob(cacheJob, true);
             }
-            const persisted = await persistBackgroundIfCurrent(
-              projectId,
-              (currentSnapshot) => ({
-                ...currentSnapshot,
-                storyboard: {
-                  ...currentSnapshot.storyboard,
-                  shots: currentSnapshot.storyboard.shots.map((item) => item.id === entityId
-                    ? { ...item, output_path: localRef, output_url: null }
-                    : item),
-                },
-              }),
-              promotionIsCurrent,
-            );
-            finishBackgroundCacheJob(cacheJob, !persisted);
-          } catch {
-            finishBackgroundCacheJob(cacheJob, true);
-          }
-        })();
+          })();
+        });
       } catch (regenerationError) {
         const message = errorMessage(
           regenerationError,
@@ -931,6 +978,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       persistBackgroundIfCurrent,
       persistIfCurrent,
       providerCredentials,
+      scheduleBackgroundTask,
       setBusyValue,
       strings.errors,
     ],
@@ -1078,87 +1126,86 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       const responseSource = result.final_path;
       const responseEntityVersion = JSON.stringify(result.render_report.outputs);
       const cacheJob = beginBackgroundCacheJob();
-      void (async () => {
-        try {
-          let selectedSource = responseSource;
-          let selectedReport = result.render_report;
-          const responseIsCurrent = () => (
-            isCurrent()
-            && snapshotRevisionRef.current >= publishedRevision
-            && snapshotRef.current?.final_path === responseSource
-            && JSON.stringify(snapshotRef.current.render_report?.outputs ?? []) === responseEntityVersion
-          );
-
-          let authoritative: ShortDramaProjectResponse | null = null;
+      scheduleBackgroundTask(() => {
+        void (async () => {
           try {
-            authoritative = await refreshAuthoritativeProject(projectId, responseIsCurrent);
-          } catch {
-            // The persisted POST result remains authoritative when refresh is unavailable.
-          }
-          if (!isCurrent()) {
-            finishBackgroundCacheJob(cacheJob, false);
-            return;
-          }
-          if (
-            authoritative
-            && isCompleteRenderSource(authoritative.final_path, authoritative.render_report)
-            && responseIsCurrent()
-          ) {
-            const currentSnapshot = snapshotRef.current;
-            if (!currentSnapshot) {
+            let selectedSource = responseSource;
+            let selectedReport = result.render_report;
+            const responseIsCurrent = () => (
+              isCurrent()
+              && snapshotRevisionRef.current >= publishedRevision
+              && snapshotRef.current?.final_path === responseSource
+              && JSON.stringify(snapshotRef.current.render_report?.outputs ?? []) === responseEntityVersion
+            );
+
+            let authoritative: ShortDramaProjectResponse | null = null;
+            try {
+              authoritative = await refreshAuthoritativeProject(projectId, responseIsCurrent);
+            } catch {
+              // The persisted POST result remains authoritative when refresh is unavailable.
+            }
+            if (!isCurrent()) {
               finishBackgroundCacheJob(cacheJob, false);
               return;
             }
-            selectedSource = authoritative.final_path as string;
-            selectedReport = authoritative.render_report as RenderReport;
-            const persisted = await persistBackgroundIfCurrent(
-              projectId,
-              (latestSnapshot) => {
-                const reconciled = mergeAuthoritativeMediaOverlays(authoritative, latestSnapshot);
-                return {
-                  ...reconciled,
+            if (
+              authoritative
+              && isCompleteRenderSource(authoritative.final_path, authoritative.render_report)
+              && responseIsCurrent()
+            ) {
+              const currentSnapshot = snapshotRef.current;
+              if (!currentSnapshot) {
+                finishBackgroundCacheJob(cacheJob, false);
+                return;
+              }
+              selectedSource = authoritative.final_path as string;
+              selectedReport = authoritative.render_report as RenderReport;
+              const persisted = await persistBackgroundIfCurrent(
+                projectId,
+                (latestSnapshot) => ({
+                  ...latestSnapshot,
                   render_report: selectedReport,
                   final_path: selectedSource,
-                };
-              },
-              responseIsCurrent,
-            );
-            if (!persisted) throw new Error("Render reconciliation was not persisted");
-          }
+                }),
+                responseIsCurrent,
+              );
+              if (!persisted) throw new Error("Render reconciliation was not persisted");
+            }
 
-          const sourceRevision = snapshotRevisionRef.current;
-          const selectedEntityVersion = JSON.stringify(selectedReport.outputs);
-          const promotionIsCurrent = () => (
-            isCurrent()
-            && snapshotRevisionRef.current >= sourceRevision
-            && snapshotRef.current?.final_path === selectedSource
-            && JSON.stringify(snapshotRef.current.render_report?.outputs ?? []) === selectedEntityVersion
-          );
-          if (!promotionIsCurrent()) {
-            finishBackgroundCacheJob(cacheJob, false);
-            return;
+            const sourceRevision = snapshotRevisionRef.current;
+            const selectedEntityVersion = JSON.stringify(selectedReport.outputs);
+            const promotionIsCurrent = () => (
+              isCurrent()
+              && snapshotRevisionRef.current >= sourceRevision
+              && snapshotRef.current?.final_path === selectedSource
+              && JSON.stringify(snapshotRef.current.render_report?.outputs ?? []) === selectedEntityVersion
+            );
+            if (!promotionIsCurrent()) {
+              finishBackgroundCacheJob(cacheJob, false);
+              return;
+            }
+            const url = mediaUrl(selectedSource, projectId);
+            if (!url) throw new Error("Final render URL is unavailable");
+            const localRef = await cacheRemoteMedia(url, {
+              projectId,
+              sourcePath: selectedSource,
+            });
+            if (!localRef) throw new Error("Final render was not cached");
+            if (!promotionIsCurrent()) {
+              finishBackgroundCacheJob(cacheJob, false);
+              return;
+            }
+            const persisted = await persistBackgroundIfCurrent(
+              projectId,
+              (currentSnapshot) => ({ ...currentSnapshot, final_path: localRef }),
+              promotionIsCurrent,
+            );
+            finishBackgroundCacheJob(cacheJob, !persisted);
+          } catch {
+            finishBackgroundCacheJob(cacheJob, true);
           }
-          const url = mediaUrl(selectedSource, projectId);
-          if (!url) throw new Error("Final render URL is unavailable");
-          const localRef = await cacheRemoteMedia(url, {
-            projectId,
-            sourcePath: selectedSource,
-          });
-          if (!localRef) throw new Error("Final render was not cached");
-          if (!promotionIsCurrent()) {
-            finishBackgroundCacheJob(cacheJob, false);
-            return;
-          }
-          const persisted = await persistBackgroundIfCurrent(
-            projectId,
-            (currentSnapshot) => ({ ...currentSnapshot, final_path: localRef }),
-            promotionIsCurrent,
-          );
-          finishBackgroundCacheJob(cacheJob, !persisted);
-        } catch {
-          finishBackgroundCacheJob(cacheJob, true);
-        }
-      })();
+        })();
+      });
     } catch (renderError) {
       const message = errorMessage(renderError, strings.errors.renderFallback);
       if (isCurrent()) setError(message);
@@ -1175,6 +1222,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     persistIfCurrent,
     providerCredentials,
     refreshAuthoritativeProject,
+    scheduleBackgroundTask,
     setBusyValue,
     strings.errors,
   ]);

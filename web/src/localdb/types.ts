@@ -10,6 +10,7 @@ export interface LocalProjectSnapshot {
   id: string;
   title: string;
   updatedAt: string;
+  revision?: number;
   snapshot: ShortDramaProjectResponse;
 }
 

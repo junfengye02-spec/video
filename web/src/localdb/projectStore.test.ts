@@ -10,6 +10,7 @@ import {
   loadProjectSnapshot,
   loadRecentProjectSnapshot,
   saveProjectSnapshot,
+  saveProjectSnapshotIfRevision,
   setRecentProjectId,
 } from "./projectStore";
 import type { LocalMediaRecord, LocalMediaRef, MediaJournalRecord } from "./types";
@@ -210,6 +211,68 @@ afterEach(async () => {
 });
 
 describe("projectStore", () => {
+  it("normalizes a legacy project record without a durable revision to zero", async () => {
+    const legacy = snapshot("legacy-revision", "Legacy Revision");
+    await putRecord("projects", {
+      id: legacy.project.id,
+      title: legacy.project.title,
+      updatedAt: "2026-07-11T00:00:00.000Z",
+      snapshot: legacy,
+    });
+
+    expect(await loadProjectSnapshot("legacy-revision")).toMatchObject({ revision: 0 });
+  });
+
+  it("increments and returns the durable revision for every normal save", async () => {
+    const first = await saveProjectSnapshot(snapshot("revisioned", "First"));
+    const second = await saveProjectSnapshot(snapshot("revisioned", "Second"));
+
+    expect(first.revision).toBe(1);
+    expect(second.revision).toBe(2);
+    expect(await loadProjectSnapshot("revisioned")).toMatchObject({
+      revision: 2,
+      title: "Second",
+    });
+  });
+
+  it("conditionally saves and returns a new revision on an exact match", async () => {
+    const initial = await saveProjectSnapshot(snapshot("cas", "Initial"));
+
+    const saved = await saveProjectSnapshotIfRevision(
+      snapshot("cas", "Conditional"),
+      initial.revision,
+    );
+
+    expect(saved).toMatchObject({ revision: 2, title: "Conditional" });
+    expect(await loadProjectSnapshot("cas")).toMatchObject({
+      revision: 2,
+      title: "Conditional",
+    });
+  });
+
+  it("rejects a stale conditional revision without writing", async () => {
+    const initial = await saveProjectSnapshot(snapshot("cas-stale", "Initial"));
+    await saveProjectSnapshot(snapshot("cas-stale", "Newer"));
+
+    await expect(saveProjectSnapshotIfRevision(
+      snapshot("cas-stale", "Stale"),
+      initial.revision,
+    )).resolves.toBeNull();
+    expect(await loadProjectSnapshot("cas-stale")).toMatchObject({
+      revision: 2,
+      title: "Newer",
+    });
+  });
+
+  it("does not recreate a missing project through conditional save", async () => {
+    await expect(saveProjectSnapshotIfRevision(
+      snapshot("cas-deleted", "Deleted"),
+      0,
+    )).resolves.toBeNull();
+
+    expect(await loadProjectSnapshot("cas-deleted")).toBeNull();
+  });
+
   it("keeps imported media staged until one transaction publishes the project and session", async () => {
     const sessionId = await projectImportApi.beginProjectImport("imported");
     const writer = await beginMediaWrite({

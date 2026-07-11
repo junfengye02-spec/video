@@ -33,6 +33,7 @@ const localProjectStoreMocks = vi.hoisted(() => ({
   loadProjectSnapshot: vi.fn(),
   loadRecentProjectSnapshot: vi.fn(),
   saveProjectSnapshot: vi.fn(),
+  saveProjectSnapshotIfRevision: vi.fn(),
   setRecentProjectId: vi.fn(),
 }));
 
@@ -134,7 +135,26 @@ describe("App routes", () => {
     localProjectStoreMocks.listProjectSummaries.mockResolvedValue([]);
     localProjectStoreMocks.loadRecentProjectSnapshot.mockResolvedValue(null);
     localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue(null);
-    localProjectStoreMocks.saveProjectSnapshot.mockResolvedValue(undefined);
+    let storageRevision = 0;
+    localProjectStoreMocks.saveProjectSnapshot.mockImplementation((next: ShortDramaProjectResponse) => Promise.resolve({
+      id: next.project.id,
+      title: next.project.title,
+      updatedAt: "2026-07-11T08:00:00Z",
+      revision: ++storageRevision,
+      snapshot: structuredClone(next),
+    }));
+    localProjectStoreMocks.saveProjectSnapshotIfRevision.mockImplementation(
+      (next: ShortDramaProjectResponse, expectedRevision: number) => {
+        if (expectedRevision !== storageRevision) return Promise.resolve(null);
+        return Promise.resolve({
+          id: next.project.id,
+          title: next.project.title,
+          updatedAt: "2026-07-11T08:00:00Z",
+          revision: ++storageRevision,
+          snapshot: structuredClone(next),
+        });
+      },
+    );
     localProjectStoreMocks.setRecentProjectId.mockResolvedValue(undefined);
     localStorageEstimateMocks.getStorageEstimate.mockResolvedValue({
       usageBytes: 0,
