@@ -121,6 +121,42 @@ async function deleteLocalDb() {
   });
 }
 
+function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+async function createLegacyDatabase(version: 1 | 2 | 3): Promise<void> {
+  const request = indexedDB.open(LOCAL_DB_NAME, version);
+  request.onupgradeneeded = () => {
+    const db = request.result;
+    db.createObjectStore("projects", { keyPath: "id" });
+    db.createObjectStore("settings", { keyPath: "key" });
+    const mediaStore = db.createObjectStore("media", { keyPath: "id" });
+    if (version >= 2) {
+      mediaStore.createIndex("projectId", "projectId", { unique: false });
+    }
+    if (version >= 3) {
+      db.createObjectStore("mediaPending", { keyPath: "id" });
+    }
+    mediaStore.put({
+      id: `legacy-media-v${version}`,
+      projectId: "legacy-project",
+      sourcePath: "assets/legacy.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 6,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      storage: "indexeddb",
+      blob: new Blob(["legacy"], { type: "video/mp4" }),
+    });
+  };
+  const db = await requestToPromise(request);
+  db.close();
+  resetLocalDbForTests();
+}
+
 afterEach(async () => {
   vi.restoreAllMocks();
   if (originalStorage) {
@@ -188,29 +224,41 @@ describe("projectStore", () => {
     expect(await loadRecentProjectSnapshot()).toBeNull();
   });
 
-  it("migrates a version 1 database with media indexes and pending writes", async () => {
-    await deleteLocalDb();
-    const legacyRequest = indexedDB.open(LOCAL_DB_NAME, 1);
-    legacyRequest.onupgradeneeded = () => {
-      const db = legacyRequest.result;
-      db.createObjectStore("projects", { keyPath: "id" });
-      db.createObjectStore("settings", { keyPath: "key" });
-      db.createObjectStore("media", { keyPath: "id" });
-    };
-    const legacyDb = await new Promise<IDBDatabase>((resolve, reject) => {
-      legacyRequest.onerror = () => reject(legacyRequest.error);
-      legacyRequest.onsuccess = () => resolve(legacyRequest.result);
-    });
-    legacyDb.close();
-    resetLocalDbForTests();
+  it.each([1, 2, 3] as const)(
+    "migrates a version %i database to the complete v4 schema",
+    async (version) => {
+      await deleteLocalDb();
+      await createLegacyDatabase(version);
 
-    const db = await openLocalDb();
-    const mediaStore = db.transaction("media", "readonly").objectStore("media");
+      const db = await openLocalDb();
+      const tx = db.transaction(["media", "mediaOperations"], "readonly");
+      const mediaStore = tx.objectStore("media");
+      const operationStore = tx.objectStore("mediaOperations");
+      const legacyMedia = await requestToPromise<Record<string, unknown> | undefined>(
+        mediaStore.get(`legacy-media-v${version}`),
+      );
 
-    expect(db.version).toBe(3);
-    expect(mediaStore.indexNames.contains("projectId")).toBe(true);
-    expect(db.objectStoreNames.contains("mediaPending")).toBe(true);
-  });
+      expect(db.version).toBe(4);
+      expect(Array.from(db.objectStoreNames)).toEqual([
+        "media",
+        "mediaOperations",
+        "mediaPending",
+        "projects",
+        "settings",
+      ]);
+      expect(Array.from(mediaStore.indexNames)).toEqual(["projectId", "projectSource"]);
+      expect(mediaStore.index("projectSource").keyPath).toEqual(["projectId", "sourcePath"]);
+      expect(mediaStore.index("projectSource").unique).toBe(false);
+      expect(Array.from(operationStore.indexNames)).toEqual([
+        "leaseExpiresAt",
+        "nextAttemptAt",
+        "projectId",
+      ]);
+      expect(legacyMedia).toEqual(
+        expect.objectContaining({ state: "committed", importSessionId: null }),
+      );
+    },
+  );
 
   it("deletes project-owned IndexedDB media without touching another project", async () => {
     const firstRef = await saveMediaBlob({

@@ -5,6 +5,7 @@ export const LOCAL_STORES = {
   settings: "settings",
   media: "media",
   mediaPending: "mediaPending",
+  mediaOperations: "mediaOperations",
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -32,8 +33,37 @@ export function openLocalDb(): Promise<IDBDatabase> {
       if (!mediaStore.indexNames.contains("projectId")) {
         mediaStore.createIndex("projectId", "projectId", { unique: false });
       }
+      if (!mediaStore.indexNames.contains("projectSource")) {
+        mediaStore.createIndex("projectSource", ["projectId", "sourcePath"], { unique: false });
+      }
+      const legacyMediaCursor = mediaStore.openCursor();
+      legacyMediaCursor.onsuccess = () => {
+        const cursor = legacyMediaCursor.result;
+        if (!cursor) return;
+        const record = cursor.value as Record<string, unknown>;
+        if (!("state" in record) || !("importSessionId" in record)) {
+          cursor.update({
+            ...record,
+            state: record.state ?? "committed",
+            importSessionId: record.importSessionId ?? null,
+          });
+        }
+        cursor.continue();
+      };
       if (!db.objectStoreNames.contains(LOCAL_STORES.mediaPending)) {
         db.createObjectStore(LOCAL_STORES.mediaPending, { keyPath: "id" });
+      }
+      const operationStore = db.objectStoreNames.contains(LOCAL_STORES.mediaOperations)
+        ? request.transaction!.objectStore(LOCAL_STORES.mediaOperations)
+        : db.createObjectStore(LOCAL_STORES.mediaOperations, { keyPath: "id" });
+      if (!operationStore.indexNames.contains("projectId")) {
+        operationStore.createIndex("projectId", "projectId", { unique: false });
+      }
+      if (!operationStore.indexNames.contains("nextAttemptAt")) {
+        operationStore.createIndex("nextAttemptAt", "nextAttemptAt", { unique: false });
+      }
+      if (!operationStore.indexNames.contains("leaseExpiresAt")) {
+        operationStore.createIndex("leaseExpiresAt", "leaseExpiresAt", { unique: false });
       }
     };
 
