@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.pool import StaticPool
 
 from server.app.auth.models import User
@@ -132,7 +133,7 @@ def test_wallet_account_is_unique_per_user(db_session, user):
 
 @pytest.mark.parametrize(
     ("balance_units", "held_units", "version"),
-    [(-1, 0, 0), (10, -1, 0), (10, 11, 0), (10, 0, -1)],
+    [(-1, 0, 0), (10, -1, 0), (10, 11, 0)],
 )
 def test_wallet_account_rejects_invalid_cached_balances(
     db_session, user, balance_units, held_units, version
@@ -147,6 +148,80 @@ def test_wallet_account_rejects_invalid_cached_balances(
             version=version,
         ),
     )
+
+
+def test_wallet_account_database_rejects_negative_version(db_session, user):
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            WalletAccount.__table__.insert().values(
+                id="w1",
+                user_id=user.id,
+                balance_units=10,
+                held_units=0,
+                version=-1,
+            )
+        )
+        db_session.commit()
+
+
+def test_wallet_account_version_starts_at_zero_and_increments_on_update(
+    db_session, user
+):
+    wallet = WalletAccount(
+        id="w1", user_id=user.id, balance_units=0, held_units=0
+    )
+    db_session.add(wallet)
+    db_session.commit()
+    assert wallet.version == 0
+
+    wallet.balance_units = 10
+    db_session.commit()
+    assert wallet.version == 1
+
+
+def test_wallet_account_stale_orm_writer_is_rejected(tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'wallet-version.db'}")
+
+    @event.listens_for(engine, "connect")
+    def enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    with Session(engine) as seed:
+        seed.add(
+            User(
+                id="u1",
+                email="wallet-version@example.com",
+                password_hash="hash",
+                role="user",
+                status="active",
+            )
+        )
+        seed.commit()
+        seed.add(
+            WalletAccount(
+                id="w1", user_id="u1", balance_units=0, held_units=0
+            )
+        )
+        seed.commit()
+
+    with Session(engine, expire_on_commit=False) as first, Session(
+        engine, expire_on_commit=False
+    ) as stale:
+        first_wallet = first.get(WalletAccount, "w1")
+        stale_wallet = stale.get(WalletAccount, "w1")
+        assert first_wallet is not None and stale_wallet is not None
+        assert first_wallet.version == stale_wallet.version == 0
+
+        first_wallet.balance_units = 10
+        first.commit()
+        assert first_wallet.version == 1
+
+        stale_wallet.balance_units = 20
+        with pytest.raises(StaleDataError):
+            stale.commit()
+
+    engine.dispose()
 
 
 def test_wallet_entry_is_signed_append_only_and_idempotent(db_session, user):
@@ -182,6 +257,42 @@ def test_wallet_entry_is_signed_append_only_and_idempotent(db_session, user):
             idempotency_key="consume:c1",
         ),
     )
+
+
+def _persist_wallet_entry(db_session: Session, user: User) -> WalletEntry:
+    wallet = WalletAccount(
+        id="w1", user_id=user.id, balance_units=100, held_units=0, version=0
+    )
+    entry = WalletEntry(
+        id="e1",
+        wallet_id=wallet.id,
+        user_id=user.id,
+        amount_units=100,
+        balance_after_units=100,
+        kind="topup",
+        source_type="payment_order",
+        source_id="o1",
+        idempotency_key="topup:o1",
+    )
+    db_session.add_all([wallet, entry])
+    db_session.commit()
+    return entry
+
+
+def test_wallet_entry_is_append_only_for_orm_update(db_session, user):
+    entry = _persist_wallet_entry(db_session, user)
+    entry.amount_units = 99
+
+    with pytest.raises(RuntimeError, match="append-only"):
+        db_session.commit()
+
+
+def test_wallet_entry_is_append_only_for_orm_delete(db_session, user):
+    entry = _persist_wallet_entry(db_session, user)
+    db_session.delete(entry)
+
+    with pytest.raises(RuntimeError, match="append-only"):
+        db_session.commit()
 
 
 def test_parent_job_has_no_billing_snapshot_or_provider_reference(
@@ -247,11 +358,15 @@ def test_brief_chargeable_child_constructor_is_supported(db_session, project, us
     [
         ("token_alias", None),
         ("model", None),
+        ("multiplier_bps", None),
         ("multiplier_bps", 0),
         ("quote_id", None),
         ("quote_expires_at", None),
+        ("quote_estimated_quota", None),
         ("quote_estimated_quota", 0),
+        ("quote_estimated_provider_cost_micro", None),
         ("quote_estimated_provider_cost_micro", 0),
+        ("quote_quota_per_unit", None),
         ("quote_quota_per_unit", Decimal("0")),
         ("quote_pricing_version", None),
         ("quote_other_ratios_json", None),
@@ -364,6 +479,74 @@ def test_wallet_hold_is_positive_unique_per_chargeable_job(db_session, project, 
             user_id=user.id,
             job_id="missing-job",
             amount_units=0,
+            status="active",
+            expires_at=utcnow() + timedelta(hours=1),
+        ),
+    )
+
+
+def test_wallet_hold_rejects_parent_job(db_session, project, user):
+    parent = GenerationJob.parent(
+        id="p1", user_id=user.id, project_id=project.id, operation="render"
+    )
+    wallet = WalletAccount(
+        id="w1", user_id=user.id, balance_units=100, held_units=10, version=0
+    )
+    db_session.add_all([parent, wallet])
+    db_session.commit()
+
+    commit_raises_integrity(
+        db_session,
+        WalletHold(
+            id="h1",
+            user_id=user.id,
+            job_id=parent.id,
+            amount_units=10,
+            status="active",
+            expires_at=utcnow() + timedelta(hours=1),
+        ),
+    )
+
+
+def test_wallet_hold_rejects_job_owned_by_different_user(db_session, project, user):
+    other_user = User(
+        id="u000000000000000000000000000002",
+        email="other-billing@example.com",
+        password_hash="hash",
+        role="user",
+        status="active",
+    )
+    other_project = ProjectRecord(
+        id="p000000000000000000000000000002",
+        owner_user_id=other_user.id,
+        title="Other billing project",
+        mode="short_drama",
+        project_type="single_video",
+    )
+    other_child = GenerationJob(
+        **child_values(
+            user_id=other_user.id,
+            project_id=other_project.id,
+            id="c-other",
+        )
+    )
+    wallet = WalletAccount(
+        id="w1", user_id=user.id, balance_units=100, held_units=10, version=0
+    )
+    db_session.add(other_user)
+    db_session.flush()
+    db_session.add(other_project)
+    db_session.flush()
+    db_session.add_all([other_child, wallet])
+    db_session.commit()
+
+    commit_raises_integrity(
+        db_session,
+        WalletHold(
+            id="h1",
+            user_id=user.id,
+            job_id=other_child.id,
+            amount_units=10,
             status="active",
             expires_at=utcnow() + timedelta(hours=1),
         ),

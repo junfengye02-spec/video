@@ -290,11 +290,14 @@ def write_pipeline_artifacts(
     pipeline_inputs: dict[str, dict[str, Any]],
 ) -> dict[str, Path]:
     artifact_dir = Path(project_dir) / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
     written: dict[str, Path] = {}
     for name, data in pipeline_inputs.items():
         path = artifact_dir / f"{name}.json"
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(
+            path,
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         written[name] = path
     return written
 
@@ -332,7 +335,7 @@ def run_single_shot_generation(
     output_path = project_path / "assets" / "video" / f"{shot_id}.mp4"
     descriptor, temporary_output, expected_parent = create_atomic_output(
         output_path,
-        suffix=".generate",
+        suffix=f".generate{output_path.suffix}",
     )
     os.close(descriptor)
     try:
@@ -537,7 +540,7 @@ def compose_final_video(project_dir: str | Path, storyboard: dict[str, Any]) -> 
 
     descriptor, temporary_output, expected_parent = create_atomic_output(
         output_path,
-        suffix=".render",
+        suffix=f".render{output_path.suffix}",
     )
     os.close(descriptor)
     try:

@@ -91,6 +91,12 @@ class GenerationJob(TimestampMixin, Base):
     quote_billing_fingerprint: Mapped[str | None] = mapped_column(String(191))
 
     __table_args__ = (
+        UniqueConstraint(
+            "id",
+            "user_id",
+            "chargeable",
+            name="uq_generation_jobs_hold_owner_chargeable",
+        ),
         CheckConstraint(
             f"(chargeable AND status IN ({_sql_values(CHILD_JOB_STATUSES)})) OR "
             f"((NOT chargeable) AND status IN ({_sql_values(PARENT_JOB_STATUSES)}))",
@@ -115,9 +121,12 @@ class GenerationJob(TimestampMixin, Base):
         CheckConstraint(
             "(NOT chargeable) OR ("
             "token_kind IS NOT NULL AND token_alias IS NOT NULL AND model IS NOT NULL AND "
-            "multiplier_bps > 0 AND quote_id IS NOT NULL AND "
-            "quote_expires_at IS NOT NULL AND quote_estimated_quota > 0 AND "
-            "quote_estimated_provider_cost_micro > 0 AND quote_quota_per_unit > 0 AND "
+            "multiplier_bps IS NOT NULL AND multiplier_bps > 0 AND "
+            "quote_id IS NOT NULL AND quote_expires_at IS NOT NULL AND "
+            "quote_estimated_quota IS NOT NULL AND quote_estimated_quota > 0 AND "
+            "quote_estimated_provider_cost_micro IS NOT NULL AND "
+            "quote_estimated_provider_cost_micro > 0 AND "
+            "quote_quota_per_unit IS NOT NULL AND quote_quota_per_unit > 0 AND "
             "quote_pricing_version IS NOT NULL AND quote_other_ratios_json IS NOT NULL AND "
             "quote_billing_fingerprint IS NOT NULL)",
             name="ck_generation_jobs_child_quote",

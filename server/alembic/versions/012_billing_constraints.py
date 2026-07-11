@@ -71,9 +71,12 @@ def upgrade() -> None:
         "generation_jobs",
         "(NOT chargeable) OR ("
         "token_kind IS NOT NULL AND token_alias IS NOT NULL AND model IS NOT NULL AND "
-        "multiplier_bps > 0 AND quote_id IS NOT NULL AND "
-        "quote_expires_at IS NOT NULL AND quote_estimated_quota > 0 AND "
-        "quote_estimated_provider_cost_micro > 0 AND quote_quota_per_unit > 0 AND "
+        "multiplier_bps IS NOT NULL AND multiplier_bps > 0 AND "
+        "quote_id IS NOT NULL AND quote_expires_at IS NOT NULL AND "
+        "quote_estimated_quota IS NOT NULL AND quote_estimated_quota > 0 AND "
+        "quote_estimated_provider_cost_micro IS NOT NULL AND "
+        "quote_estimated_provider_cost_micro > 0 AND "
+        "quote_quota_per_unit IS NOT NULL AND quote_quota_per_unit > 0 AND "
         "quote_pricing_version IS NOT NULL AND quote_other_ratios_json IS NOT NULL AND "
         "quote_billing_fingerprint IS NOT NULL)",
     )

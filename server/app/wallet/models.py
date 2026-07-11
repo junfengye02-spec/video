@@ -4,18 +4,26 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    event,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server.app.db.base import Base, TimestampMixin
+
+
+def _next_wallet_version(version: int | None) -> int:
+    return 0 if version is None else version + 1
 
 
 class WalletAccount(TimestampMixin, Base):
@@ -40,8 +48,12 @@ class WalletAccount(TimestampMixin, Base):
     )
     __mapper_args__ = {
         "version_id_col": version,
-        "version_id_generator": False,
+        "version_id_generator": _next_wallet_version,
     }
+
+
+class WalletEntryMutationError(RuntimeError):
+    pass
 
 
 class WalletEntry(Base):
@@ -76,6 +88,12 @@ class WalletEntry(Base):
     )
 
 
+@event.listens_for(WalletEntry, "before_update")
+@event.listens_for(WalletEntry, "before_delete")
+def _reject_wallet_entry_mutation(_mapper, _connection, _target) -> None:
+    raise WalletEntryMutationError("wallet entries are append-only")
+
+
 class WalletHold(TimestampMixin, Base):
     __tablename__ = "wallet_holds"
 
@@ -83,8 +101,12 @@ class WalletHold(TimestampMixin, Base):
     user_id: Mapped[str] = mapped_column(
         String(32), ForeignKey("users.id"), nullable=False
     )
-    job_id: Mapped[str] = mapped_column(
-        String(32), ForeignKey("generation_jobs.id"), nullable=False
+    job_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    job_chargeable: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
     )
     amount_units: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
@@ -94,7 +116,19 @@ class WalletHold(TimestampMixin, Base):
     reason: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["job_id", "user_id", "job_chargeable"],
+            [
+                "generation_jobs.id",
+                "generation_jobs.user_id",
+                "generation_jobs.chargeable",
+            ],
+            name="fk_wallet_holds_chargeable_job_owner",
+        ),
         UniqueConstraint("job_id", name="uq_wallet_holds_job_id"),
+        CheckConstraint(
+            "job_chargeable = true", name="ck_wallet_holds_job_chargeable"
+        ),
         CheckConstraint("amount_units > 0", name="ck_wallet_holds_amount_positive"),
         CheckConstraint(
             "status IN ('active', 'released', 'captured')",

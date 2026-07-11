@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from server.app.media_files import save_upload_file
-from server.app.openmontage_runner import compose_final_video, run_single_shot_generation
+from server.app.openmontage_runner import (
+    compose_final_video,
+    run_single_shot_generation,
+    write_pipeline_artifacts,
+)
 
 
 def _hardlink_file_or_skip(link: Path, target: Path) -> None:
@@ -142,6 +146,7 @@ def test_generation_rejects_destination_swapped_to_hardlink_before_replace(
     destination.write_bytes(b"old")
     outside = tmp_path / "outside-generation.bin"
     outside.write_bytes(b"outside-sentinel")
+    selector_outputs = []
 
     class FakeResult:
         success = True
@@ -151,6 +156,7 @@ def test_generation_rejects_destination_swapped_to_hardlink_before_replace(
     class SwappingSelector:
         def execute(self, inputs):
             temporary = Path(inputs["output_path"])
+            selector_outputs.append(temporary)
             temporary.write_bytes(b"generated")
             destination.unlink()
             _hardlink_file_or_skip(destination, outside)
@@ -169,7 +175,9 @@ def test_generation_rejects_destination_swapped_to_hardlink_before_replace(
         )
 
     assert outside.read_bytes() == b"outside-sentinel"
-    assert not list(destination.parent.glob(f".{destination.name}.*.generate"))
+    assert selector_outputs[0].suffix == ".mp4"
+    assert ".generate" in selector_outputs[0].name
+    assert not list(destination.parent.glob(f".{destination.name}.*.generate.mp4"))
 
 
 def test_generation_cleans_temporary_when_selector_inputs_fail(tmp_path, monkeypatch):
@@ -192,7 +200,7 @@ def test_generation_cleans_temporary_when_selector_inputs_fail(tmp_path, monkeyp
             base_url="https://api.example.com",
         )
 
-    assert not list(destination.parent.glob(f".{destination.name}.*.generate"))
+    assert not list(destination.parent.glob(f".{destination.name}.*.generate.mp4"))
 
 
 def test_compose_rejects_destination_swapped_to_hardlink_before_replace(
@@ -206,9 +214,13 @@ def test_compose_rejects_destination_swapped_to_hardlink_before_replace(
     destination.write_bytes(b"old")
     outside = tmp_path / "outside-compose.bin"
     outside.write_bytes(b"outside-sentinel")
+    ffmpeg_outputs = []
 
     def fake_run(cmd, **_kwargs):
+        if "-filter_complex" not in cmd:
+            return type("ProbeResult", (), {"returncode": 1, "stdout": ""})()
         temporary = Path(cmd[-1])
+        ffmpeg_outputs.append(temporary)
         temporary.write_bytes(b"rendered")
         destination.unlink()
         _hardlink_file_or_skip(destination, outside)
@@ -222,4 +234,71 @@ def test_compose_rejects_destination_swapped_to_hardlink_before_replace(
         )
 
     assert outside.read_bytes() == b"outside-sentinel"
-    assert not list(destination.parent.glob(f".{destination.name}.*.render"))
+    assert ffmpeg_outputs[0].suffix == ".mp4"
+    assert ".render" in ffmpeg_outputs[0].name
+    assert not list(destination.parent.glob(f".{destination.name}.*.render.mp4"))
+
+
+def test_pipeline_artifacts_use_atomic_writer_for_every_input(tmp_path, monkeypatch):
+    from server.app import openmontage_runner as runner
+
+    calls = []
+    original_atomic_write_text = runner.atomic_write_text
+
+    def observed_atomic_write_text(destination, content, *, encoding="utf-8"):
+        calls.append(destination.name)
+        original_atomic_write_text(destination, content, encoding=encoding)
+
+    monkeypatch.setattr(runner, "atomic_write_text", observed_atomic_write_text)
+    inputs = {
+        "proposal_packet": {"kind": "proposal"},
+        "scene_plan": {"kind": "scene"},
+        "asset_manifest": {"kind": "asset"},
+        "edit_decisions": {"kind": "edit"},
+        "continuity_plan": {"kind": "continuity"},
+    }
+
+    written = write_pipeline_artifacts(tmp_path, inputs)
+
+    assert calls == [f"{name}.json" for name in inputs]
+    assert list(written) == list(inputs)
+    assert all(path.is_file() for path in written.values())
+
+
+def test_pipeline_artifact_rejects_post_temp_hardlink_swap(tmp_path, monkeypatch):
+    from server.app import media_files
+
+    destination = tmp_path / "artifacts" / "proposal_packet.json"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"before")
+    outside = tmp_path / "outside-workflow.json"
+    outside.write_bytes(b"outside-sentinel")
+    original_replace = media_files.replace_atomic_output
+    replacements = []
+
+    def swap_then_replace(temporary, target, expected_parent):
+        replacements.append((temporary, target))
+        target.unlink()
+        _hardlink_file_or_skip(target, outside)
+        return original_replace(temporary, target, expected_parent)
+
+    monkeypatch.setattr(media_files, "replace_atomic_output", swap_then_replace)
+
+    with pytest.raises(ValueError, match="Project workspace path is invalid"):
+        write_pipeline_artifacts(tmp_path, {"proposal_packet": {"version": 2}})
+
+    assert len(replacements) == 1
+    assert outside.read_bytes() == b"outside-sentinel"
+    assert not list(destination.parent.glob(f".{destination.name}.*.write"))
+
+
+def test_pipeline_artifact_rejects_linked_project_before_external_mkdir(tmp_path):
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _link_directory_or_skip(project, outside)
+
+    with pytest.raises(ValueError, match="Project workspace path is invalid"):
+        write_pipeline_artifacts(project, {"proposal_packet": {"version": 1}})
+
+    assert not (outside / "artifacts").exists()

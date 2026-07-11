@@ -57,6 +57,12 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "id",
+            "user_id",
+            "chargeable",
+            name="uq_generation_jobs_hold_owner_chargeable",
+        ),
     )
     op.create_index(
         "ix_generation_jobs_parent",
@@ -83,11 +89,11 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_foreign_key(
-        "fk_wallet_holds_job_id_generation_jobs",
+        "fk_wallet_holds_chargeable_job_owner",
         "wallet_holds",
         "generation_jobs",
-        ["job_id"],
-        ["id"],
+        ["job_id", "user_id", "job_chargeable"],
+        ["id", "user_id", "chargeable"],
     )
 
     op.create_table(
@@ -209,7 +215,7 @@ def downgrade() -> None:
     op.drop_index("ix_cost_receipts_reference", table_name="cost_receipts")
     op.drop_table("cost_receipts")
     op.drop_constraint(
-        "fk_wallet_holds_job_id_generation_jobs",
+        "fk_wallet_holds_chargeable_job_owner",
         "wallet_holds",
         type_="foreignkey",
     )

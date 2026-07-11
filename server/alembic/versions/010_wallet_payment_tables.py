@@ -95,6 +95,27 @@ def upgrade() -> None:
         ["user_id", "created_at"],
         unique=False,
     )
+    op.execute(
+        """
+        CREATE FUNCTION wallet_entries_reject_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $wallet_entries_append_only$
+        BEGIN
+            RAISE EXCEPTION 'wallet entries are append-only'
+                USING ERRCODE = '55000';
+            RETURN NULL;
+        END;
+        $wallet_entries_append_only$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER wallet_entries_append_only
+        BEFORE UPDATE OR DELETE ON wallet_entries
+        FOR EACH ROW EXECUTE FUNCTION wallet_entries_reject_mutation()
+        """
+    )
 
     op.create_table(
         "payment_orders",
@@ -156,6 +177,12 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=32), nullable=False),
         sa.Column("user_id", sa.String(length=32), nullable=False),
         sa.Column("job_id", sa.String(length=32), nullable=False),
+        sa.Column(
+            "job_chargeable",
+            sa.Boolean(),
+            server_default=sa.true(),
+            nullable=False,
+        ),
         sa.Column("amount_units", sa.BigInteger(), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
@@ -166,6 +193,9 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.CheckConstraint(
             "amount_units > 0", name="ck_wallet_holds_amount_positive"
+        ),
+        sa.CheckConstraint(
+            "job_chargeable = true", name="ck_wallet_holds_job_chargeable"
         ),
         sa.CheckConstraint(
             "status IN ('active', 'released', 'captured')",
@@ -189,6 +219,8 @@ def downgrade() -> None:
     op.drop_index("ix_payment_orders_user_created", table_name="payment_orders")
     op.drop_index("ix_payment_orders_status_expires", table_name="payment_orders")
     op.drop_table("payment_orders")
+    op.execute("DROP TRIGGER IF EXISTS wallet_entries_append_only ON wallet_entries")
+    op.execute("DROP FUNCTION IF EXISTS wallet_entries_reject_mutation()")
     op.drop_index("ix_wallet_entries_user_created", table_name="wallet_entries")
     op.drop_table("wallet_entries")
     op.drop_table("topup_products")
