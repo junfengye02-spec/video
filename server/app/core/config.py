@@ -25,16 +25,45 @@ class AppSettings(BaseSettings):
     smtp_username: str | None = None
     smtp_password: SecretStr | None = None
     smtp_tls_mode: Literal["ssl", "starttls"] = "starttls"
+    epay_pay_address: str | None = None
+    epay_id: str | None = None
+    epay_key: SecretStr | None = None
 
-    @field_validator("smtp_host", "smtp_from_address", "smtp_username", "smtp_password", mode="before")
+    @field_validator(
+        "smtp_host",
+        "smtp_from_address",
+        "smtp_username",
+        "smtp_password",
+        "epay_pay_address",
+        "epay_id",
+        "epay_key",
+        mode="before",
+    )
     @classmethod
-    def empty_smtp_values_are_unset(cls, value):
+    def empty_optional_values_are_unset(cls, value):
         return None if value == "" else value
+
+    @field_validator("epay_pay_address")
+    @classmethod
+    def validate_epay_pay_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("epay_pay_address must be an absolute HTTP(S) URL")
+        return value
 
     @model_validator(mode="after")
     def validate_production(self):
         if self.session_idle_seconds > self.session_absolute_seconds:
             raise ValueError("session idle lifetime cannot exceed absolute lifetime")
+        epay_values = (self.epay_pay_address, self.epay_id, self.epay_key)
+        if any(value is not None for value in epay_values) and any(
+            value is None for value in epay_values
+        ):
+            raise ValueError(
+                "epay_pay_address, epay_id, and epay_key must be configured together"
+            )
         if self.environment != "production":
             return self
 
