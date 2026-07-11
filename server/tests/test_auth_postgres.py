@@ -26,6 +26,73 @@ UNOWNED_IDS = (
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+DESTRUCTIVE_POSTGRES_ACK = "I_UNDERSTAND_THIS_DROPS_THE_TEST_PUBLIC_SCHEMA"
+
+
+class _RecordedScalars:
+    def __init__(self, values: tuple[str, ...]):
+        self._values = values
+
+    def all(self) -> list[str]:
+        return list(self._values)
+
+
+class _RecordingPostgresConnection:
+    def __init__(self, *, objects: tuple[str, ...] = ()) -> None:
+        self.objects = objects
+        self.statements: list[str] = []
+
+    def scalar(self, statement):
+        sql = str(statement)
+        self.statements.append(sql)
+        if "server_version" in sql:
+            return "16.13"
+        if "current_database" in sql:
+            return "openmontage_guard_test"
+        raise AssertionError(f"Unexpected scalar query: {sql}")
+
+    def scalars(self, statement):
+        self.statements.append(str(statement))
+        return _RecordedScalars(self.objects)
+
+    def execute(self, statement):
+        self.statements.append(str(statement))
+
+    def commit(self) -> None:
+        self.statements.append("COMMIT")
+
+
+def _reset_disposable_postgres_schema(connection, acknowledgement: str | None) -> None:
+    if acknowledgement != DESTRUCTIVE_POSTGRES_ACK:
+        raise RuntimeError(
+            "Destructive PostgreSQL test acknowledgement is missing or invalid"
+        )
+    version = connection.scalar(text("SHOW server_version"))
+    database_name = connection.scalar(text("SELECT current_database()"))
+    if str(version).split(".", 1)[0] != "16":
+        raise RuntimeError("Destructive PostgreSQL test requires PostgreSQL 16")
+    if "test" not in str(database_name).lower():
+        raise RuntimeError("Destructive PostgreSQL target database must contain 'test'")
+    existing_objects = connection.scalars(
+        text(
+            """
+            SELECT child.relname
+            FROM pg_class AS child
+            JOIN pg_namespace AS namespace ON namespace.oid = child.relnamespace
+            WHERE namespace.nspname = 'public'
+              AND child.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+            ORDER BY child.relname
+            """
+        )
+    ).all()
+    if existing_objects:
+        raise RuntimeError(
+            "Destructive PostgreSQL target schema is not empty: "
+            + ", ".join(existing_objects)
+        )
+    connection.execute(text("DROP SCHEMA public CASCADE"))
+    connection.execute(text("CREATE SCHEMA public"))
+    connection.commit()
 
 
 def test_list_unowned_projects_prints_every_remaining_id(
@@ -70,6 +137,27 @@ def test_list_unowned_projects_prints_every_remaining_id(
 
     assert code == 0
     assert capsys.readouterr().out.splitlines() == list(UNOWNED_IDS)
+
+
+def test_postgres_reset_requires_explicit_destructive_acknowledgement():
+    connection = _RecordingPostgresConnection()
+
+    with pytest.raises(RuntimeError, match="acknowledgement"):
+        _reset_disposable_postgres_schema(connection, acknowledgement=None)
+
+    assert not any("DROP SCHEMA" in statement for statement in connection.statements)
+
+
+def test_postgres_reset_refuses_a_nonempty_schema_before_drop():
+    connection = _RecordingPostgresConnection(objects=("users",))
+
+    with pytest.raises(RuntimeError, match="not empty"):
+        _reset_disposable_postgres_schema(
+            connection,
+            acknowledgement=DESTRUCTIVE_POSTGRES_ACK,
+        )
+
+    assert not any("DROP SCHEMA" in statement for statement in connection.statements)
 
 
 def test_deployment_and_billing_handoff_contract_is_documented():
@@ -184,13 +272,10 @@ def test_postgres_16_migration_blocks_unowned_projects(tmp_path):
 
     engine = create_engine(database_url)
     with engine.connect() as connection:
-        version = connection.scalar(text("SHOW server_version"))
-        database_name = connection.scalar(text("SELECT current_database()"))
-        assert str(version).split(".", 1)[0] == "16"
-        assert "test" in str(database_name).lower()
-        connection.execute(text("DROP SCHEMA public CASCADE"))
-        connection.execute(text("CREATE SCHEMA public"))
-        connection.commit()
+        _reset_disposable_postgres_schema(
+            connection,
+            acknowledgement=os.getenv("OPENMONTAGE_DESTRUCTIVE_TEST_ACK"),
+        )
 
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url

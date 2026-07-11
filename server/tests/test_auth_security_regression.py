@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
+from http.cookies import SimpleCookie
 
+import httpx
 import pytest
 
 os.environ.setdefault("AUTH_HMAC_SECRET", "x" * 32)
@@ -19,6 +22,20 @@ from server.tests.test_project_ownership import (
 
 
 PASSWORD = "correct horse"
+
+
+def _assert_session_secret_absent_from_json(response: httpx.Response) -> None:
+    cookies = SimpleCookie()
+    for header in response.headers.get_list("set-cookie"):
+        cookies.load(header)
+    session_cookie = cookies.get("om_session")
+    assert session_cookie is not None
+    session_secret = session_cookie.value
+    assert session_secret
+    serialized_json = json.dumps(
+        response.json(), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    assert session_secret not in serialized_json
 
 
 @pytest.fixture
@@ -53,9 +70,25 @@ def test_session_cookie_and_secrets_never_appear_in_json(
 
     assert response.status_code == 200
     assert "password_hash" not in response.text
-    assert "om_session" not in response.text
     assert PASSWORD not in response.text
     assert "om_session=" in response.headers["set-cookie"]
+    _assert_session_secret_absent_from_json(response)
+
+
+def test_session_json_guard_detects_a_value_only_cookie_leak():
+    session_secret = "opaque-session-secret-without-cookie-name"
+    response = httpx.Response(
+        200,
+        headers={
+            "set-cookie": (
+                f"om_session={session_secret}; Path=/; Secure; HttpOnly; SameSite=Lax"
+            )
+        },
+        json={"debug": session_secret},
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_session_secret_absent_from_json(response)
 
 
 @pytest.mark.parametrize(
