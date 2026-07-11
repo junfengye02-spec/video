@@ -355,11 +355,14 @@ async function buildArchiveIndex(file: File): Promise<ArchiveIndex> {
   const entries = await readCentralEntries(file, end);
   for (const entry of entries) await validateLocalEntry(file, entry);
   const byOffset = [...entries].sort((left, right) => left.localHeaderOffset - right.localHeaderOffset);
+  if (byOffset.length > 0 && byOffset[0].localHeaderOffset !== 0) {
+    throw new BackupValidationError("Backup local entries do not start at the archive boundary");
+  }
   for (let index = 0; index < byOffset.length; index += 1) {
     const entry = byOffset[index];
     const nextOffset = byOffset[index + 1]?.localHeaderOffset ?? end.centralOffset;
-    if (entry.localHeaderOffset >= end.centralOffset || entry.endOffset > nextOffset) {
-      throw new BackupValidationError(`Backup entry ${entry.name} overlaps another ZIP structure`);
+    if (entry.localHeaderOffset >= end.centralOffset || entry.endOffset !== nextOffset) {
+      throw new BackupValidationError(`Backup entry ${entry.name} does not exactly cover its ZIP span`);
     }
   }
   const account = new BackupByteAccount();

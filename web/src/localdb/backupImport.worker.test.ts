@@ -81,6 +81,7 @@ type ZipLayoutEntry = {
 
 type ZipLayout = {
   eocdOffset: number;
+  centralOffset: number;
   entries: ZipLayoutEntry[];
 };
 
@@ -109,7 +110,8 @@ function inspectZip(bytes: Uint8Array): ZipLayout {
   if (eocdOffset < 0) throw new Error("EOCD not found");
   const decoder = new TextDecoder();
   const count = view.getUint16(eocdOffset + 10, true);
-  let centralOffset = view.getUint32(eocdOffset + 16, true);
+  const directoryOffset = view.getUint32(eocdOffset + 16, true);
+  let centralOffset = directoryOffset;
   const entries: ZipLayoutEntry[] = [];
   for (let index = 0; index < count; index += 1) {
     if (view.getUint32(centralOffset, true) !== 0x02014b50) {
@@ -133,7 +135,7 @@ function inspectZip(bytes: Uint8Array): ZipLayout {
     });
     centralOffset += 46 + nameLength + extraLength + commentLength;
   }
-  return { eocdOffset, entries };
+  return { eocdOffset, centralOffset: directoryOffset, entries };
 }
 
 async function mutateBackup(
@@ -145,6 +147,36 @@ async function mutateBackup(
   const view = new DataView(copy.buffer);
   mutate(view, inspectZip(copy), copy);
   return new File([copy], file.name, { type: file.type });
+}
+
+async function insertUnindexedLocalRecord(
+  file: File,
+  placement: "before-first" | "between-indexed" | "before-central",
+): Promise<File> {
+  const bytes = await fileBytes(file);
+  const layout = inspectZip(bytes);
+  const byLocalOffset = [...layout.entries].sort((left, right) => left.localOffset - right.localOffset);
+  const insertOffset = placement === "before-first"
+    ? 0
+    : placement === "between-indexed"
+      ? byLocalOffset[1].localOffset
+      : layout.centralOffset;
+  const orphanArchive = zipSync({ "orphan.bin": strToU8("hidden") }, { level: 0 });
+  const orphanLocalRecord = orphanArchive.subarray(0, inspectZip(orphanArchive).centralOffset);
+  const shifted = new Uint8Array(bytes.byteLength + orphanLocalRecord.byteLength);
+  shifted.set(bytes.subarray(0, insertOffset));
+  shifted.set(orphanLocalRecord, insertOffset);
+  shifted.set(bytes.subarray(insertOffset), insertOffset + orphanLocalRecord.byteLength);
+
+  const shiftedView = new DataView(shifted.buffer);
+  const delta = orphanLocalRecord.byteLength;
+  for (const entry of layout.entries) {
+    const centralEntryOffset = entry.centralOffset + delta;
+    const localOffset = entry.localOffset >= insertOffset ? entry.localOffset + delta : entry.localOffset;
+    shiftedView.setUint32(centralEntryOffset + 42, localOffset, true);
+  }
+  shiftedView.setUint32(layout.eocdOffset + delta + 16, layout.centralOffset + delta, true);
+  return new File([shifted], file.name, { type: file.type });
 }
 
 async function streamingBackup(entries: Record<string, Uint8Array>): Promise<File> {
@@ -222,6 +254,36 @@ function incompressibleBytes(size: number, seed = 0x12345678): Uint8Array {
 }
 
 describe("backup import module Worker", () => {
+  it.each([
+    ["before the first indexed entry", "before-first"],
+    ["between indexed entries", "between-indexed"],
+    ["between the final entry and central directory", "before-central"],
+  ] as const)("rejects an unindexed local record %s before media callbacks", async (_label, placement) => {
+    const mutated = await insertUnindexedLocalRecord(backupFile(validEntries()), placement);
+
+    await expectStructuralFailureBeforeMedia(mutated);
+  });
+
+  it("rejects an empty archive as missing the project manifest", async () => {
+    const { terminal, responses } = await terminalResponse(backupFile({}));
+
+    expect(terminal).toMatchObject({ type: "failure", code: "validation" });
+    expect((terminal as Extract<BackupWorkerResponse, { type: "failure" }>).message)
+      .toMatch(/missing openmontage-project\.json/i);
+    expect(responses.some(
+      (message) => message.type === "entry-start" && message.name.startsWith("media/"),
+    )).toBe(false);
+  });
+
+  it.each([
+    ["stored", async () => new File([zipSync(validEntries(), { level: 0 })], "stored.omproj")],
+    ["data-descriptor", async () => streamingBackup(validEntries())],
+  ] as const)("accepts a valid %s archive with exact local spans", async (_label, createFile) => {
+    const { terminal } = await terminalResponse(await createFile());
+
+    expect(terminal).toMatchObject({ type: "complete" });
+  });
+
   it("does not slice or decode a large media payload during pass 1", async () => {
     const bytes = zipSync(validEntries(incompressibleBytes(2 * 1024 * 1024)));
     const layout = inspectZip(bytes);
