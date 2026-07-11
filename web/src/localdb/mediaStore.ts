@@ -2,8 +2,8 @@ import { LOCAL_STORES, openLocalDb } from "./indexedDb";
 import {
   claimNextDueMediaOperation,
   createValidatedMediaOperation,
+  ensureMediaOperationCleanupDue,
   getNextMediaRecoveryAt,
-  markMediaOperationCleanupDue,
   MediaRecoveryError,
   recordMediaOperationFailure,
   renewMediaOperationLease,
@@ -230,10 +230,6 @@ async function readBlobFromOpfs(record: LocalMediaRecord): Promise<Blob | null> 
   } catch {
     return null;
   }
-}
-
-async function markCleanupBestEffort(operationId: string, leaseOwner: string): Promise<void> {
-  await markMediaOperationCleanupDue(operationId, leaseOwner).catch(() => undefined);
 }
 
 async function commitOpfsMedia(
@@ -495,31 +491,71 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
     if (!renewed) throw new Error(`Media operation ${operation.id} lost its writer lease`);
   }
 
-  async function cleanupOpeningFile(): Promise<void> {
-    await removeOpfsPath(operation.opfsPath).catch(() => undefined);
+  async function establishDurableCleanup(primary: unknown): Promise<void> {
+    const authoritative = primary instanceof MediaCleanupIncompleteError
+      ? primary.causes[0]
+      : primary;
+    let journalError: unknown;
+    let removalError: unknown;
+    try {
+      await ensureMediaOperationCleanupDue(operation);
+    } catch (error) {
+      journalError = error;
+    }
+    try {
+      await removeOpfsPath(operation.opfsPath);
+    } catch (error) {
+      removalError = error;
+    }
+    if (journalError !== undefined) {
+      throw new MediaCleanupIncompleteError(
+        "Media cleanup could not be durably re-established",
+        removalError === undefined
+          ? [authoritative, journalError]
+          : [authoritative, journalError, removalError],
+        [operation.mediaId],
+      );
+    }
+  }
+
+  async function throwAfterDurableCleanup(primary: unknown): Promise<never> {
+    await establishDurableCleanup(primary);
+    throw primary;
+  }
+
+  async function guardWriterMutation<T>(mutation: () => Promise<T>): Promise<T> {
+    try {
+      await renewWriterLease();
+    } catch (error) {
+      return throwAfterDurableCleanup(error);
+    }
+    const result = await mutation();
+    try {
+      await renewWriterLease();
+    } catch (error) {
+      return throwAfterDurableCleanup(error);
+    }
+    return result;
   }
 
   let fileHandle: FileSystemFileHandle;
   let writable: FileSystemWritableFileStream;
   try {
     const root = await storage.getDirectory();
-    await renewWriterLease();
-    const directory = await root.getDirectoryHandle(OPFS_MEDIA_DIR, { create: true });
-    await renewWriterLease();
-    fileHandle = await directory.getFileHandle(id, { create: true });
-    await renewWriterLease();
-    writable = await fileHandle.createWritable();
-    await renewWriterLease();
+    const directory = await guardWriterMutation(
+      () => root.getDirectoryHandle(OPFS_MEDIA_DIR, { create: true }),
+    );
+    fileHandle = await guardWriterMutation(
+      () => directory.getFileHandle(id, { create: true }),
+    );
+    writable = await guardWriterMutation(() => fileHandle.createWritable());
   } catch (error) {
-    await cleanupOpeningFile();
-    await markCleanupBestEffort(operation.id, leaseOwner);
-    throw error;
+    return throwAfterDurableCleanup(error);
   }
 
   async function fail(error: unknown): Promise<never> {
-    const renewed = await renewMediaOperationLease(operation.id, leaseOwner).catch(() => null);
-    if (renewed) await writable.close().catch(() => undefined);
-    await markCleanupBestEffort(operation.id, leaseOwner);
+    await guardWriterMutation(() => writable.close()).catch(() => undefined);
+    await establishDurableCleanup(error);
     throw error;
   }
 
@@ -530,9 +566,7 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
       const stableChunk = new Uint8Array(chunk);
       return enqueueWrite(async () => {
         try {
-          await renewWriterLease();
-          await writable.write(stableChunk);
-          await renewWriterLease();
+          await guardWriterMutation(() => writable.write(stableChunk));
           bytesWritten += stableChunk.byteLength;
         } catch (error) {
           return fail(error);
@@ -543,24 +577,21 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
       return startCommit(async () => {
         try {
           assertExpectedSize(bytesWritten, input.sizeBytes);
-          await renewWriterLease();
-          await writable.close();
-          await renewWriterLease();
+          await guardWriterMutation(() => writable.close());
           const physicalFile = await fileHandle.getFile();
           assertExpectedSize(storedFileSize(physicalFile), input.sizeBytes);
           await commitOpfsMedia(operation.id, leaseOwner, createdAt);
           return ref;
         } catch (error) {
-          await markCleanupBestEffort(operation.id, leaseOwner);
-          throw error;
+          return throwAfterDurableCleanup(error);
         }
       });
     },
     abort() {
       return startAbort(async () => {
-        const renewed = await renewMediaOperationLease(operation.id, leaseOwner).catch(() => null);
-        if (renewed) await writable.close().catch(() => undefined);
-        await markCleanupBestEffort(operation.id, leaseOwner);
+        const abortCause = new Error(`Media operation ${operation.id} was aborted`);
+        await guardWriterMutation(() => writable.close()).catch(() => undefined);
+        await establishDurableCleanup(abortCause);
       });
     },
   };

@@ -194,6 +194,18 @@ async function waitForStorageState(check: () => Promise<boolean>): Promise<void>
   throw new Error("Timed out waiting for storage state");
 }
 
+async function expectFileRemovedOrJournaled(
+  operation: MediaOperationRecord,
+  storage: TestStorageController,
+): Promise<void> {
+  const durable = await getRecord<MediaOperationRecord>("mediaOperations", operation.id);
+  expect(
+    !storage.files.has(operation.mediaId) ||
+    (durable?.kind === "media_write" && durable.state === "cleanup_due" &&
+      durable.mediaId === operation.mediaId && durable.opfsPath === operation.opfsPath),
+  ).toBe(true);
+}
+
 function installOpfs(options: {
   removeError: Error | null;
   delayClose?: boolean;
@@ -475,12 +487,144 @@ describe("mediaStore", () => {
     await expect(task2MediaStore.runMediaRecovery()).resolves.toBe(1);
     expect(files.size).toBe(0);
 
-    expect(removeEntry).toHaveBeenCalledTimes(1);
+    expect(removeEntry).toHaveBeenCalledTimes(2);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("streaming durable media writes", () => {
+  it("re-journals bytes written after recovery completes a paused writer", async () => {
+    const storage = installTestStorage({ pauseWriteAt: 1 });
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/paused-write.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    const operation = await getRecord<MediaOperationRecord>("mediaOperations", session.operationId);
+    const writing = session.write(new Uint8Array([1]));
+    await storage.writeStarted;
+    await letRecoveryCompleteOperation(session.operationId);
+    storage.releaseWrite();
+
+    await expect(writing).rejects.toThrow(/lease/i);
+    await expectFileRemovedOrJournaled(operation!, storage);
+  });
+
+  it("re-journals an abort close that loses its token to recovery", async () => {
+    const storage = installTestStorage({ pauseClose: true });
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/paused-abort.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 0,
+    });
+    const operation = await getRecord<MediaOperationRecord>("mediaOperations", session.operationId);
+    const aborting = session.abort();
+    await storage.closeStarted;
+    await letRecoveryCompleteOperation(session.operationId);
+    storage.releaseClose();
+
+    await aborting;
+    await expectFileRemovedOrJournaled(operation!, storage);
+  });
+
+  it("re-journals a write-failure close that loses its token to recovery", async () => {
+    const storage = installTestStorage({
+      failWriteAt: 1,
+      writeError: new Error("write failed"),
+      pauseClose: true,
+    });
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/failed-write-close.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    const operation = await getRecord<MediaOperationRecord>("mediaOperations", session.operationId);
+    const writing = session.write(new Uint8Array([1]));
+    await storage.closeStarted;
+    await letRecoveryCompleteOperation(session.operationId);
+    storage.releaseClose();
+
+    await expect(writing).rejects.toThrow("write failed");
+    await expectFileRemovedOrJournaled(operation!, storage);
+  });
+
+  it("keeps cleanup_due when opening loses its token and physical removal fails", async () => {
+    const storage = installTestStorage({
+      pauseCreateWritable: true,
+      failRemove: new Error("remove failed"),
+    });
+    const beginning = task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/open-remove-failure.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 0,
+    });
+    await storage.createWritableStarted;
+    const [operation] = await getAll<MediaOperationRecord>("mediaOperations");
+    await letRecoveryCompleteOperation(operation.id);
+    storage.releaseCreateWritable();
+
+    await expect(beginning).rejects.toThrow(/lease/i);
+    expect(storage.files.has(operation.mediaId)).toBe(true);
+    await expect(getRecord<MediaOperationRecord>("mediaOperations", operation.id))
+      .resolves.toMatchObject({
+        kind: "media_write",
+        state: "cleanup_due",
+        mediaId: operation.mediaId,
+        projectId: operation.projectId,
+        importSessionId: operation.importSessionId,
+        sourcePath: operation.sourcePath,
+        contentType: operation.contentType,
+        sizeBytes: operation.sizeBytes,
+        opfsPath: operation.opfsPath,
+      });
+  });
+
+  it("preserves the lease error and removes bytes best-effort when re-journaling fails", async () => {
+    const storage = installTestStorage({ pauseWriteAt: 1 });
+    const session = await task2MediaStore.beginMediaWrite({
+      projectId: "p1",
+      sourcePath: "assets/rejournal-failure.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    const writing = session.write(new Uint8Array([1]));
+    await storage.writeStarted;
+    await letRecoveryCompleteOperation(session.operationId);
+    const originalAdd = IDBObjectStore.prototype.add;
+    vi.spyOn(IDBObjectStore.prototype, "add").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey,
+    ) {
+      if (this.name === "mediaOperations") {
+        throw new DOMException("Journal unavailable", "QuotaExceededError");
+      }
+      return key === undefined
+        ? originalAdd.call(this, value)
+        : originalAdd.call(this, value, key);
+    });
+    storage.releaseWrite();
+
+    let failure: unknown;
+    try {
+      await writing;
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      name: "MediaCleanupIncompleteError",
+      causes: [
+        expect.objectContaining({ message: expect.stringMatching(/lease/i) }),
+        expect.objectContaining({ name: "MediaDurabilityError" }),
+      ],
+    });
+    expect(storage.files.size).toBe(0);
+  });
+
   it("does not create or truncate OPFS bytes after recovery takes an opening writer", async () => {
     const boundaries: Array<{
       options: TestStorageOptions;

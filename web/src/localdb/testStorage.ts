@@ -40,6 +40,7 @@ export interface TestStorageOptions {
   pauseDirectoryHandle?: boolean;
   pauseGetFileHandle?: boolean;
   pauseCreateWritable?: boolean;
+  pauseWriteAt?: number;
   verifiedSizeDelta?: number;
 }
 
@@ -53,6 +54,7 @@ export interface TestStorageController {
   readonly directoryHandleStarted: Promise<void>;
   readonly fileHandleStarted: Promise<void>;
   readonly createWritableStarted: Promise<void>;
+  readonly writeStarted: Promise<void>;
   readonly closeCalls: number;
   releaseClose(): void;
   releaseRemove(): void;
@@ -60,6 +62,7 @@ export interface TestStorageController {
   releaseDirectoryHandle(): void;
   releaseFileHandle(): void;
   releaseCreateWritable(): void;
+  releaseWrite(): void;
   seedFile(name: string, bytes: Uint8Array, lastModified: number): void;
   restore(): void;
 }
@@ -82,6 +85,8 @@ export function installTestStorage(
   const fileHandleGate = deferred<void>();
   const createWritableStarted = deferred<void>();
   const createWritableGate = deferred<void>();
+  const writeStarted = deferred<void>();
+  const writeGate = deferred<void>();
   let writeCalls = 0;
   let closeCalls = 0;
 
@@ -113,6 +118,8 @@ export function installTestStorage(
           return {
             async write(chunk: FileSystemWriteChunkType) {
               writeCalls += 1;
+              writeStarted.resolve();
+              if (options.pauseWriteAt === writeCalls) await writeGate.promise;
               if (options.failWriteAt === writeCalls) {
                 throw options.writeError ?? new Error("OPFS write failed");
               }
@@ -183,6 +190,7 @@ export function installTestStorage(
     directoryHandleStarted: directoryHandleStarted.promise,
     fileHandleStarted: fileHandleStarted.promise,
     createWritableStarted: createWritableStarted.promise,
+    writeStarted: writeStarted.promise,
     get closeCalls() {
       return closeCalls;
     },
@@ -192,6 +200,7 @@ export function installTestStorage(
     releaseDirectoryHandle: () => directoryHandleGate.resolve(),
     releaseFileHandle: () => fileHandleGate.resolve(),
     releaseCreateWritable: () => createWritableGate.resolve(),
+    releaseWrite: () => writeGate.resolve(),
     seedFile(name, bytes, lastModified) {
       files.set(name, bytes);
       modifiedAt.set(name, lastModified);

@@ -6,6 +6,7 @@ import {
   completeMediaJournalRecord,
   createMediaImportSession,
   createMediaOperation,
+  ensureMediaOperationCleanupDue,
   getNextMediaRecoveryAt,
   markMediaOperationCleanupDue,
   MediaDurabilityError,
@@ -189,6 +190,42 @@ describe("media journal creation", () => {
 });
 
 describe("media journal guarded mutations", () => {
+  it("re-establishes exact cleanup metadata without overwriting an existing cleanup lease", async () => {
+    const original = await createMediaOperation(operationInput(), {
+      now: at(),
+      leaseDurationMs: 1_000,
+    });
+    const db = await openLocalDb();
+    const deleteTx = db.transaction("mediaOperations", "readwrite");
+    const deleted = transactionDone(deleteTx);
+    deleteTx.objectStore("mediaOperations").delete(original.id);
+    await deleted;
+
+    await expect(ensureMediaOperationCleanupDue(original, { now: at(2_000) }))
+      .resolves.toMatchObject({
+        ...operationInput(),
+        state: "cleanup_due",
+        createdAt: BASE_TIME,
+        updatedAt: "2026-07-11T00:00:02.000Z",
+        nextAttemptAt: "2026-07-11T00:00:02.000Z",
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      });
+
+    const claimed = await claimNextDueMediaOperation("cleanup-owner", {
+      now: at(2_000),
+      leaseDurationMs: 3_000,
+    });
+    await putJournalRecord({ ...claimed!, attempts: 4 });
+    await expect(ensureMediaOperationCleanupDue(original, { now: at(2_500) }))
+      .resolves.toMatchObject({
+        state: "cleanup_due",
+        attempts: 4,
+        leaseOwner: "cleanup-owner",
+        leaseExpiresAt: "2026-07-11T00:00:05.000Z",
+      });
+  });
+
   it("checks state and lease ownership before renew, cleanup, and completion", async () => {
     await createMediaOperation(operationInput(), {
       now: at(),

@@ -295,6 +295,66 @@ export async function renewMediaRecoveryLease(
   });
 }
 
+function isSameMediaOperation(
+  existing: MediaJournalRecord,
+  expected: MediaOperationRecord,
+): existing is MediaOperationRecord {
+  return existing.kind === "media_write" &&
+    existing.id === expected.id &&
+    existing.mediaId === expected.mediaId &&
+    existing.projectId === expected.projectId &&
+    existing.importSessionId === expected.importSessionId &&
+    existing.sourcePath === expected.sourcePath &&
+    existing.contentType === expected.contentType &&
+    existing.sizeBytes === expected.sizeBytes &&
+    existing.opfsPath === expected.opfsPath;
+}
+
+export async function ensureMediaOperationCleanupDue(
+  expected: MediaOperationRecord,
+  options: MediaJournalOptions = {},
+): Promise<MediaOperationRecord> {
+  const db = await database(options);
+  const now = currentTime(options);
+  const timestamp = now.toISOString();
+  const tx = db.transaction(LOCAL_STORES.mediaOperations, "readwrite");
+  try {
+    return await runTransaction(tx, async () => {
+      const store = tx.objectStore(LOCAL_STORES.mediaOperations);
+      const existing = await readRecord(store, expected.id);
+      if (existing) {
+        if (!isSameMediaOperation(existing, expected)) {
+          throw new Error(`Media cleanup operation ${expected.id} conflicts with another record`);
+        }
+        if (existing.state === "cleanup_due") return existing;
+        const updated: MediaOperationRecord = {
+          ...existing,
+          state: "cleanup_due",
+          updatedAt: timestamp,
+          nextAttemptAt: timestamp,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        };
+        await requestToPromise(store.put(updated));
+        return updated;
+      }
+
+      const recreated: MediaOperationRecord = {
+        ...expected,
+        state: "cleanup_due",
+        updatedAt: timestamp,
+        nextAttemptAt: timestamp,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      };
+      await requestToPromise(store.add(recreated));
+      return recreated;
+    });
+  } catch (error) {
+    throw new MediaDurabilityError(expected.id, error);
+  }
+}
+
 export async function markMediaOperationCleanupDue(
   id: string,
   leaseOwner: string,
