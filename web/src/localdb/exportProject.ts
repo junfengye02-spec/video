@@ -1,13 +1,7 @@
 import {
-  AsyncInflate,
   strToU8,
-  Unzip,
-  UnzipInflate,
   Zip,
   ZipPassThrough,
-  type AsyncFlateStreamHandler,
-  type UnzipDecoder,
-  type UnzipFile,
 } from "fflate/browser";
 import type { ShortDramaProjectResponse } from "../domain/types";
 import {
@@ -20,16 +14,14 @@ import {
   archiveEntryByteLimit,
   archiveEntryLimitError,
   collectLocalMediaRefs,
-  isSafeArchiveEntryName,
   mediaIdFromRef,
   normalizeAndValidateSnapshot,
-  parseBackupJson,
   rewriteLocalMediaRefs,
-  shouldRetainArchiveEntry,
-  validateBackupManifests,
   type MediaBackupManifest,
   type ProjectBackupEnvelope,
+  type ValidatedBackupEntry,
 } from "./backupFormat";
+import { readBackupArchive } from "./backupArchiveClient";
 import { renewMediaOperationLease } from "./mediaJournal";
 import { beginMediaWrite, loadMediaBlob, runMediaRecovery } from "./mediaStore";
 import {
@@ -43,11 +35,7 @@ import type { LocalMediaRef } from "./types";
 
 export { ProjectImportConflictError } from "./projectStore";
 
-const MIB = 1024 * 1024;
 const FALLBACK_READ_CHUNK_BYTES = 64 * 1024;
-const FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES = 320_000;
-const MAX_ACTIVE_INFLATE_WORKERS = 2;
-const IMPORT_MEDIA_CHUNK_BYTES = MIB;
 
 async function renewImportSessionLease(sessionId: string): Promise<void> {
   const renewed = await renewMediaOperationLease(sessionId, sessionId);
@@ -55,9 +43,6 @@ async function renewImportSessionLease(sessionId: string): Promise<void> {
     throw new Error(`Import session ${sessionId} lost its owner lease`);
   }
 }
-const WORKER_PROBE_TIMEOUT_MS = 2_000;
-const DECODER_IDLE_TIMEOUT_MS = 15_000;
-
 type ImportProjectBackupOptions = {
   overwrite?: boolean;
 };
@@ -66,100 +51,6 @@ type BackupBlobEntry = {
   name: string;
   blob: Blob;
 };
-
-type ExtractedBackupArchive = {
-  files: Record<string, Uint8Array>;
-  entryPaths: string[];
-};
-
-function shouldUseAsyncInflate(size?: number, originalSize?: number): boolean {
-  return (
-    size === undefined ||
-    originalSize === undefined ||
-    size >= FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES ||
-    originalSize >= FFLATE_ASYNC_INFLATE_THRESHOLD_BYTES
-  );
-}
-
-class ResilientUnzipInflate implements UnzipDecoder {
-  static readonly compression = 8;
-  ondata!: AsyncFlateStreamHandler;
-  private readonly inflate: UnzipDecoder;
-
-  constructor(_name: string, size?: number, originalSize?: number) {
-    try {
-      if (!shouldUseAsyncInflate(size, originalSize)) {
-        this.inflate = new UnzipInflate();
-      } else {
-        const inflate = new AsyncInflate((error, data, final) => {
-          this.ondata(error, data, final);
-        });
-        this.inflate = {
-          ondata: this.ondata,
-          push: (chunk, final) => inflate.push(chunk.slice(), final),
-          terminate: () => inflate.terminate(),
-        };
-      }
-    } catch {
-      this.inflate = new UnzipInflate();
-    }
-    if (this.inflate instanceof UnzipInflate) {
-      this.inflate.ondata = (error, data, final) => this.ondata(error, data, final);
-    }
-  }
-
-  push(chunk: Uint8Array, final: boolean): void {
-    this.inflate.push(chunk, final);
-  }
-
-  terminate(): void {
-    this.inflate.terminate?.();
-  }
-}
-
-let workerProbeCache: {
-  workerConstructor: typeof Worker;
-  result: Promise<boolean>;
-} | null = null;
-
-function canUseInflateWorker(): Promise<boolean> {
-  const workerConstructor = globalThis.Worker;
-  if (typeof workerConstructor !== "function") {
-    return Promise.resolve(false);
-  }
-  if (workerProbeCache?.workerConstructor === workerConstructor) {
-    return workerProbeCache.result;
-  }
-
-  const result = new Promise<boolean>((resolve) => {
-    let settled = false;
-    let inflate: AsyncInflate | null = null;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const finish = (supported: boolean) => {
-      if (settled) return;
-      settled = true;
-      if (timeoutId !== undefined) clearTimeout(timeoutId);
-      inflate?.terminate();
-      resolve(supported);
-    };
-
-    timeoutId = setTimeout(() => finish(false), WORKER_PROBE_TIMEOUT_MS);
-    try {
-      inflate = new AsyncInflate((error, _data, final) => {
-        if (error) {
-          finish(false);
-        } else if (final) {
-          finish(true);
-        }
-      });
-      inflate.push(new Uint8Array([0x03, 0x00]), true);
-    } catch {
-      finish(false);
-    }
-  });
-  workerProbeCache = { workerConstructor, result };
-  return result;
-}
 
 function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
   if (typeof blob.arrayBuffer === "function") {
@@ -203,24 +94,8 @@ function createBlobReader(blob: Blob): Pick<ReadableStreamDefaultReader<Uint8Arr
   };
 }
 
-function concatChunks(chunks: Uint8Array[], size: number): Uint8Array {
-  const output = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return output;
-}
-
 function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
-}
-
-function errorWithCauses(message: string, causes: unknown[]): Error {
-  const error = new Error(message) as Error & { causes: unknown[] };
-  error.causes = causes;
-  return error;
 }
 
 async function createBackupArchive(entries: BackupBlobEntry[]): Promise<Blob> {
@@ -302,232 +177,6 @@ async function createBackupArchive(entries: BackupBlobEntry[]): Promise<Blob> {
   return completion;
 }
 
-async function extractBackupArchive(file: File): Promise<ExtractedBackupArchive> {
-  if (!Number.isSafeInteger(file.size) || file.size > MAX_ARCHIVE_BYTES) {
-    throw new BackupValidationError("Backup archive exceeds the compressed size limit");
-  }
-  const workerSupported = await canUseInflateWorker();
-
-  return new Promise((resolve, reject) => {
-    const files: Record<string, Uint8Array> = {};
-    const seenNames = new Set<string>();
-    const activeFiles = new Set<UnzipFile>();
-    const reader = createBlobReader(file);
-    let archivedBytesRead = 0;
-    let entryCount = 0;
-    let declaredTotal = 0;
-    let actualTotal = 0;
-    let pendingEntries = 0;
-    let activeInflateWorkers = 0;
-    let inputDone = false;
-    let settled = false;
-    const queuedWorkerStarts: Array<(release: () => void) => void> = [];
-    const inputGateResolvers: Array<() => void> = [];
-    const controls = new Set<{
-      file: UnzipFile;
-      done: boolean;
-      releaseWorkerSlot: (() => void) | null;
-      watchdog: ReturnType<typeof setTimeout> | null;
-    }>();
-
-    const releaseInputGate = () => {
-      if (!settled && queuedWorkerStarts.length > 0) return;
-      for (const release of inputGateResolvers.splice(0)) release();
-    };
-    const drainWorkerStarts = () => {
-      while (!settled && activeInflateWorkers < MAX_ACTIVE_INFLATE_WORKERS) {
-        const start = queuedWorkerStarts.shift();
-        if (!start) break;
-        activeInflateWorkers += 1;
-        let released = false;
-        start(() => {
-          if (released) return;
-          released = true;
-          activeInflateWorkers -= 1;
-          drainWorkerStarts();
-        });
-      }
-      releaseInputGate();
-    };
-    const waitForInputGate = (): Promise<void> | null => (
-      queuedWorkerStarts.length > 0
-        ? new Promise((resolveGate) => inputGateResolvers.push(resolveGate))
-        : null
-    );
-
-    const maybeResolve = () => {
-      if (!settled && inputDone && pendingEntries === 0) {
-        settled = true;
-        resolve({ files, entryPaths: [...seenNames] });
-      }
-    };
-    const fail = (error: unknown) => {
-      if (settled) return;
-      settled = true;
-      queuedWorkerStarts.splice(0);
-      for (const control of controls) {
-        control.done = true;
-        if (control.watchdog !== null) clearTimeout(control.watchdog);
-        try {
-          control.file.terminate();
-        } catch {
-          // The original decoder failure remains authoritative.
-        }
-        control.releaseWorkerSlot?.();
-      }
-      controls.clear();
-      activeFiles.clear();
-      pendingEntries = 0;
-      releaseInputGate();
-      void reader.cancel(error).catch(() => undefined);
-      reject(error);
-    };
-
-    const unzip = new Unzip((archiveEntry) => {
-      if (settled) return;
-      entryCount += 1;
-      if (entryCount > MAX_ARCHIVE_ENTRIES) {
-        fail(new BackupValidationError("Backup archive has too many entries for the entry limit"));
-        return;
-      }
-      if (!isSafeArchiveEntryName(archiveEntry.name)) {
-        fail(new BackupValidationError(`Backup archive entry ${archiveEntry.name} is malformed`));
-        return;
-      }
-      if (seenNames.has(archiveEntry.name)) {
-        fail(new BackupValidationError(`Backup archive contains duplicate entry ${archiveEntry.name}`));
-        return;
-      }
-      seenNames.add(archiveEntry.name);
-
-      if (archiveEntry.originalSize !== undefined) {
-        if (
-          !Number.isSafeInteger(archiveEntry.originalSize) ||
-          archiveEntry.originalSize < 0 ||
-          archiveEntry.originalSize > archiveEntryByteLimit(archiveEntry.name)
-        ) {
-          fail(archiveEntryLimitError(archiveEntry.name));
-          return;
-        }
-        declaredTotal += archiveEntry.originalSize;
-        if (declaredTotal > MAX_TOTAL_UNCOMPRESSED_BYTES) {
-          fail(new BackupValidationError("Backup total uncompressed size exceeds the limit"));
-          return;
-        }
-      }
-
-      const chunks: Uint8Array[] = [];
-      let entryBytes = 0;
-      const needsWorkerSlot = (
-        workerSupported &&
-        archiveEntry.compression === 8 &&
-        shouldUseAsyncInflate(archiveEntry.size, archiveEntry.originalSize)
-      );
-      const control = {
-        file: archiveEntry,
-        done: false,
-        releaseWorkerSlot: null as (() => void) | null,
-        watchdog: null as ReturnType<typeof setTimeout> | null,
-      };
-      const clearWatchdog = () => {
-        if (control.watchdog === null) return;
-        clearTimeout(control.watchdog);
-        control.watchdog = null;
-      };
-      const armWatchdog = () => {
-        if (!needsWorkerSlot || settled || control.done) return;
-        clearWatchdog();
-        control.watchdog = setTimeout(() => {
-          if (settled || control.done) return;
-          fail(new Error(`Backup decoder timed out for ${archiveEntry.name}`));
-        }, DECODER_IDLE_TIMEOUT_MS);
-      };
-      pendingEntries += 1;
-      activeFiles.add(archiveEntry);
-      controls.add(control);
-      archiveEntry.ondata = (error, data, final) => {
-        if (settled || control.done) return;
-        if (error) {
-          fail(error);
-          return;
-        }
-        const nextEntryBytes = entryBytes + data.length;
-        const nextActualTotal = actualTotal + data.length;
-        if (nextEntryBytes > archiveEntryByteLimit(archiveEntry.name)) {
-          fail(archiveEntryLimitError(archiveEntry.name));
-          return;
-        }
-        if (nextActualTotal > MAX_TOTAL_UNCOMPRESSED_BYTES) {
-          fail(new BackupValidationError("Backup total uncompressed size exceeds the limit"));
-          return;
-        }
-        entryBytes = nextEntryBytes;
-        actualTotal = nextActualTotal;
-        if (!final) armWatchdog();
-        if (shouldRetainArchiveEntry(archiveEntry.name) && data.length > 0) {
-          chunks.push(data);
-        }
-        if (final) {
-          control.done = true;
-          clearWatchdog();
-          if (shouldRetainArchiveEntry(archiveEntry.name)) {
-            files[archiveEntry.name] = concatChunks(chunks, entryBytes);
-          }
-          activeFiles.delete(archiveEntry);
-          controls.delete(control);
-          pendingEntries -= 1;
-          control.releaseWorkerSlot?.();
-          maybeResolve();
-        }
-      };
-      const startEntry = (release?: () => void) => {
-        control.releaseWorkerSlot = release ?? null;
-        armWatchdog();
-        try {
-          archiveEntry.start();
-        } catch (error) {
-          fail(error);
-        }
-      };
-      if (needsWorkerSlot) {
-        queuedWorkerStarts.push(startEntry);
-        drainWorkerStarts();
-      } else {
-        startEntry();
-      }
-    });
-    unzip.register(workerSupported ? ResilientUnzipInflate : UnzipInflate);
-
-    void (async () => {
-      try {
-        while (!settled) {
-          const { done, value } = await reader.read();
-          if (done) {
-            unzip.push(new Uint8Array(0), true);
-            inputDone = true;
-            maybeResolve();
-            break;
-          }
-          for (let offset = 0; offset < value.length && !settled; offset += FALLBACK_READ_CHUNK_BYTES) {
-            const inputGate = waitForInputGate();
-            if (inputGate) await inputGate;
-            if (settled) break;
-            const chunk = value.subarray(offset, offset + FALLBACK_READ_CHUNK_BYTES);
-            archivedBytesRead += chunk.length;
-            if (archivedBytesRead > MAX_ARCHIVE_BYTES) {
-              fail(new BackupValidationError("Backup archive exceeds the compressed size limit"));
-              break;
-            }
-            unzip.push(chunk, false);
-          }
-        }
-      } catch (error) {
-        fail(error);
-      }
-    })();
-  });
-}
-
 export async function exportProjectBackup(projectId: string): Promise<Blob> {
   const record = await loadProjectSnapshot(projectId);
   if (!record) {
@@ -579,55 +228,71 @@ export async function importProjectBackup(
   file: File,
   options: ImportProjectBackupOptions = {},
 ): Promise<ShortDramaProjectResponse> {
-  const { files, entryPaths } = await extractBackupArchive(file);
-  const manifestBytes = files[MANIFEST_NAME];
-  if (!manifestBytes) {
-    throw new BackupValidationError("Backup is missing openmontage-project.json");
-  }
-
   const refMap = new Map<LocalMediaRef, LocalMediaRef>();
-  const mediaManifestBytes = files[MEDIA_MANIFEST_NAME];
-  const { project: snapshot, mediaManifest } = validateBackupManifests(
-    parseBackupJson(manifestBytes, MANIFEST_NAME),
-    mediaManifestBytes ? parseBackupJson(mediaManifestBytes, MEDIA_MANIFEST_NAME) : undefined,
-    entryPaths,
-  );
-
-  const existing = await loadProjectSnapshot(snapshot.project.id);
-  if (existing && !options.overwrite) {
-    throw new ProjectImportConflictError(snapshot.project.id);
-  }
-
-  const sessionId = await beginProjectImport(snapshot.project.id);
+  let sessionId: string | null = null;
+  let activeWriter: {
+    entry: Extract<ValidatedBackupEntry, { kind: "media" }>;
+    writer: Awaited<ReturnType<typeof beginMediaWrite>>;
+  } | null = null;
+  const abortActiveWriter = async (cause: unknown) => {
+    const current = activeWriter;
+    if (current) await current.writer.abort(cause).catch(() => undefined);
+  };
   try {
-    for (const entry of mediaManifest.media) {
-      await renewImportSessionLease(sessionId);
-      const mediaBytes = files[entry.file];
-      const writer = await beginMediaWrite({
-        projectId: snapshot.project.id,
-        importSessionId: sessionId,
-        sourcePath: entry.sourcePath,
-        contentType: entry.contentType,
-        sizeBytes: mediaBytes.byteLength,
-      });
-      let restoredRef: LocalMediaRef;
-      try {
-        for (let offset = 0; offset < mediaBytes.byteLength; offset += IMPORT_MEDIA_CHUNK_BYTES) {
-          await writer.write(mediaBytes.subarray(offset, offset + IMPORT_MEDIA_CHUNK_BYTES));
+    const backup = await readBackupArchive(file, {
+      async onEntryStart(entry) {
+        if (entry.kind === "project-manifest") {
+          if (sessionId) throw new Error("Backup project manifest was streamed more than once");
+          const existing = await loadProjectSnapshot(entry.projectId);
+          if (existing && !options.overwrite) {
+            throw new ProjectImportConflictError(entry.projectId);
+          }
+          sessionId = await beginProjectImport(entry.projectId);
+          return;
         }
-        restoredRef = await writer.commit();
-      } catch (error) {
-        await writer.abort(error).catch(() => undefined);
-        throw error;
-      }
-      await renewImportSessionLease(sessionId);
-      refMap.set(entry.ref, restoredRef);
-    }
+        if (entry.kind !== "media") return;
+        if (!sessionId) throw new Error("Backup media was streamed before its import session");
+        if (activeWriter) throw new Error("Backup media entries overlapped");
+        await renewImportSessionLease(sessionId);
+        const writer = await beginMediaWrite({
+          projectId: entry.projectId,
+          importSessionId: sessionId,
+          sourcePath: entry.media.sourcePath,
+          contentType: entry.media.contentType,
+          sizeBytes: entry.sizeBytes,
+        });
+        activeWriter = { entry, writer };
+      },
+      async onEntryChunk(entry, chunk) {
+        if (entry.kind !== "media") return;
+        if (!activeWriter || activeWriter.entry.name !== entry.name) {
+          throw new Error(`Backup media writer for ${entry.name} is not active`);
+        }
+        await activeWriter.writer.write(chunk);
+      },
+      async onEntryEnd(entry) {
+        if (entry.kind !== "media") return;
+        if (!activeWriter || activeWriter.entry.name !== entry.name || !sessionId) {
+          throw new Error(`Backup media writer for ${entry.name} ended out of order`);
+        }
+        const current = activeWriter;
+        activeWriter = null;
+        try {
+          const restoredRef = await current.writer.commit();
+          await renewImportSessionLease(sessionId);
+          refMap.set(current.entry.media.ref, restoredRef);
+        } catch (error) {
+          await current.writer.abort(error).catch(() => undefined);
+          throw error;
+        }
+      },
+    });
+    if (!sessionId) throw new Error("Backup import session was not established");
 
     const restoredSnapshot =
       refMap.size > 0
-        ? (rewriteLocalMediaRefs(snapshot, refMap) as ShortDramaProjectResponse)
-        : snapshot;
+        ? (rewriteLocalMediaRefs(backup.project, refMap) as ShortDramaProjectResponse)
+        : backup.project;
     const validatedSnapshot = normalizeAndValidateSnapshot(restoredSnapshot);
     await renewImportSessionLease(sessionId);
     await commitImportedProject(validatedSnapshot, sessionId, {
@@ -636,8 +301,11 @@ export async function importProjectBackup(
     });
     return validatedSnapshot;
   } catch (error) {
-    await abortProjectImport(sessionId, error).catch(() => undefined);
-    await runMediaRecovery().catch(() => undefined);
+    await abortActiveWriter(error);
+    if (sessionId) {
+      await abortProjectImport(sessionId, error).catch(() => undefined);
+      await runMediaRecovery().catch(() => undefined);
+    }
     throw error;
   }
 }

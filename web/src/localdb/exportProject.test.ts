@@ -1,6 +1,9 @@
 import "fake-indexeddb/auto";
-import { inflateSync, strFromU8, strToU8, unzipSync, zipSync } from "fflate";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import backupArchiveClientSource from "./backupArchiveClient.ts?raw";
+import backupImportWorkerSource from "./backupImport.worker.ts?raw";
+import exportProjectSource from "./exportProject.ts?raw";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContinuityPlan, ShortDramaProjectResponse, Shot } from "../domain/types";
 import {
   exportProjectBackup,
@@ -8,6 +11,8 @@ import {
   ProjectImportConflictError,
 } from "./exportProject";
 import { BackupValidationError } from "./backupFormat";
+import { BackupWorkerUnavailableError, type BackupWorkerRequest, type BackupWorkerResponse } from "./backupArchiveClient";
+import { installBackupImportWorker } from "./backupImport.worker";
 import { resetLocalDbForTests } from "./indexedDb";
 import { loadMediaBlob, saveMediaBlob } from "./mediaStore";
 import {
@@ -19,6 +24,39 @@ import { LOCAL_DB_NAME, type LocalMediaRef } from "./types";
 
 const originalStorage = Object.getOwnPropertyDescriptor(Navigator.prototype, "storage");
 const originalCreateObjectUrl = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+
+class InProcessBackupWorker {
+  onmessage: ((event: MessageEvent<BackupWorkerResponse>) => void) | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
+  onmessageerror: ((event: MessageEvent) => void) | null = null;
+  private listener: ((event: MessageEvent<BackupWorkerRequest>) => void) | null = null;
+  private terminated = false;
+
+  constructor(_url: URL, _options?: WorkerOptions) {
+    installBackupImportWorker({
+      addEventListener: (_type, listener) => { this.listener = listener; },
+      postMessage: (message) => {
+        queueMicrotask(() => {
+          if (!this.terminated) this.onmessage?.({ data: message } as MessageEvent<BackupWorkerResponse>);
+        });
+      },
+    });
+  }
+
+  postMessage(message: BackupWorkerRequest): void {
+    queueMicrotask(() => {
+      if (!this.terminated) this.listener?.({ data: message } as MessageEvent<BackupWorkerRequest>);
+    });
+  }
+
+  terminate(): void {
+    this.terminated = true;
+  }
+}
+
+beforeEach(() => {
+  vi.stubGlobal("Worker", InProcessBackupWorker);
+});
 
 async function blobFromText(text: string, contentType: string): Promise<Blob> {
   return new Response(text, { headers: { "content-type": contentType } }).blob();
@@ -262,113 +300,6 @@ function continuityPlan(
   };
 }
 
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  const size = chunks.reduce((total, chunk) => total + chunk.length, 0);
-  const result = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return result;
-}
-
-function incompressibleBytes(size: number, seed: number): Uint8Array {
-  const result = new Uint8Array(size);
-  let state = seed >>> 0;
-  for (let index = 0; index < result.length; index += 1) {
-    state ^= state << 13;
-    state ^= state >>> 17;
-    state ^= state << 5;
-    result[index] = state & 0xff;
-  }
-  return result;
-}
-
-function installInflateWorker(options: {
-  constructionError?: Error;
-  hangAfterProbe?: boolean;
-  asyncErrorAfterProbe?: Error;
-} = {}) {
-  const stats = { created: 0, active: 0, maxActive: 0 };
-  const workers = new Set<InflateWorker>();
-  class InflateWorker {
-    onmessage: ((event: MessageEvent) => void) | null = null;
-    private readonly chunks: Uint8Array[] = [];
-    private terminated = false;
-    private readonly ordinal: number;
-
-    constructor() {
-      if (options.constructionError) throw options.constructionError;
-      stats.created += 1;
-      this.ordinal = stats.created;
-      stats.active += 1;
-      stats.maxActive = Math.max(stats.maxActive, stats.active);
-      workers.add(this);
-    }
-
-    postMessage(message: unknown): void {
-      if (!Array.isArray(message) || !(message[0] instanceof Uint8Array)) return;
-      const chunk = new Uint8Array(message[0]);
-      this.chunks.push(chunk);
-      if (message[1] !== true) return;
-      if (this.ordinal > 1 && options.hangAfterProbe) return;
-      if (this.ordinal > 1 && options.asyncErrorAfterProbe) {
-        const error = options.asyncErrorAfterProbe;
-        queueMicrotask(() => this.onmessage?.({
-          data: { $e$: [error.message, 0, error.stack] },
-        } as MessageEvent));
-        return;
-      }
-      const inflated = inflateSync(concatBytes(this.chunks));
-      queueMicrotask(() => this.onmessage?.({ data: [inflated, true] } as MessageEvent));
-    }
-
-    terminate(): void {
-      if (this.terminated) return;
-      this.terminated = true;
-      stats.active -= 1;
-      workers.delete(this);
-    }
-  }
-  Object.defineProperty(URL, "createObjectURL", {
-    configurable: true,
-    value: vi.fn(() => "blob:inflate-worker"),
-  });
-  vi.stubGlobal("Worker", InflateWorker);
-  return {
-    ...stats,
-    get created() { return stats.created; },
-    get active() { return stats.active; },
-    get maxActive() { return stats.maxActive; },
-    terminateAll: () => {
-      for (const worker of [...workers]) worker.terminate();
-    },
-  };
-}
-
-async function streamAsSingleChunk(file: File): Promise<void> {
-  const archiveBytes = new Uint8Array(await blobToArrayBuffer(file));
-  Object.defineProperty(file, "stream", {
-    configurable: true,
-    value: () => {
-      let read = false;
-      return {
-        getReader: () => ({
-          read: async () => {
-            if (read) return { done: true, value: undefined };
-            read = true;
-            return { done: false, value: archiveBytes };
-          },
-          cancel: async () => {
-            read = true;
-          },
-        }),
-      };
-    },
-  });
-}
-
 async function patchDeclaredSize(
   file: File,
   entryName: string,
@@ -452,6 +383,17 @@ afterEach(async () => {
 });
 
 describe("exportProject", () => {
+  it("keeps every production ZIP decoder import inside the dedicated module Worker", () => {
+    const decoderPattern = /\b(?:AsyncInflate|UnzipInflate|new\s+Unzip)\b/;
+
+    expect(backupImportWorkerSource).toMatch(decoderPattern);
+    expect(backupArchiveClientSource).not.toMatch(decoderPattern);
+    expect(exportProjectSource).not.toMatch(decoderPattern);
+    expect(backupArchiveClientSource).toContain(
+      'new Worker(new URL("./backupImport.worker.ts", import.meta.url), { type: "module" })',
+    );
+  });
+
   it("exports a zip with a project JSON manifest", async () => {
     await saveProjectSnapshot(snapshot());
 
@@ -990,8 +932,7 @@ describe("exportProject", () => {
     expect(await loadProjectSnapshot("oversized-import")).toBeNull();
   });
 
-  it("uses a Worker for high-compression output and enforces the actual manifest limit", async () => {
-    const workerStats = installInflateWorker();
+  it("uses the module Worker for high-compression output and enforces the actual manifest limit", async () => {
     const oversized = snapshot(null, { id: "high-compression" });
     oversized.project.title = "x".repeat(8 * 1024 * 1024);
     const backup = await patchDeclaredSize(
@@ -1001,7 +942,6 @@ describe("exportProject", () => {
     );
 
     await expect(importProjectBackup(backup)).rejects.toThrow(/manifest.*limit/i);
-    expect(workerStats.created).toBe(2);
     expect(await loadProjectSnapshot("high-compression")).toBeNull();
   });
 
@@ -1051,99 +991,16 @@ describe("exportProject", () => {
     expect(await loadProjectSnapshot("imported")).toBeNull();
   });
 
-  it("falls back to bounded synchronous inflate when Worker construction is blocked", async () => {
-    installInflateWorker({ constructionError: new DOMException("Blocked by CSP", "SecurityError") });
-
-    const imported = await importProjectBackup(backupFile({
-      project: snapshot(null, { id: "csp-fallback" }),
-    }));
-
-    expect(imported.project.id).toBe("csp-fallback");
-  });
-
-  it("does not create a Worker for every small deflated archive entry", async () => {
-    const workerStats = installInflateWorker();
-    const mediaFiles = Object.fromEntries(
-      Array.from({ length: 20 }, (_, index) => [`extra/small-${index}`, strToU8(`small-${index}`)]),
-    );
+  it("does not fall back to main-thread inflate when module Worker construction is blocked", async () => {
+    vi.stubGlobal("Worker", class {
+      constructor() {
+        throw new DOMException("Blocked by CSP", "SecurityError");
+      }
+    });
 
     await expect(importProjectBackup(backupFile({
-      project: snapshot(null, { id: "small-entries" }),
-      mediaFiles,
-    }))).rejects.toThrow(/undeclared/i);
-
-    expect(workerStats.created).toBe(1);
-    expect(workerStats.maxActive).toBe(1);
-  });
-
-  it("uses at most two concurrent Workers for large deflated entries", async () => {
-    const workerStats = installInflateWorker();
-    const mediaFiles = Object.fromEntries(
-      Array.from({ length: 3 }, (_, index) => [
-        `extra/large-${index}`,
-        incompressibleBytes(400_000, index + 1),
-      ]),
-    );
-    const backup = backupFile({
-      project: snapshot(null, { id: "large-entries" }),
-      mediaFiles,
-    });
-    await streamAsSingleChunk(backup);
-
-    await expect(importProjectBackup(backup)).rejects.toThrow(/undeclared/i);
-
-    expect(workerStats.created).toBe(4);
-    expect(workerStats.maxActive).toBeLessThanOrEqual(2);
-  });
-
-  it("rejects and releases all decoder slots when active Workers stop responding", async () => {
-    const workerStats = installInflateWorker({ hangAfterProbe: true });
-    const mediaFiles = Object.fromEntries(
-      Array.from({ length: 3 }, (_, index) => [
-        `extra/hang-${index}`,
-        incompressibleBytes(400_000, index + 11),
-      ]),
-    );
-    const backup = backupFile({
-      project: snapshot(null, { id: "worker-hang" }),
-      mediaFiles,
-    });
-    await streamAsSingleChunk(backup);
-    vi.useFakeTimers();
-
-    let outcome: "pending" | "resolved" | "rejected" = "pending";
-    void importProjectBackup(backup).then(
-      () => { outcome = "resolved"; },
-      () => { outcome = "rejected"; },
-    );
-    await vi.advanceTimersByTimeAsync(0);
-    expect(workerStats.created).toBe(3);
-    await vi.advanceTimersByTimeAsync(30_000);
-    const observedOutcome = outcome;
-    workerStats.terminateAll();
-
-    expect(observedOutcome).toBe("rejected");
-    expect(workerStats.active).toBe(0);
-  });
-
-  it("rejects an asynchronous Worker error before starting a queued decoder", async () => {
-    const workerStats = installInflateWorker({
-      asyncErrorAfterProbe: new Error("Worker inflate failed"),
-    });
-    const mediaFiles = Object.fromEntries(
-      Array.from({ length: 3 }, (_, index) => [
-        `extra/error-${index}`,
-        incompressibleBytes(400_000, index + 21),
-      ]),
-    );
-    const backup = backupFile({
-      project: snapshot(null, { id: "worker-error" }),
-      mediaFiles,
-    });
-    await streamAsSingleChunk(backup);
-
-    await expect(importProjectBackup(backup)).rejects.toThrow(/Worker inflate failed/i);
-    expect(workerStats.created).toBe(3);
-    expect(workerStats.active).toBe(0);
+      project: snapshot(null, { id: "csp-blocked" }),
+    }))).rejects.toBeInstanceOf(BackupWorkerUnavailableError);
+    expect(await loadProjectSnapshot("csp-blocked")).toBeNull();
   });
 });
