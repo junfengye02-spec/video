@@ -940,6 +940,46 @@ describe("App workbench integration", () => {
     });
   });
 
+  it("keeps the last successful final render available when a retry fails", async () => {
+    const current = projectResponse();
+    current.final_path = "local://media/old-final";
+    current.render_report = {
+      version: "1.0",
+      outputs: [{
+        path: "renders/old-final.mp4",
+        format: "mp4",
+        resolution: "720x1280",
+        duration_seconds: 25,
+      }],
+    };
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: current.project.title,
+      updatedAt: "2026-07-10T08:00:00Z",
+      snapshot: cloneProjectResponse(current),
+    });
+    localMediaUrlMocks.resolveLocalMediaUrl.mockResolvedValue("blob:old-final");
+    apiMocks.renderProject.mockRejectedValue(new Error("render failed"));
+    window.history.replaceState({}, "", "/projects/p1/production");
+    render(<App />);
+
+    expect(await screen.findByLabelText("最终成片预览")).toHaveAttribute("src", "blob:old-final");
+    fireEvent.click(screen.getByRole("button", { name: "接口配置" }));
+    fireEvent.change(screen.getByLabelText(zh.keyGate.videoKeyLabel), {
+      target: { value: "video-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "关闭接口配置" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "生成最终成片" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("render failed");
+    expect(screen.getByLabelText("最终成片预览")).toHaveAttribute("src", "blob:old-final");
+    expect(screen.getByRole("button", { name: "下载最终成片" })).toBeEnabled();
+    expect(localProjectStoreMocks.saveProjectSnapshot).not.toHaveBeenCalledWith(
+      expect.objectContaining({ final_path: null }),
+    );
+  });
+
   it("refreshes from the authoritative project after render and caches its final path", async () => {
     const current = projectResponse();
     current.storyboard.shots[0].output_path = "local://media/render-cached-shot";

@@ -934,7 +934,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     const isCurrent = () => isProjectOperationCurrent(token);
     setBusyValue("rendering", true);
     setError(null);
-    applyProjectSnapshot({ ...current, final_path: null });
     const responseBaseRevision = snapshotRevisionRef.current;
     try {
       const result = await renderProject(projectId, {
