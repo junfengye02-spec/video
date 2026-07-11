@@ -102,6 +102,16 @@ describe("StoryboardPage", () => {
     expect(screen.getByLabelText("分镜 2 缩略预览")).toHaveAttribute("src", "blob:s2");
   });
 
+  it("reserves an aria-hidden thumbnail placeholder for unresolved media", () => {
+    render(<StoryboardPage {...storyboardProps} />);
+
+    const shotButton = screen.getByRole("button", { name: "选择分镜 1" });
+    const thumbnail = shotButton.querySelector(".shot-list-thumbnail");
+    expect(thumbnail).toHaveAttribute("aria-hidden", "true");
+    expect(thumbnail?.querySelector(".shot-list-thumbnail-placeholder")).toBeInTheDocument();
+    expect(thumbnail?.querySelector("video")).not.toBeInTheDocument();
+  });
+
   it("switches mobile views without unmounting a dirty shot draft", () => {
     render(<StoryboardPage {...storyboardProps} />);
 
