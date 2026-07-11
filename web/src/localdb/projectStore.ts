@@ -12,6 +12,7 @@ import type {
   LocalProjectSummary,
   LocalProjectVersion,
   LocalSettingsRecord,
+  MediaImportSessionRecord,
   MediaJournalRecord,
   MediaOperationRecord,
 } from "./types";
@@ -146,6 +147,107 @@ function collectLocalMediaRefs(value: unknown, refs = new Set<LocalMediaRef>()):
   return refs;
 }
 
+async function retirePriorProjectState(
+  tx: IDBTransaction,
+  projectId: string,
+  acceptedSessionId: string | null,
+  acceptedMediaIds: Set<string>,
+): Promise<void> {
+  const timestamp = new Date().toISOString();
+  const projectStore = tx.objectStore(LOCAL_STORES.projects);
+  const mediaStore = tx.objectStore(LOCAL_STORES.media);
+  const operationStore = tx.objectStore(LOCAL_STORES.mediaOperations);
+  const [projects, projectMedia, projectOperations] = await Promise.all([
+    requestToPromise<LocalProjectSnapshot[]>(projectStore.getAll()),
+    requestToPromise<LocalMediaRecord[]>(
+      mediaStore.index("projectId").getAll(IDBKeyRange.only(projectId)),
+    ),
+    requestToPromise<MediaJournalRecord[]>(
+      operationStore.index("projectId").getAll(IDBKeyRange.only(projectId)),
+    ),
+  ]);
+
+  const sharedOwners = new Map<LocalMediaRef, VersionedLocalProjectSnapshot>();
+  for (const project of projects) {
+    if (project.id === projectId) continue;
+    const normalized = normalizeProjectSnapshot(project);
+    for (const ref of collectLocalMediaRefs(project.snapshot)) {
+      if (!sharedOwners.has(ref)) sharedOwners.set(ref, normalized);
+    }
+  }
+
+  const mediaOperations = new Map(
+    projectOperations
+      .filter((record): record is MediaOperationRecord => record.kind === "media_write")
+      .map((record) => [record.mediaId, record]),
+  );
+  const importSessions = new Set(projectOperations
+    .filter((record): record is MediaImportSessionRecord => record.kind === "import_session")
+    .map((record) => record.id));
+
+  for (const operation of projectOperations) {
+    if (operation.id !== acceptedSessionId) {
+      operationStore.put(cleanupDue(operation, timestamp));
+    }
+  }
+
+  for (const media of projectMedia) {
+    if (
+      acceptedSessionId
+      && acceptedMediaIds.has(media.id)
+      && media.importSessionId === acceptedSessionId
+    ) {
+      continue;
+    }
+
+    const ref = `${LOCAL_MEDIA_PREFIX}${media.id}` as LocalMediaRef;
+    const sharedOwner = media.state !== "staged" ? sharedOwners.get(ref) : undefined;
+    if (sharedOwner) {
+      mediaStore.put({
+        ...media,
+        projectId: sharedOwner.id,
+        projectIncarnation: sharedOwner.incarnation,
+      });
+      continue;
+    }
+
+    if (
+      media.state === "staged"
+      && media.importSessionId
+      && importSessions.has(media.importSessionId)
+    ) {
+      continue;
+    }
+
+    mediaStore.delete(media.id);
+    if (media.storage !== "opfs" || !media.opfsPath) continue;
+    const existingOperation = mediaOperations.get(media.id);
+    if (existingOperation) {
+      operationStore.put(cleanupDue(existingOperation, timestamp));
+      continue;
+    }
+    operationStore.add({
+      id: createId(),
+      kind: "media_write",
+      mediaId: media.id,
+      projectId,
+      projectIncarnation: media.projectIncarnation ?? null,
+      importSessionId: media.importSessionId ?? null,
+      sourcePath: media.sourcePath,
+      contentType: media.contentType,
+      sizeBytes: media.sizeBytes,
+      opfsPath: media.opfsPath,
+      state: "cleanup_due",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      attempts: 0,
+      nextAttemptAt: timestamp,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    } satisfies MediaOperationRecord);
+  }
+}
+
 async function loadRecentProjectId(): Promise<string | null> {
   const db = await openLocalDb();
   const tx = db.transaction(LOCAL_STORES.settings, "readonly");
@@ -210,34 +312,44 @@ export async function saveImportedProjectSnapshot(
   options: { overwrite: boolean },
 ): Promise<void> {
   const db = await openLocalDb();
-  const tx = db.transaction([LOCAL_STORES.projects, LOCAL_STORES.settings], "readwrite");
-  const done = transactionDone(tx);
-  const projectStore = tx.objectStore(LOCAL_STORES.projects);
-  const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
-    projectStore.get(snapshot.project.id),
-  );
-  if (existing && !options.overwrite) {
-    tx.abort();
-    await done.catch(() => undefined);
-    throw new ProjectImportConflictError(snapshot.project.id);
-  }
+  const tx = db.transaction([
+    LOCAL_STORES.projects,
+    LOCAL_STORES.settings,
+    LOCAL_STORES.media,
+    LOCAL_STORES.mediaOperations,
+  ], "readwrite");
+  await runTransaction(tx, async () => {
+    const projectStore = tx.objectStore(LOCAL_STORES.projects);
+    const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
+      projectStore.get(snapshot.project.id),
+    );
+    if (existing && !options.overwrite) {
+      throw new ProjectImportConflictError(snapshot.project.id);
+    }
 
-  projectStore.put(toLocalProjectSnapshot(
-    snapshot,
-    freshProjectVersion(),
-  ));
-  tx.objectStore(LOCAL_STORES.settings).put({
-    key: "recentProjectId",
-    value: snapshot.project.id,
-  } satisfies LocalSettingsRecord);
-  await done;
+    const version = freshProjectVersion();
+    await retirePriorProjectState(
+      tx,
+      snapshot.project.id,
+      null,
+      new Set(),
+    );
+    projectStore.put(toLocalProjectSnapshot(snapshot, version));
+    tx.objectStore(LOCAL_STORES.settings).put({
+      key: "recentProjectId",
+      value: snapshot.project.id,
+    } satisfies LocalSettingsRecord);
+  });
+  await runMediaRecovery().catch(() => undefined);
 }
 
 export async function beginProjectImport(projectId: string): Promise<string> {
   const sessionId = createId();
+  const projectIncarnation = createId();
   await createMediaImportSession({
     id: sessionId,
     projectId,
+    projectIncarnation,
     mediaIds: [],
     leaseOwner: sessionId,
   });
@@ -295,6 +407,8 @@ export async function commitImportedProject(
       const allMedia = await requestToPromise<LocalMediaRecord[]>(mediaStore.getAll());
       const mediaById = new Map(allMedia.map((record) => [record.id, record]));
       const sessionMediaIds = new Set(session.mediaIds);
+      const sessionIncarnation = session.projectIncarnation?.trim()
+        || `legacy:${session.projectId}`;
       const linkedMedia = allMedia.filter((record) => record.importSessionId === sessionId);
       const hasInvalidMedia =
         sessionMediaIds.size !== session.mediaIds.length ||
@@ -303,7 +417,8 @@ export async function commitImportedProject(
         session.mediaIds.some((id) => {
           const record = mediaById.get(id);
           return !record || record.projectId !== session.projectId || record.state !== "staged" ||
-            record.importSessionId !== sessionId;
+            record.importSessionId !== sessionId ||
+            (record.projectIncarnation?.trim() || `legacy:${record.projectId}`) !== sessionIncarnation;
         });
       if (!rejection && hasInvalidMedia) {
         rejection = new Error(`Import session ${sessionId} contains invalid staged media`);
@@ -314,9 +429,16 @@ export async function commitImportedProject(
         return;
       }
 
+      const projectIncarnation = session.projectIncarnation?.trim() || createId();
+      await retirePriorProjectState(
+        tx,
+        snapshot.project.id,
+        sessionId,
+        sessionMediaIds,
+      );
       projectStore.put(toLocalProjectSnapshot(
         snapshot,
-        freshProjectVersion(),
+        { incarnation: projectIncarnation, revision: 1 },
       ));
       tx.objectStore(LOCAL_STORES.settings).put({
         key: "recentProjectId",
@@ -324,7 +446,12 @@ export async function commitImportedProject(
       } satisfies LocalSettingsRecord);
       for (const mediaId of session.mediaIds) {
         const record = mediaById.get(mediaId)!;
-        mediaStore.put({ ...record, state: "committed", importSessionId: null });
+        mediaStore.put({
+          ...record,
+          projectIncarnation,
+          state: "committed",
+          importSessionId: null,
+        });
       }
       operationStore.delete(sessionId);
     });
@@ -333,6 +460,7 @@ export async function commitImportedProject(
     await abortProjectImport(sessionId, error).catch(() => undefined);
     throw error;
   }
+  await runMediaRecovery().catch(() => undefined);
 }
 
 export async function setRecentProjectId(projectId: string | null): Promise<void> {
@@ -410,11 +538,13 @@ export async function deleteProject(projectId: string): Promise<void> {
       ),
     ]);
 
-    const sharedRefOwners = new Map<LocalMediaRef, string>();
+    const sharedRefOwners = new Map<LocalMediaRef, VersionedLocalProjectSnapshot>();
     for (const project of projects) {
       if (project.id !== projectId) {
         for (const ref of collectLocalMediaRefs(project.snapshot)) {
-          if (!sharedRefOwners.has(ref)) sharedRefOwners.set(ref, project.id);
+          if (!sharedRefOwners.has(ref)) {
+            sharedRefOwners.set(ref, normalizeProjectSnapshot(project));
+          }
         }
       }
     }
@@ -434,7 +564,11 @@ export async function deleteProject(projectId: string): Promise<void> {
       const ref = `${LOCAL_MEDIA_PREFIX}${media.id}` as LocalMediaRef;
       const survivingOwner = media.state !== "staged" ? sharedRefOwners.get(ref) : undefined;
       if (survivingOwner) {
-        mediaStore.put({ ...media, projectId: survivingOwner });
+        mediaStore.put({
+          ...media,
+          projectId: survivingOwner.id,
+          projectIncarnation: survivingOwner.incarnation,
+        });
         continue;
       }
 
@@ -450,6 +584,7 @@ export async function deleteProject(projectId: string): Promise<void> {
         kind: "media_write",
         mediaId: media.id,
         projectId,
+        projectIncarnation: media.projectIncarnation ?? null,
         importSessionId: media.importSessionId ?? null,
         sourcePath: media.sourcePath,
         contentType: media.contentType,

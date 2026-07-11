@@ -2,7 +2,13 @@ import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ShortDramaProjectResponse, Shot } from "../domain/types";
 import { openLocalDb, resetLocalDbForTests } from "./indexedDb";
-import { beginMediaWrite, loadMediaBlob, runMediaRecovery, saveMediaBlob } from "./mediaStore";
+import {
+  beginMediaWrite,
+  findCommittedMedia,
+  loadMediaBlob,
+  runMediaRecovery,
+  saveMediaBlob,
+} from "./mediaStore";
 import * as task3ProjectStore from "./projectStore";
 import {
   deleteProject,
@@ -325,6 +331,56 @@ describe("projectStore", () => {
       .not.toBe(original.incarnation);
   });
 
+  it("direct overwrite fences the old incarnation and durably retires its OPFS media", async () => {
+    const opfsOptions = { removeError: new Error("direct overwrite cleanup failed") as Error | undefined };
+    installOpfs(opfsOptions);
+    const originalSnapshot = snapshot("direct-isolation", "Original");
+    const original = await saveProjectSnapshot(originalSnapshot);
+    const oldRef = await saveMediaBlob({
+      projectId: "direct-isolation",
+      sourcePath: "assets/shared.mp4",
+      contentType: "video/mp4",
+      blob: await mediaBlob("old"),
+    });
+    originalSnapshot.final_path = oldRef;
+    await saveProjectSnapshot(originalSnapshot);
+    const oldWriter = await beginMediaWrite({
+      projectId: "direct-isolation",
+      projectIncarnation: original.incarnation,
+      sourcePath: "assets/active-old.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await oldWriter.write(new Uint8Array([1]));
+
+    await saveImportedProjectSnapshot(
+      snapshot("direct-isolation", "Replacement", { finalPath: "assets/shared.mp4" }),
+      { overwrite: true },
+    );
+
+    const replacement = await loadProjectSnapshot("direct-isolation");
+    expect(replacement?.incarnation).not.toBe(original.incarnation);
+    expect(await loadMediaBlob(oldRef)).toBeNull();
+    await expect(findCommittedMedia(
+      "direct-isolation",
+      "assets/shared.mp4",
+      replacement!.incarnation,
+    )).resolves.toBeNull();
+    await expect(oldWriter.commit()).rejects.toThrow(/incarnation|lease|operation/i);
+    expect(await getAllRecords<MediaJournalRecord>("mediaOperations")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mediaId: oldRef.split("/").pop(),
+          state: "cleanup_due",
+        }),
+        expect.objectContaining({
+          mediaId: oldWriter.mediaRef.split("/").pop(),
+          state: "cleanup_due",
+        }),
+      ]),
+    );
+  });
+
   it("keeps imported media staged until one transaction publishes the project and session", async () => {
     const sessionId = await projectImportApi.beginProjectImport("imported");
     const writer = await beginMediaWrite({
@@ -473,6 +529,71 @@ describe("projectStore", () => {
     expect((await loadProjectSnapshot("overwrite"))?.incarnation).not.toBe(original.incarnation);
     expect(await loadMediaBlob(writer.mediaRef)).not.toBeNull();
     expect(await getRecord("mediaOperations", sessionId)).toBeNull();
+  });
+
+  it("transactional overwrite publishes only new-incarnation media and fences old writers", async () => {
+    const opfsOptions = { removeError: new Error("transactional cleanup failed") as Error | undefined };
+    installOpfs(opfsOptions);
+    const originalSnapshot = snapshot("transactional-isolation", "Original");
+    const original = await saveProjectSnapshot(originalSnapshot);
+    const oldRef = await saveMediaBlob({
+      projectId: "transactional-isolation",
+      sourcePath: "assets/shared.mp4",
+      contentType: "video/mp4",
+      blob: await mediaBlob("old"),
+    });
+    originalSnapshot.final_path = oldRef;
+    await saveProjectSnapshot(originalSnapshot);
+    const oldWriter = await beginMediaWrite({
+      projectId: "transactional-isolation",
+      projectIncarnation: original.incarnation,
+      sourcePath: "assets/active-old.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await oldWriter.write(new Uint8Array([1]));
+
+    const sessionId = await projectImportApi.beginProjectImport("transactional-isolation");
+    const importedWriter = await beginMediaWrite({
+      projectId: "transactional-isolation",
+      importSessionId: sessionId,
+      sourcePath: "assets/shared.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 1,
+    });
+    await importedWriter.write(new Uint8Array([9]));
+    await importedWriter.commit();
+
+    await projectImportApi.commitImportedProject(
+      snapshot("transactional-isolation", "Replacement", { finalPath: importedWriter.mediaRef }),
+      sessionId,
+      { overwrite: true, leaseOwner: sessionId },
+    );
+
+    const replacement = await loadProjectSnapshot("transactional-isolation");
+    expect(replacement).toMatchObject({ title: "Replacement", revision: 1 });
+    expect(replacement?.incarnation).not.toBe(original.incarnation);
+    expect(await loadMediaBlob(oldRef)).toBeNull();
+    expect(await loadMediaBlob(importedWriter.mediaRef)).not.toBeNull();
+    await expect(findCommittedMedia(
+      "transactional-isolation",
+      "assets/shared.mp4",
+      replacement!.incarnation,
+    )).resolves.toMatchObject({ id: importedWriter.mediaRef.split("/").pop() });
+    await expect(oldWriter.commit()).rejects.toThrow(/incarnation|lease|operation/i);
+    expect(await getRecord("mediaOperations", sessionId)).toBeNull();
+    expect(await getAllRecords<MediaJournalRecord>("mediaOperations")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          mediaId: oldRef.split("/").pop(),
+          state: "cleanup_due",
+        }),
+        expect.objectContaining({
+          mediaId: oldWriter.mediaRef.split("/").pop(),
+          state: "cleanup_due",
+        }),
+      ]),
+    );
   });
 
   it("rejects foreign or non-staged session media without partially publishing", async () => {

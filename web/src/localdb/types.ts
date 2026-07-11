@@ -36,6 +36,7 @@ export interface LocalSettingsRecord {
 export interface LocalMediaRecord {
   id: string;
   projectId: string;
+  projectIncarnation?: string | null;
   sourcePath: string;
   contentType: string;
   sizeBytes: number;
@@ -60,6 +61,7 @@ export interface MediaOperationRecord {
   kind: "media_write";
   mediaId: string;
   projectId: string | null;
+  projectIncarnation?: string | null;
   importSessionId: string | null;
   sourcePath: string;
   contentType: string;
@@ -78,6 +80,7 @@ export interface MediaImportSessionRecord {
   id: string;
   kind: "import_session";
   projectId: string;
+  projectIncarnation?: string | null;
   mediaIds: string[];
   state: "importing" | "cleanup_due";
   createdAt: string;

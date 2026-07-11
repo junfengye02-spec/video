@@ -759,8 +759,8 @@ const STRINGS: Record<Locale, UIStrings> = {
       untitledProjectTitle: "\u672a\u547d\u540d\u77ed\u5267",
     },
     localBackup: {
-      saving: "姝ｅ湪淇濆瓨鍒版湰鏈篳",
-      retrying: "鏈満澶囦唤绋嶅悗閲嶈瘯",
+      saving: "\u6b63\u5728\u4fdd\u5b58\u5230\u672c\u673a",
+      retrying: "\u672c\u673a\u5907\u4efd\u7a0d\u540e\u91cd\u8bd5",
     },
     appShell: {
       workbenchTitle: "OpenMontage 短剧工作台",

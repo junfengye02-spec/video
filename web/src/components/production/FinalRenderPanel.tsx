@@ -18,6 +18,7 @@ export function FinalRenderPanel({
   onDownload,
 }: FinalRenderPanelProps) {
   const downloadDisabled = !finalPath || downloading;
+  const visibleFinalPath = finalPath?.startsWith("local://media/") ? null : finalPath;
   const downloadInFlightRef = useRef(false);
 
   const handleDownload = async () => {
@@ -51,13 +52,13 @@ export function FinalRenderPanel({
       ) : (
         <p className="empty-state">{strings.noPreview}</p>
       )}
-      {finalPath ? (
+      {visibleFinalPath ? (
         <p
-          aria-label={`${strings.pathLabel}: ${finalPath}`}
+          aria-label={`${strings.pathLabel}: ${visibleFinalPath}`}
           className="final-path"
           style={{ overflowWrap: "anywhere" }}
         >
-          {finalPath}
+          {visibleFinalPath}
         </p>
       ) : null}
       <button

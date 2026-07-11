@@ -426,7 +426,11 @@ describe("App workbench integration", () => {
     expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/hydrated-final");
     expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/hydrated-reference");
     expect(screen.getByTestId("snapshot")).toHaveTextContent("local://media/hydrated-asset-media");
-    expect(localMediaStoreMocks.findCommittedMedia).toHaveBeenCalledWith("p1", "renders/final-hydrate.mp4");
+    expect(localMediaStoreMocks.findCommittedMedia).toHaveBeenCalledWith(
+      "p1",
+      "renders/final-hydrate.mp4",
+      "legacy:p1",
+    );
   });
 
   it("creates and persists a project without sending a shot count", async () => {
@@ -758,7 +762,11 @@ describe("App workbench integration", () => {
     });
     expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith(
       "/api/projects/p1/media/assets/video/shot-1.mp4",
-      { projectId: "p1", sourcePath: "assets/video/shot-1.mp4" },
+      {
+        projectId: "p1",
+        projectIncarnation: "incarnation-default",
+        sourcePath: "assets/video/shot-1.mp4",
+      },
     );
     expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1792,7 +1800,11 @@ describe("App workbench integration", () => {
     expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledTimes(1);
     expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith(
       "/api/projects/p1/media/renders/final.mp4",
-      { projectId: "p1", sourcePath: "renders/final.mp4" },
+      {
+        projectId: "p1",
+        projectIncarnation: "incarnation-default",
+        sourcePath: "renders/final.mp4",
+      },
     );
     expect(localProjectStoreMocks.saveProjectSnapshotIfVersion).toHaveBeenLastCalledWith(
       expect.objectContaining({

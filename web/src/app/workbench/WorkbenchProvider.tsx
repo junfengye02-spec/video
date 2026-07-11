@@ -666,9 +666,10 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       recordStorageVersion(record);
 
       const overlays = new Map<string, LocalMediaRef>();
+      const projectIncarnation = record.incarnation?.trim() || `legacy:${record.id}`;
       await Promise.all(collectRemoteMediaSourcePaths(record.snapshot).map(async (sourcePath) => {
         try {
-          const media = await findCommittedMedia(projectId, sourcePath);
+          const media = await findCommittedMedia(projectId, sourcePath, projectIncarnation);
           if (
             media
             && media.projectId === projectId
@@ -936,11 +937,18 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
         const entityId = result.shot.id;
         const entityVersion = result.shot.version;
         const publishedRevision = snapshotRevisionRef.current;
+        const projectIncarnation = storageVersionRef.current.projectId === projectId
+          ? storageVersionRef.current.version?.incarnation
+          : undefined;
         const cacheJob = beginBackgroundCacheJob();
         scheduleBackgroundTask(() => {
           void (async () => {
             try {
-              const localRef = await cacheRemoteMedia(url, { projectId, sourcePath });
+              const localRef = await cacheRemoteMedia(url, {
+                projectId,
+                projectIncarnation,
+                sourcePath,
+              });
               if (!localRef) throw new Error("Remote media was not cached");
               const promotionIsCurrent = () => {
                 if (!isCurrent() || snapshotRevisionRef.current < publishedRevision) return false;
@@ -1139,6 +1147,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       const publishedRevision = snapshotRevisionRef.current;
       const responseSource = result.final_path;
       const responseEntityVersion = JSON.stringify(result.render_report.outputs);
+      const projectIncarnation = storageVersionRef.current.projectId === projectId
+        ? storageVersionRef.current.version?.incarnation
+        : undefined;
       const cacheJob = beginBackgroundCacheJob();
       scheduleBackgroundTask(() => {
         void (async () => {
@@ -1202,6 +1213,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
             if (!url) throw new Error("Final render URL is unavailable");
             const localRef = await cacheRemoteMedia(url, {
               projectId,
+              projectIncarnation,
               sourcePath: selectedSource,
             });
             if (!localRef) throw new Error("Final render was not cached");

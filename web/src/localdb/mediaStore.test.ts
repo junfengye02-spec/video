@@ -5,6 +5,7 @@ import * as mediaStoreModule from "./mediaStore";
 import {
   cacheRemoteMedia,
   cleanupOrphanedOpfsMedia,
+  deleteMediaBlob,
   loadMediaBlob,
   saveMediaBlob,
 } from "./mediaStore";
@@ -489,6 +490,71 @@ describe("mediaStore", () => {
 
     expect(removeEntry).toHaveBeenCalledTimes(2);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires OPFS metadata and commits cleanup work before physical deletion", async () => {
+    const storage = installTestStorage({ pauseRemove: true });
+    const ref = await saveMediaBlob({
+      projectId: "p1",
+      sourcePath: "assets/delete-paused.mp4",
+      contentType: "video/mp4",
+      blob: await blobFromText("delete me", "video/mp4"),
+    });
+    const mediaId = ref.split("/").pop()!;
+
+    const deleting = deleteMediaBlob(ref);
+    await storage.removeStarted;
+    try {
+      expect(await getRecord("media", mediaId)).toBeNull();
+      expect(await getAll<MediaOperationRecord>("mediaOperations")).toEqual([
+        expect.objectContaining({
+          kind: "media_write",
+          mediaId,
+          state: "cleanup_due",
+        }),
+      ]);
+    } finally {
+      storage.releaseRemove();
+      await deleting.catch(() => undefined);
+    }
+
+    expect(storage.files.has(mediaId)).toBe(false);
+    expect(await getAll("mediaOperations")).toHaveLength(0);
+  });
+
+  it("recovers a failed delete from durable state with a fresh controller", async () => {
+    const options = { failRemove: new Error("delete disk busy") as Error | undefined };
+    const storage = installTestStorage(options);
+    const ref = await saveMediaBlob({
+      projectId: "p1",
+      sourcePath: "assets/delete-retry.mp4",
+      contentType: "video/mp4",
+      blob: await blobFromText("retry delete", "video/mp4"),
+    });
+    const mediaId = ref.split("/").pop()!;
+
+    await expect(deleteMediaBlob(ref)).rejects.toMatchObject({
+      name: "MediaRecoveryError",
+    });
+    expect(await getRecord("media", mediaId)).toBeNull();
+    const [queued] = await getAll<MediaOperationRecord>("mediaOperations");
+    expect([queued]).toEqual([
+      expect.objectContaining({
+        mediaId,
+        state: "cleanup_due",
+        attempts: 1,
+        leaseOwner: null,
+      }),
+    ]);
+
+    options.failRemove = undefined;
+    const controller = task2MediaStore.startMediaRecoveryController({
+      now: () => new Date(queued.nextAttemptAt),
+    });
+    await expect(controller.run()).resolves.toBe(1);
+    controller.dispose();
+    expect(storage.files.has(mediaId)).toBe(false);
+    expect(await getAll("mediaOperations")).toHaveLength(0);
   });
 });
 
@@ -1051,7 +1117,11 @@ describe("streaming durable media writes", () => {
     await put("media", { ...base, id: "new", state: "committed", createdAt: "2026-02-01T00:00:00Z" });
 
     expect(task2MediaStore.findCommittedMedia).toBeTypeOf("function");
-    await expect(task2MediaStore.findCommittedMedia("p1", "assets/same.mp4"))
+    await expect(task2MediaStore.findCommittedMedia(
+      "p1",
+      "assets/same.mp4",
+      "current-incarnation",
+    ))
       .resolves.toMatchObject({ id: "new" });
   });
 });

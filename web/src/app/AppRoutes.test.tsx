@@ -197,6 +197,10 @@ describe("App routes", () => {
   });
 
   it("renders exact non-blocking local backup status without exposing internal refs", async () => {
+    expect(zh.localBackup).toEqual({
+      saving: "\u6b63\u5728\u4fdd\u5b58\u5230\u672c\u673a",
+      retrying: "\u672c\u673a\u5907\u4efd\u7a0d\u540e\u91cd\u8bd5",
+    });
     const cache = deferred<string | null>();
     const current = cloneProjectResponse();
     const regeneratedShot = {
@@ -233,12 +237,76 @@ describe("App routes", () => {
 
     fireEvent.click(screen.getByRole("button", { name: zh.shotEditor.regenerateAction }));
 
-    expect(await screen.findByText("姝ｅ湪淇濆瓨鍒版湰鏈篳", { selector: "[role='status']" }))
+    expect(await screen.findByText(zh.localBackup.saving, { selector: "[role='status']" }))
       .toHaveAttribute("role", "status");
     expect(rendered.container.innerHTML).not.toContain("local://media/");
     cache.resolve(null);
-    expect(await screen.findByText("鏈満澶囦唤绋嶅悗閲嶈瘯", { selector: "[role='status']" }))
+    expect(await screen.findByText(zh.localBackup.retrying, { selector: "[role='status']" }))
       .toHaveAttribute("role", "status");
+  });
+
+  it("keeps final preview and download usable without exposing a promoted local ref", async () => {
+    const cache = deferred<string | null>();
+    const current = cloneProjectResponse();
+    const renderReport = {
+      version: "1.0" as const,
+      outputs: [{
+        path: "renders/final-visible.mp4",
+        format: "mp4",
+        resolution: "720x1280",
+        duration_seconds: 25,
+      }],
+    };
+    const remoteSnapshot = cloneProjectResponse(current);
+    remoteSnapshot.render_report = renderReport;
+    remoteSnapshot.final_path = "renders/final-visible.mp4";
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: current.project.title,
+      updatedAt: "2026-07-11T08:00:00Z",
+      incarnation: "incarnation-routes",
+      revision: 1,
+      snapshot: current,
+    });
+    apiMocks.renderProject.mockResolvedValue({
+      job_id: "render-visible",
+      event: {
+        id: "render-visible",
+        job_id: "render-visible",
+        project_id: "p1",
+        stage: "render",
+        status: "complete",
+        message: "complete",
+        created_at: "2026-07-11T08:00:00Z",
+      },
+      project: current.project,
+      storyboard: current.storyboard,
+      consistency_report: current.consistency_report,
+      render_report: renderReport,
+      final_path: "renders/final-visible.mp4",
+    });
+    apiMocks.loadProject.mockResolvedValue(remoteSnapshot);
+    localMediaStoreMocks.cacheRemoteMedia.mockReturnValue(cache.promise);
+    localMediaUrlMocks.resolveLocalMediaUrl.mockImplementation((ref: string) => (
+      Promise.resolve(ref === "local://media/final-visible" ? "blob:final-visible" : null)
+    ));
+    const rendered = renderAppAt("/projects/p1/production");
+    await screen.findByRole("button", { name: zh.production.renderAction });
+    await enterProviderCredentials();
+
+    fireEvent.click(screen.getByRole("button", { name: zh.production.renderAction }));
+    await waitFor(() => expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledTimes(1));
+    cache.resolve("local://media/final-visible");
+
+    await waitFor(() => expect(screen.getByLabelText(zh.production.finalRender.previewLabel))
+      .toHaveAttribute("src", "blob:final-visible"));
+    expect(screen.getByRole("button", { name: zh.production.finalRender.downloadAction }))
+      .toBeEnabled();
+    expect(rendered.container.textContent).not.toContain("local://media/");
+    expect(rendered.container.innerHTML).not.toContain("local://media/");
+    for (const element of rendered.container.querySelectorAll("[aria-label]")) {
+      expect(element.getAttribute("aria-label")).not.toContain("local://media/");
+    }
   });
 
   it("keeps the newest project when rapid deep-link loads resolve out of order", async () => {

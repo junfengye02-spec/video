@@ -21,6 +21,7 @@ import type {
 
 export interface BeginMediaWriteInput {
   projectId: string | null;
+  projectIncarnation?: string | null;
   importSessionId?: string | null;
   sourcePath: string;
   contentType: string;
@@ -46,6 +47,7 @@ export interface MediaRecoveryController {
 
 type SaveMediaInput = {
   projectId: string;
+  projectIncarnation?: string | null;
   sourcePath: string;
   contentType: string;
   blob: Blob;
@@ -114,6 +116,49 @@ function mediaRef(id: string): LocalMediaRef {
 
 function createId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function normalizedProjectIncarnation(record: { id: string; incarnation?: string }): string {
+  return record.incarnation?.trim() || `legacy:${record.id}`;
+}
+
+function normalizedSessionIncarnation(record: MediaImportSessionRecord): string {
+  return record.projectIncarnation?.trim() || `legacy:${record.projectId}`;
+}
+
+async function bindMediaOwner(input: BeginMediaWriteInput): Promise<BeginMediaWriteInput> {
+  const db = await openLocalDb();
+  if (input.importSessionId) {
+    const session = await requestToPromise<MediaJournalRecord | undefined>(
+      db.transaction(LOCAL_STORES.mediaOperations, "readonly")
+        .objectStore(LOCAL_STORES.mediaOperations)
+        .get(input.importSessionId),
+    );
+    if (!session || session.kind !== "import_session" || session.state !== "importing") {
+      throw new Error(`Active import session ${input.importSessionId} was not found`);
+    }
+    if (input.projectId !== null && input.projectId !== session.projectId) {
+      throw new Error(`Import session ${input.importSessionId} belongs to another project`);
+    }
+    const projectIncarnation = normalizedSessionIncarnation(session);
+    if (input.projectIncarnation && input.projectIncarnation !== projectIncarnation) {
+      throw new Error(`Import session ${input.importSessionId} belongs to another incarnation`);
+    }
+    return { ...input, projectId: session.projectId, projectIncarnation };
+  }
+
+  if (!input.projectId) throw new Error("A project is required for media writes");
+  const project = await requestToPromise<{ id: string; incarnation?: string } | undefined>(
+    db.transaction(LOCAL_STORES.projects, "readonly")
+      .objectStore(LOCAL_STORES.projects)
+      .get(input.projectId),
+  );
+  if (!project) throw new Error(`Project ${input.projectId} was not found`);
+  const projectIncarnation = normalizedProjectIncarnation(project);
+  if (input.projectIncarnation && input.projectIncarnation !== projectIncarnation) {
+    throw new Error(`Project ${input.projectId} belongs to another incarnation`);
+  }
+  return { ...input, projectIncarnation };
 }
 
 function storageManager(): StorageWithOpfs | undefined {
@@ -262,20 +307,27 @@ async function commitOpfsMedia(
       if (!session || session.kind !== "import_session" || session.state !== "importing") {
         throw new Error(`Active import session ${operation.importSessionId} was not found`);
       }
+      if (operation.projectIncarnation !== normalizedSessionIncarnation(session)) {
+        throw new Error(`Import session ${operation.importSessionId} belongs to another incarnation`);
+      }
       state = "staged";
       if (!session.mediaIds.includes(operation.mediaId)) {
         operationStore.put({ ...session, mediaIds: [...session.mediaIds, operation.mediaId] });
       }
     } else {
-      const project = await requestToPromise(
+      const project = await requestToPromise<{ id: string; incarnation?: string } | undefined>(
         tx.objectStore(LOCAL_STORES.projects).get(operation.projectId!),
       );
       if (!project) throw new Error(`Project ${operation.projectId} was not found`);
+      if (operation.projectIncarnation !== normalizedProjectIncarnation(project)) {
+        throw new Error(`Project ${operation.projectId} belongs to another incarnation`);
+      }
     }
 
     const record: LocalMediaRecord = {
       id: operation.mediaId,
       projectId: operation.projectId!,
+      projectIncarnation: operation.projectIncarnation ?? null,
       sourcePath: operation.sourcePath,
       contentType: operation.contentType,
       sizeBytes: operation.sizeBytes,
@@ -317,22 +369,29 @@ async function commitIndexedDbMedia(
         throw new Error(`Import session ${input.importSessionId} belongs to another project`);
       }
       projectId = session.projectId;
+      if (input.projectIncarnation !== normalizedSessionIncarnation(session)) {
+        throw new Error(`Import session ${input.importSessionId} belongs to another incarnation`);
+      }
       state = "staged";
       if (!session.mediaIds.includes(id)) {
         operationStore.put({ ...session, mediaIds: [...session.mediaIds, id] });
       }
     } else {
       if (!projectId) throw new Error("A project is required for media writes");
-      const project = await requestToPromise(
+      const project = await requestToPromise<{ id: string; incarnation?: string } | undefined>(
         tx.objectStore(LOCAL_STORES.projects).get(projectId),
       );
       if (!project) throw new Error(`Project ${projectId} was not found`);
+      if (input.projectIncarnation !== normalizedProjectIncarnation(project)) {
+        throw new Error(`Project ${projectId} belongs to another incarnation`);
+      }
     }
 
     const stableBytes = bytes.slice().buffer;
     const record: LocalMediaRecord = {
       id,
       projectId: projectId!,
+      projectIncarnation: input.projectIncarnation ?? null,
       sourcePath: input.sourcePath,
       contentType: input.contentType || "application/octet-stream",
       sizeBytes: bytes.byteLength,
@@ -362,15 +421,21 @@ async function validateMediaOwner(input: BeginMediaWriteInput): Promise<void> {
     if (input.projectId !== null && input.projectId !== session.projectId) {
       throw new Error(`Import session ${input.importSessionId} belongs to another project`);
     }
+    if (input.projectIncarnation !== normalizedSessionIncarnation(session)) {
+      throw new Error(`Import session ${input.importSessionId} belongs to another incarnation`);
+    }
     return;
   }
   if (!input.projectId) throw new Error("A project is required for media writes");
-  const project = await requestToPromise(
+  const project = await requestToPromise<{ id: string; incarnation?: string } | undefined>(
     db.transaction(LOCAL_STORES.projects, "readonly")
       .objectStore(LOCAL_STORES.projects)
       .get(input.projectId),
   );
   if (!project) throw new Error(`Project ${input.projectId} was not found`);
+  if (input.projectIncarnation !== normalizedProjectIncarnation(project)) {
+    throw new Error(`Project ${input.projectId} belongs to another incarnation`);
+  }
 }
 
 async function renewManagedImportSession(input: BeginMediaWriteInput): Promise<void> {
@@ -384,6 +449,9 @@ async function renewManagedImportSession(input: BeginMediaWriteInput): Promise<v
   if (!session || session.kind !== "import_session" || session.state !== "importing") {
     throw new Error(`Active import session ${input.importSessionId} was not found`);
   }
+  if (input.projectIncarnation !== normalizedSessionIncarnation(session)) {
+    throw new Error(`Import session ${session.id} belongs to another incarnation`);
+  }
   if (session.leaseOwner !== session.id) return;
   const renewed = await renewMediaOperationLease(session.id, session.id);
   if (!renewed) throw new Error(`Import session ${session.id} lost its owner lease`);
@@ -393,6 +461,7 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
   if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 0) {
     throw new Error("Media sizeBytes must be a non-negative safe integer");
   }
+  input = await bindMediaOwner(input);
   const id = createId();
   const operationId = createId();
   const ref = mediaRef(id);
@@ -499,6 +568,7 @@ export async function beginMediaWrite(input: BeginMediaWriteInput): Promise<Medi
     id: operationId,
     mediaId: id,
     projectId: input.projectId,
+    projectIncarnation: input.projectIncarnation ?? null,
     importSessionId: input.importSessionId ?? null,
     sourcePath: input.sourcePath,
     contentType: input.contentType || "application/octet-stream",
@@ -625,6 +695,7 @@ export async function saveMediaBlob(input: SaveMediaInput): Promise<LocalMediaRe
   const bytes = new Uint8Array(await blobToArrayBuffer(blob));
   const session = await beginMediaWrite({
     projectId: input.projectId,
+    projectIncarnation: input.projectIncarnation,
     sourcePath: input.sourcePath,
     contentType: blob.type || input.contentType || "application/octet-stream",
     sizeBytes: bytes.byteLength,
@@ -652,6 +723,7 @@ export async function loadMediaBlob(ref: LocalMediaRef): Promise<Blob | null> {
 export async function findCommittedMedia(
   projectId: string,
   sourcePath: string,
+  projectIncarnation?: string,
 ): Promise<LocalMediaRecord | null> {
   const db = await openLocalDb();
   const records = await requestToPromise<LocalMediaRecord[]>(
@@ -662,18 +734,51 @@ export async function findCommittedMedia(
   );
   return records
     .filter((record) => record.state === undefined || record.state === "committed")
+    .filter((record) => !projectIncarnation || (
+      !record.projectIncarnation || record.projectIncarnation === projectIncarnation
+    ))
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
 }
 
 export async function deleteMediaBlob(ref: LocalMediaRef): Promise<void> {
   const id = mediaIdFromRef(ref);
-  const record = await readMediaRecord(id);
-  if (!record) return;
-  if (record.storage === "opfs" && record.opfsPath) await removeOpfsPath(record.opfsPath);
   const db = await openLocalDb();
-  const tx = db.transaction(LOCAL_STORES.media, "readwrite");
-  tx.objectStore(LOCAL_STORES.media).delete(id);
-  await transactionDone(tx);
+  const tx = db.transaction(
+    [LOCAL_STORES.media, LOCAL_STORES.mediaOperations],
+    "readwrite",
+  );
+  const cleanupQueued = await runTransaction(tx, async () => {
+    const mediaStore = tx.objectStore(LOCAL_STORES.media);
+    const record = await requestToPromise<LocalMediaRecord | undefined>(mediaStore.get(id));
+    if (!record) return false;
+
+    mediaStore.delete(id);
+    if (record.storage !== "opfs" || !record.opfsPath) return false;
+
+    const timestamp = new Date().toISOString();
+    const operation: MediaOperationRecord = {
+      id: createId(),
+      kind: "media_write",
+      mediaId: record.id,
+      projectId: record.projectId,
+      projectIncarnation: record.projectIncarnation ?? null,
+      importSessionId: record.importSessionId ?? null,
+      sourcePath: record.sourcePath,
+      contentType: record.contentType,
+      sizeBytes: record.sizeBytes,
+      opfsPath: record.opfsPath,
+      state: "cleanup_due",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      attempts: 0,
+      nextAttemptAt: timestamp,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    };
+    tx.objectStore(LOCAL_STORES.mediaOperations).add(operation);
+    return true;
+  });
+  if (cleanupQueued) await runMediaRecovery();
 }
 
 function legacyProtectionExpiry(record: LocalMediaPendingRecord, now: Date): string {
@@ -707,6 +812,7 @@ async function migrateLegacyPending(options: MediaRecoveryOptions): Promise<void
           kind: "media_write",
           mediaId: source.id,
           projectId: null,
+          projectIncarnation: null,
           importSessionId: null,
           sourcePath: "",
           contentType: "application/octet-stream",
@@ -1039,7 +1145,7 @@ export function startMediaRecoveryController(
 
 export async function cacheRemoteMedia(
   url: string,
-  metadata: { projectId: string; sourcePath: string },
+  metadata: { projectId: string; projectIncarnation?: string; sourcePath: string },
 ): Promise<LocalMediaRef | null> {
   try {
     const response = await fetch(url);
@@ -1047,6 +1153,7 @@ export async function cacheRemoteMedia(
     const blob = await response.blob();
     return await saveMediaBlob({
       projectId: metadata.projectId,
+      projectIncarnation: metadata.projectIncarnation,
       sourcePath: metadata.sourcePath,
       contentType: blob.type || response.headers.get("content-type") || "application/octet-stream",
       blob,

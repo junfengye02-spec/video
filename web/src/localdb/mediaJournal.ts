@@ -20,6 +20,7 @@ export type CreateMediaOperationInput = Pick<
   | "id"
   | "mediaId"
   | "projectId"
+  | "projectIncarnation"
   | "importSessionId"
   | "sourcePath"
   | "contentType"
@@ -38,6 +39,7 @@ export type ValidatedMediaOperationInput = Omit<
 export type CreateMediaImportSessionInput = Pick<
   MediaImportSessionRecord,
   "id" | "projectId" | "mediaIds" | "leaseOwner"
+  | "projectIncarnation"
 >;
 
 export class MediaDurabilityError extends Error {
@@ -149,6 +151,14 @@ function mediaOperationRecord(
   };
 }
 
+function normalizedProjectIncarnation(record: { id: string; incarnation?: string }): string {
+  return record.incarnation?.trim() || `legacy:${record.id}`;
+}
+
+function normalizedSessionIncarnation(record: MediaImportSessionRecord): string {
+  return record.projectIncarnation?.trim() || `legacy:${record.projectId}`;
+}
+
 export async function createMediaOperation(
   input: CreateMediaOperationInput,
   options: MediaJournalOptions = {},
@@ -189,12 +199,28 @@ export async function createValidatedMediaOperation(
           throw new Error(`Import session ${input.importSessionId} belongs to another project`);
         }
         projectId = session.projectId;
+        const projectIncarnation = normalizedSessionIncarnation(session);
+        if (
+          input.projectIncarnation
+          && input.projectIncarnation !== projectIncarnation
+        ) {
+          throw new Error(`Import session ${input.importSessionId} belongs to another incarnation`);
+        }
+        input = { ...input, projectIncarnation };
       } else {
         if (!projectId) throw new Error("A project is required for media writes");
-        const project = await requestToPromise(
+        const project = await requestToPromise<{ id: string; incarnation?: string } | undefined>(
           tx.objectStore(LOCAL_STORES.projects).get(projectId),
         );
         if (!project) throw new Error(`Project ${projectId} was not found`);
+        const projectIncarnation = normalizedProjectIncarnation(project);
+        if (
+          input.projectIncarnation
+          && input.projectIncarnation !== projectIncarnation
+        ) {
+          throw new Error(`Project ${projectId} belongs to another incarnation`);
+        }
+        input = { ...input, projectIncarnation };
       }
 
       const record = mediaOperationRecord({ ...input, projectId }, options);
@@ -303,6 +329,7 @@ function isSameMediaOperation(
     existing.id === expected.id &&
     existing.mediaId === expected.mediaId &&
     existing.projectId === expected.projectId &&
+    (existing.projectIncarnation ?? null) === (expected.projectIncarnation ?? null) &&
     existing.importSessionId === expected.importSessionId &&
     existing.sourcePath === expected.sourcePath &&
     existing.contentType === expected.contentType &&
