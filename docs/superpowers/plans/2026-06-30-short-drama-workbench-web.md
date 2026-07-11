@@ -168,7 +168,7 @@ from server.app.keyring import mask_key, key_environment
 
 
 def test_mask_key_keeps_only_edges():
-    assert mask_key("sk-1234567890abcdef") == "sk-1...cdef"
+    assert mask_key("test-key-redacted") == "test...cted"
 
 
 def test_mask_key_handles_short_keys():
@@ -393,12 +393,12 @@ def test_key_session_returns_masked_key(tmp_path):
     client = TestClient(app)
 
     response = client.post("/api/session/key", json={
-        "key": "sk-1234567890abcdef",
+        "key": "test-key-redacted",
         "base_url": "https://api.0000238.xyz"
     })
 
     assert response.status_code == 200
-    assert response.json()["masked_key"] == "sk-1...cdef"
+    assert response.json()["masked_key"] == "test...cted"
 
 
 def test_create_short_drama_project_returns_storyboard(tmp_path):
@@ -408,7 +408,7 @@ def test_create_short_drama_project_returns_storyboard(tmp_path):
     response = client.post("/api/projects/short-drama", json={
         "title": "Rain Alley",
         "prompt": "雨夜都市反转短剧",
-        "gateway_key": "sk-1234567890abcdef",
+        "gateway_key": "test-key-redacted",
         "base_url": "https://api.0000238.xyz"
     })
 
