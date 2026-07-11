@@ -749,6 +749,75 @@ def test_postgres_concurrent_same_job_creates_one_hold(
         assert db.scalar(select(func.count(WalletHold.id))) == 1
 
 
+def test_postgres_concurrent_wallet_provisioning_is_idempotent(
+    postgres_engine: Engine,
+) -> None:
+    suffix = uuid.uuid4().hex[:12]
+    user_id = f"u{suffix}"
+    with Session(postgres_engine) as db:
+        db.add(
+            User(
+                id=user_id,
+                email=f"provision-{suffix}@example.com",
+                password_hash="hash",
+                role="user",
+                status="active",
+            )
+        )
+        db.commit()
+
+    start_barrier = Barrier(2)
+    lookup_barrier = Barrier(2)
+
+    def synchronize_prefixed_check_then_add(
+        _conn, _cursor, statement, _parameters, _context, _many
+    ) -> None:
+        if (
+            statement.lstrip().upper().startswith("SELECT")
+            and "from wallet_accounts" in statement.lower()
+        ):
+            lookup_barrier.wait(timeout=10)
+
+    def provision(_index: int) -> str:
+        with Session(postgres_engine) as db:
+            start_barrier.wait(timeout=10)
+            WalletProvisioner().provision(db, user_id)
+            loaded_user_id = db.scalar(
+                select(User.id).where(User.id == user_id)
+            )
+            db.commit()
+            assert db.scalar(select(func.count(User.id))) == 1
+            return loaded_user_id
+
+    event.listen(
+        postgres_engine,
+        "after_cursor_execute",
+        synchronize_prefixed_check_then_add,
+    )
+    try:
+        results = run_threaded(2, provision)
+    finally:
+        event.remove(
+            postgres_engine,
+            "after_cursor_execute",
+            synchronize_prefixed_check_then_add,
+        )
+
+    with Session(postgres_engine) as db:
+        wallets = db.scalars(
+            select(WalletAccount).where(WalletAccount.user_id == user_id)
+        ).all()
+        assert results == [user_id, user_id]
+        assert len(wallets) == 1
+        assert (
+            wallets[0].balance_units,
+            wallets[0].held_units,
+            wallets[0].version,
+        ) == (0, 0, 0)
+        assert wallets[0].created_at is not None
+        assert wallets[0].updated_at is not None
+
+
 def test_postgres_concurrent_duplicate_credit_is_applied_once(
     postgres_engine: Engine,
 ) -> None:
