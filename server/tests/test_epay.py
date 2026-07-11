@@ -1,10 +1,11 @@
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import os
 import re
 from threading import Barrier, Event, Lock
-import time
+from urllib.parse import urlencode
 import uuid
 
 import pytest
@@ -14,6 +15,8 @@ from pydantic import ValidationError
 from sqlalchemy import Engine, create_engine, event, func, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
+from starlette.requests import Request
+import starlette.requests
 
 os.environ.setdefault("AUTH_HMAC_SECRET", "x" * 32)
 
@@ -25,7 +28,9 @@ from server.app.core.config import get_settings
 from server.app.db.base import Base
 from server.app.db.session import get_db
 from server.app.payments import epay
+import server.app.payments.router as payments_router_module
 from server.app.payments.epay import (
+    MAX_EPAY_CALLBACK_BYTES,
     bounded_epay_fields,
     canonical_epay_string,
     parse_epay_money_to_fen,
@@ -36,8 +41,10 @@ from server.app.payments.models import PaymentOrder, TopupProduct
 from server.app.payments.router import router as payments_router
 from server.app.payments.service import (
     create_epay_order,
+    expire_pending_orders,
     list_user_orders,
     payment_order_payload,
+    settle_epay_notify,
 )
 from server.app.projects.models import ProjectRecord  # noqa: F401
 from server.app.wallet.models import WalletAccount, WalletEntry
@@ -73,6 +80,34 @@ def signed_callback(order: dict[str, object], **overrides: str) -> dict[str, str
     fields["sign"] = sign_epay(fields, "merchant-secret")
     fields["sign_type"] = "MD5"
     return fields
+
+
+def callback_request(
+    *,
+    method: str,
+    query_string: bytes = b"",
+    body: bytes = b"",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> Request:
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": "/api/payments/epay/notify",
+            "query_string": query_string,
+            "headers": headers or [],
+        },
+        receive,
+    )
 
 
 @pytest.fixture
@@ -352,6 +387,123 @@ def test_epay_callback_fields_are_strictly_bounded() -> None:
     assert bounded_epay_fields([("name", "line\r\nbreak")], encoded_size=20) is None
 
 
+def test_oversized_get_is_rejected_before_query_params_parsing(monkeypatch) -> None:
+    parsed = False
+
+    def forbidden_query_params(*_args, **_kwargs):
+        nonlocal parsed
+        parsed = True
+        raise AssertionError("oversized query must not be parsed")
+
+    monkeypatch.setattr(starlette.requests, "QueryParams", forbidden_query_params)
+    request = callback_request(
+        method="GET",
+        query_string=b"pid=1001&param=" + b"x" * MAX_EPAY_CALLBACK_BYTES,
+    )
+
+    result = asyncio.run(payments_router_module._read_epay_fields(request))
+
+    assert result is None
+    assert parsed is False
+
+
+def test_actual_oversized_post_is_rejected_before_structured_parsing(
+    monkeypatch,
+) -> None:
+    parsed = False
+
+    async def forbidden_form(_request):
+        nonlocal parsed
+        parsed = True
+        raise AssertionError("oversized body must not be parsed")
+
+    monkeypatch.setattr(Request, "form", forbidden_form)
+    request = callback_request(
+        method="POST",
+        body=b"param=" + b"x" * MAX_EPAY_CALLBACK_BYTES,
+        headers=[
+            (b"content-type", b"application/x-www-form-urlencoded"),
+            (b"content-length", b"1"),
+        ],
+    )
+
+    result = asyncio.run(payments_router_module._read_epay_fields(request))
+
+    assert result is None
+    assert parsed is False
+
+
+def test_falsely_small_content_length_never_reaches_settlement(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    settled = False
+
+    def forbidden_settlement(*_args, **_kwargs):
+        nonlocal settled
+        settled = True
+        raise AssertionError("oversized body must not reach settlement")
+
+    monkeypatch.setattr(
+        payments_router_module,
+        "settle_epay_notify",
+        forbidden_settlement,
+    )
+
+    response = client.post(
+        "/api/payments/epay/notify",
+        content=b"param=" + b"x" * MAX_EPAY_CALLBACK_BYTES,
+        headers={
+            "content-type": "application/x-www-form-urlencoded",
+            "content-length": "1",
+        },
+    )
+
+    assert response.text == "fail"
+    assert settled is False
+
+
+def test_bounded_chunked_urlencoded_post_is_structurally_parsed() -> None:
+    fields = [
+        ("pid", "1001"),
+        ("name", "Credits & more"),
+        ("money", "10.00"),
+        ("sign", "a" * 32),
+    ]
+    request = callback_request(
+        method="POST",
+        body=urlencode(fields).encode("ascii"),
+        headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+    )
+
+    result = asyncio.run(payments_router_module._read_epay_fields(request))
+
+    assert result == dict(fields)
+
+
+def test_duplicate_and_unsupported_post_forms_are_rejected() -> None:
+    duplicate = callback_request(
+        method="POST",
+        body=b"pid=1001&pid=1002",
+        headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+    )
+    unsupported = callback_request(
+        method="POST",
+        body=b'{"pid":"1001"}',
+        headers=[(b"content-type", b"application/json")],
+    )
+
+    duplicate_result = asyncio.run(
+        payments_router_module._read_epay_fields(duplicate)
+    )
+    unsupported_result = asyncio.run(
+        payments_router_module._read_epay_fields(unsupported)
+    )
+
+    assert duplicate_result is None
+    assert unsupported_result is None
+
+
 def test_epay_configuration_is_optional_complete_and_secret_safe() -> None:
     settings = AppSettings(
         _env_file=None,
@@ -384,6 +536,57 @@ def test_epay_configuration_is_optional_complete_and_secret_safe() -> None:
             auth_hmac_secret="x" * 32,
             epay_id="1001",
         )
+
+
+def assert_validation_error_hides(error: ValidationError, sentinel: str) -> None:
+    surfaces = (
+        str(error),
+        repr(error),
+        repr(error.errors()),
+        error.json(),
+    )
+    assert all(sentinel not in surface for surface in surfaces)
+
+
+def test_incomplete_epay_configuration_error_never_exposes_key() -> None:
+    sentinel = "EPAY_SENTINEL_INCOMPLETE_DO_NOT_EXPOSE"
+
+    with pytest.raises(ValidationError, match="configured together") as caught:
+        AppSettings(
+            _env_file=None,
+            environment="test",
+            auth_hmac_secret="x" * 32,
+            epay_key=sentinel,
+        )
+
+    assert_validation_error_hides(caught.value, sentinel)
+
+
+def test_unrelated_production_validation_error_never_exposes_epay_key() -> None:
+    sentinel = "EPAY_SENTINEL_PRODUCTION_DO_NOT_EXPOSE"
+
+    with pytest.raises(ValidationError, match="production cookies") as caught:
+        AppSettings(
+            _env_file=None,
+            environment="production",
+            database_url=(
+                "postgresql+psycopg://billing:database-password@db.internal/"
+                "openmontage"
+            ),
+            redis_url="redis://redis.internal:6379/4",
+            public_origin="https://studio.example.com",
+            session_cookie_secure=False,
+            auth_hmac_secret="x" * 32,
+            smtp_host="smtp.internal",
+            smtp_from_address="billing@example.com",
+            smtp_username="billing",
+            smtp_password="smtp-password",
+            epay_pay_address="https://pay.example.com/submit.php",
+            epay_id="1001",
+            epay_key=sentinel,
+        )
+
+    assert_validation_error_hides(caught.value, sentinel)
 
 
 def test_create_order_snapshots_enabled_server_owned_product(
@@ -890,55 +1093,88 @@ def test_postgres_notify_holding_order_lock_wins_over_later_expiry_scan(
         suffix=suffix,
         create_product=True,
     )
+    before_expiry = datetime(2035, 1, 1, tzinfo=timezone.utc)
+    after_expiry = before_expiry + timedelta(seconds=2)
     with Session(postgres_engine) as db:
         record = db.get(PaymentOrder, order["id"])
         assert record is not None
-        record.expires_at = datetime.now(timezone.utc) + timedelta(milliseconds=500)
+        record.expires_at = before_expiry + timedelta(seconds=1)
         db.commit()
 
-    wallet_lock_acquired = Event()
-    release_notify = Event()
+    notify_settled = Event()
+    allow_notify_commit = Event()
+    expiry_lock_attempted = Event()
 
-    def pause_after_wallet_lock(
+    def record_expiry_lock_attempt(
         _conn, _cursor, statement, _parameters, _context, _many
     ) -> None:
         normalized = statement.lower()
-        if "from wallet_accounts" not in normalized or "for update" not in normalized:
+        if (
+            "from payment_orders" not in normalized
+            or "payment_orders.status =" not in normalized
+            or "payment_orders.expires_at <=" not in normalized
+            or "for update" not in normalized
+        ):
             return
-        wallet_lock_acquired.set()
-        assert release_notify.wait(timeout=15)
+        expiry_lock_attempted.set()
 
-    def post_notify() -> str:
-        with TestClient(postgres_app, raise_server_exceptions=False) as pg_client:
-            return pg_client.post(
-                "/api/payments/epay/notify",
-                data=signed_callback(order, trade_no="EPAY-PG-EXPIRY"),
-            ).text
+    def settle_notify() -> str:
+        with Session(postgres_engine) as db:
+            settle_epay_notify(
+                db,
+                fields=signed_callback(order, trade_no="EPAY-PG-EXPIRY"),
+                settings=epay_settings,
+                now=before_expiry,
+            )
+            notify_settled.set()
+            assert allow_notify_commit.wait(timeout=15)
+            db.commit()
+            return "committed"
 
     def expire_orders() -> list[str]:
         with Session(postgres_engine) as db:
-            orders = list_user_orders(db, user_id=f"u{suffix}")
+            expire_pending_orders(
+                db,
+                user_id=f"u{suffix}",
+                now=after_expiry,
+            )
+            orders = list(
+                db.scalars(
+                    select(PaymentOrder).where(
+                        PaymentOrder.user_id == f"u{suffix}"
+                    )
+                )
+            )
             db.commit()
             return [item.status for item in orders]
 
-    event.listen(postgres_engine, "after_cursor_execute", pause_after_wallet_lock)
+    event.listen(
+        postgres_engine,
+        "before_cursor_execute",
+        record_expiry_lock_attempt,
+    )
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            notify_future = executor.submit(post_notify)
-            assert wallet_lock_acquired.wait(timeout=15)
-            time.sleep(0.7)
+            notify_future = executor.submit(settle_notify)
+            assert notify_settled.wait(timeout=15)
             expiry_future = executor.submit(expire_orders)
-            time.sleep(0.2)
-            release_notify.set()
+            assert expiry_lock_attempted.wait(timeout=15)
+            assert notify_future.done() is False
+            assert expiry_future.done() is False
+            allow_notify_commit.set()
             notify_response = notify_future.result(timeout=15)
             expiry_statuses = expiry_future.result(timeout=15)
     finally:
-        release_notify.set()
-        event.remove(postgres_engine, "after_cursor_execute", pause_after_wallet_lock)
+        allow_notify_commit.set()
+        event.remove(
+            postgres_engine,
+            "before_cursor_execute",
+            record_expiry_lock_attempt,
+        )
 
     with Session(postgres_engine) as db:
         settled = db.get(PaymentOrder, order["id"])
-        assert notify_response == "success"
+        assert notify_response == "committed"
         assert expiry_statuses == ["paid"]
         assert settled is not None and settled.status == "paid"
         assert db.scalar(select(func.count(WalletEntry.id))) == 1

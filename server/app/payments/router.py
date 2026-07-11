@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import parse_qsl
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import SQLAlchemyError
@@ -36,23 +38,46 @@ class CreatePaymentOrderRequest(BaseModel):
 
 async def _read_epay_fields(request: Request) -> dict[str, str] | None:
     if request.method == "GET":
-        raw_size = len(request.scope.get("query_string", b""))
+        raw_query = request.scope.get("query_string", b"")
+        raw_size = len(raw_query)
+        if raw_size > MAX_EPAY_CALLBACK_BYTES:
+            return None
         return bounded_epay_fields(
             request.query_params.multi_items(), encoded_size=raw_size
         )
 
-    content_length = request.headers.get("content-length", "")
-    if not content_length.isdigit() or int(content_length) > MAX_EPAY_CALLBACK_BYTES:
+    if request.method != "POST":
         return None
+    content_type = request.headers.get("content-type", "")
+    if content_type.split(";", 1)[0].strip().lower() != (
+        "application/x-www-form-urlencoded"
+    ):
+        return None
+
+    content_length = request.headers.get("content-length", "")
+    if content_length and not content_length.isdigit():
+        return None
+    if content_length and int(content_length) > MAX_EPAY_CALLBACK_BYTES:
+        return None
+
+    body = bytearray()
     try:
-        form = await request.form()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_EPAY_CALLBACK_BYTES:
+                return None
+            body.extend(chunk)
+        encoded = bytes(body).decode("ascii")
+        items = parse_qsl(
+            encoded,
+            keep_blank_values=True,
+            strict_parsing=True,
+            encoding="utf-8",
+            errors="strict",
+            max_num_fields=16,
+        )
     except Exception:
         return None
-    form_items = form.multi_items()
-    items = [(key, value) for key, value in form_items if isinstance(value, str)]
-    if len(items) != len(form_items):
-        return None
-    return bounded_epay_fields(items, encoded_size=int(content_length))
+    return bounded_epay_fields(items, encoded_size=len(body))
 
 
 @router.get("/api/topup-products")

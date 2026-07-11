@@ -2,13 +2,24 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import EmailStr, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    EmailStr,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
 
 class AppSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
     environment: Literal["development", "test", "production"] = "development"
     database_url: str = "postgresql+psycopg://openmontage:openmontage@127.0.0.1:5432/openmontage"
     redis_url: str = "redis://127.0.0.1:6379/4"
@@ -28,6 +39,16 @@ class AppSettings(BaseSettings):
     epay_pay_address: str | None = None
     epay_id: str | None = None
     epay_key: SecretStr | None = None
+
+    def __init__(self, **values):
+        try:
+            super().__init__(**values)
+        except ValidationError as exc:
+            raise ValidationError.from_exception_data(
+                exc.title,
+                exc.errors(include_input=False),
+                hide_input=True,
+            ) from None
 
     @field_validator(
         "smtp_host",
