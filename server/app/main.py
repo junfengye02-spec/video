@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import json
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, AsyncIterator, TypeVar
+from typing import Annotated, Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from python_multipart.exceptions import MultipartParseError
 from redis import Redis
 from sqlalchemy.orm import Session
@@ -62,6 +61,10 @@ from server.app.projects.schemas import (
 )
 from server.app.db.session import get_db
 from server.app.redis import get_redis
+from server.app.request_validation import (
+    parse_json_request,
+    redacted_validation_exception_handler,
+)
 from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
 from server.app.storyboard_generator import generate_short_drama_storyboard
 from server.app.storage import WorkbenchStore
@@ -77,9 +80,6 @@ MAX_MULTIPART_FIELD_BYTES = 64 * 1024
 MAX_MULTIPART_FIELDS = 4
 MAX_MULTIPART_FILES = 1
 MAX_MULTIPART_REQUEST_BYTES = MAX_IMAGE_BYTES + MAX_MULTIPART_FIELD_BYTES
-
-JsonRequestModel = TypeVar("JsonRequestModel", bound=BaseModel)
-
 
 def sanitize_project_path(project_dir: Path, path_value: Any) -> str | None:
     if not isinstance(path_value, str) or not path_value.strip():
@@ -252,33 +252,63 @@ def _require_owned_csrf(
     return ProjectRepository(db).require_owned(project_id, current.id)
 
 
-async def _parse_json_request(
-    request: Request,
-    model: type[JsonRequestModel],
+@contextmanager
+def _project_mutation(
     *,
-    max_bytes: int | None = None,
-) -> JsonRequestModel:
-    raw_body = await request.body()
-    if max_bytes is not None and len(raw_body) > max_bytes:
-        raise HTTPException(status_code=413, detail="Imported project JSON is too large")
+    db: Session,
+    workbench: WorkbenchStore,
+    project_id: str,
+    failure_detail: str,
+    preserve_http_error_writes: bool = False,
+):
     try:
-        raw_payload = json.loads(raw_body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RequestValidationError(
-            [
-                {
-                    "type": "json_invalid",
-                    "loc": ("body",),
-                    "msg": "JSON decode error",
-                    "input": None,
-                    "ctx": {"error": "Malformed JSON"},
-                }
-            ]
-        ) from exc
+        checkpoint = workbench.checkpoint_project_workspace(project_id)
+    except Exception:
+        _rollback_quietly(db)
+        raise HTTPException(status_code=500, detail=failure_detail) from None
+
     try:
-        return model.model_validate(raw_payload)
-    except ValidationError as exc:
-        raise RequestValidationError(exc.errors(include_url=False)) from exc
+        yield
+    except HTTPException:
+        _rollback_quietly(db)
+        if preserve_http_error_writes:
+            _discard_checkpoint_quietly(checkpoint)
+        else:
+            _restore_checkpoint_quietly(checkpoint)
+        raise
+    except Exception:
+        _rollback_quietly(db)
+        _restore_checkpoint_quietly(checkpoint)
+        raise HTTPException(status_code=500, detail=failure_detail) from None
+
+    try:
+        db.commit()
+    except Exception:
+        _rollback_quietly(db)
+        _restore_checkpoint_quietly(checkpoint)
+        raise HTTPException(status_code=500, detail=failure_detail) from None
+    _discard_checkpoint_quietly(checkpoint)
+
+
+def _rollback_quietly(db: Session) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+
+def _restore_checkpoint_quietly(checkpoint) -> None:
+    try:
+        checkpoint.restore()
+    except Exception:
+        pass
+
+
+def _discard_checkpoint_quietly(checkpoint) -> None:
+    try:
+        checkpoint.discard()
+    except Exception:
+        pass
 
 
 def _local_schema_ref_target(
@@ -454,6 +484,10 @@ def create_app(
     projects_root: str | Path = DEFAULT_PROJECTS_ROOT,
 ) -> FastAPI:
     app = FastAPI(title="OpenMontage Short Drama Workbench")
+    app.add_exception_handler(
+        RequestValidationError,
+        redacted_validation_exception_handler,
+    )
     app.include_router(auth_router)
     store = WorkbenchStore(projects_root=Path(projects_root), db_path=Path(db_path))
     events = EventBus()
@@ -506,41 +540,46 @@ def create_app(
         current: CurrentUser = Depends(require_csrf),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        payload = await _parse_json_request(request, ProjectCreateRequest)
+        payload = await parse_json_request(request, ProjectCreateRequest)
         project = ProjectRepository(db).create(
             owner_user_id=current.id,
             title=payload.title,
             mode="short_drama",
             project_type=payload.project_type,
         )
-        series_bible = {
-            "title": payload.title,
-            "mode": "short_drama",
-            "style_lock": "",
-            "characters": [],
-            "assets": [],
-        }
-        storyboard = {"shots": []}
-        continuity_plan = _default_continuity_plan(payload.project_type)
-        consistency_report = {"score": 100, "issues": []}
-        _persist_storyboard_state(
+        with _project_mutation(
+            db=db,
             workbench=workbench,
             project_id=project.id,
-            storyboard=storyboard,
-            series_bible=series_bible,
-            consistency_report=consistency_report,
-        )
-        workbench.write_artifact(project.id, "continuity_plan.json", continuity_plan)
-        rewrite_workflow_artifacts(
-            workbench=workbench,
-            project_id=project.id,
-            series_bible=series_bible,
-            storyboard=storyboard,
-            render_runtime="ffmpeg",
-            video_model=DEFAULT_VIDEO_MODEL,
-            continuity_plan=continuity_plan,
-        )
-        db.commit()
+            failure_detail="Project creation failed",
+        ):
+            series_bible = {
+                "title": payload.title,
+                "mode": "short_drama",
+                "style_lock": "",
+                "characters": [],
+                "assets": [],
+            }
+            storyboard = {"shots": []}
+            continuity_plan = _default_continuity_plan(payload.project_type)
+            consistency_report = {"score": 100, "issues": []}
+            _persist_storyboard_state(
+                workbench=workbench,
+                project_id=project.id,
+                storyboard=storyboard,
+                series_bible=series_bible,
+                consistency_report=consistency_report,
+            )
+            workbench.write_artifact(project.id, "continuity_plan.json", continuity_plan)
+            rewrite_workflow_artifacts(
+                workbench=workbench,
+                project_id=project.id,
+                series_bible=series_bible,
+                storyboard=storyboard,
+                render_runtime="ffmpeg",
+                video_model=DEFAULT_VIDEO_MODEL,
+                continuity_plan=continuity_plan,
+            )
         return _project_snapshot(workbench, project)
 
     @app.post(
@@ -554,21 +593,26 @@ def create_app(
         current: CurrentUser = Depends(require_csrf),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        payload = await _parse_json_request(
+        payload = await parse_json_request(
             request,
             ProjectImportRequest,
             max_bytes=MAX_IMPORT_ARTIFACT_BYTES,
+            oversized_detail="Imported project JSON is too large",
         )
         if payload.artifact_size_bytes() > MAX_IMPORT_ARTIFACT_BYTES:
             raise HTTPException(status_code=413, detail="Imported project JSON is too large")
-        project: ProjectRecord | None = None
-        try:
-            project = ProjectRepository(db).create(
-                owner_user_id=current.id,
-                title=payload.title,
-                mode="short_drama",
-                project_type=payload.project_type,
-            )
+        project = ProjectRepository(db).create(
+            owner_user_id=current.id,
+            title=payload.title,
+            mode="short_drama",
+            project_type=payload.project_type,
+        )
+        with _project_mutation(
+            db=db,
+            workbench=workbench,
+            project_id=project.id,
+            failure_detail="Project import failed",
+        ):
             artifacts = payload.artifact_payloads()
             for filename, artifact in artifacts.items():
                 workbench.write_artifact(project.id, filename, artifact)
@@ -576,17 +620,7 @@ def create_app(
                 project.id,
                 list(artifacts["series_bible.json"]["assets"]),
             )
-            response = _project_snapshot(workbench, project)
-            db.commit()
-            return response
-        except Exception as exc:
-            db.rollback()
-            if project is not None:
-                try:
-                    workbench.delete_project_workspace(project.id)
-                except Exception:
-                    pass
-            raise HTTPException(status_code=500, detail="Project import failed") from exc
+        return _project_snapshot(workbench, project)
 
     @app.post(
         "/api/projects/short-drama",
@@ -598,7 +632,7 @@ def create_app(
         current: CurrentUser = Depends(require_csrf),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        payload = await _parse_json_request(request, ShortDramaRequest)
+        payload = await parse_json_request(request, ShortDramaRequest)
         key_environment(payload.video_key, payload.base_url)
         try:
             result = generate_short_drama_storyboard(
@@ -624,26 +658,30 @@ def create_app(
             mode="short_drama",
             project_type=payload.project_type,
         )
-        continuity_plan = _default_continuity_plan(payload.project_type)
-        _persist_storyboard_state(
+        with _project_mutation(
+            db=db,
             workbench=workbench,
             project_id=project.id,
-            storyboard=result["storyboard"],
-            series_bible=result["series_bible"],
-            consistency_report=result["consistency_report"],
-        )
-        workbench.write_artifact(project.id, "continuity_plan.json", continuity_plan)
-        rewrite_workflow_artifacts(
-            workbench=workbench,
-            project_id=project.id,
-            series_bible=result["series_bible"],
-            storyboard=result["storyboard"],
-            render_runtime="ffmpeg",
-            video_model=payload.video_model,
-            continuity_plan=continuity_plan,
-        )
-
-        db.commit()
+            failure_detail="Project creation failed",
+        ):
+            continuity_plan = _default_continuity_plan(payload.project_type)
+            _persist_storyboard_state(
+                workbench=workbench,
+                project_id=project.id,
+                storyboard=result["storyboard"],
+                series_bible=result["series_bible"],
+                consistency_report=result["consistency_report"],
+            )
+            workbench.write_artifact(project.id, "continuity_plan.json", continuity_plan)
+            rewrite_workflow_artifacts(
+                workbench=workbench,
+                project_id=project.id,
+                series_bible=result["series_bible"],
+                storyboard=result["storyboard"],
+                render_runtime="ffmpeg",
+                video_model=payload.video_model,
+                continuity_plan=continuity_plan,
+            )
         return _project_snapshot(workbench, project)
 
     @app.get("/api/projects", response_model=ProjectListResponse)
@@ -681,26 +719,31 @@ def create_app(
         workbench: WorkbenchStore = Depends(get_store),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        payload = await _parse_json_request(request, ContinuityPlan)
+        payload = await parse_json_request(request, ContinuityPlan)
         plan = payload.model_dump()
         plan["project_type"] = project.project_type
         if project.project_type == "single_video":
             plan["active_episode_number"] = None
-        workbench.write_artifact(project_id, "continuity_plan.json", plan)
-        series_bible = workbench.read_artifact(project_id, "series_bible.json")
-        storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
-        if series_bible is not None and storyboard is not None:
-            rewrite_workflow_artifacts(
-                workbench=workbench,
-                project_id=project_id,
-                series_bible=series_bible,
-                storyboard=storyboard,
-                render_runtime="ffmpeg",
-                video_model=DEFAULT_VIDEO_MODEL,
-                continuity_plan=plan,
-            )
-        project.updated_at = datetime.now(UTC)
-        db.commit()
+        with _project_mutation(
+            db=db,
+            workbench=workbench,
+            project_id=project_id,
+            failure_detail="Project update failed",
+        ):
+            workbench.write_artifact(project_id, "continuity_plan.json", plan)
+            series_bible = workbench.read_artifact(project_id, "series_bible.json")
+            storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
+            if series_bible is not None and storyboard is not None:
+                rewrite_workflow_artifacts(
+                    workbench=workbench,
+                    project_id=project_id,
+                    series_bible=series_bible,
+                    storyboard=storyboard,
+                    render_runtime="ffmpeg",
+                    video_model=DEFAULT_VIDEO_MODEL,
+                    continuity_plan=plan,
+                )
+            project.updated_at = datetime.now(UTC)
         return {"project": _project_data(project), "continuity_plan": plan}
 
     @app.post(
@@ -717,64 +760,70 @@ def create_app(
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         if series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        async with _bounded_upload_form(request) as form:
-            kind = _form_text(form, "kind", max_length=32)
-            label = _form_text(form, "label", max_length=255)
-            description = _form_text(form, "description", default="", max_length=10_000)
-            prompt = _form_text(form, "prompt", default="", max_length=10_000)
-            upload = form.get("file")
-            if not isinstance(upload, UploadFile):
-                raise HTTPException(status_code=422, detail="file is required")
-            if kind not in {"character", "scene", "prop"}:
-                raise HTTPException(status_code=422, detail="Unsupported asset kind")
-            suffix = validate_upload_extension(upload.filename or "", IMAGE_EXTENSIONS)
-            asset_id = f"asset-{uuid.uuid4().hex}"
-            project_dir = workbench.project_dir(project_id)
-            output_path = safe_project_media_destination(
-                project_dir,
-                Path("assets") / "images" / kind,
-                f"{asset_id}{suffix}",
-            )
-            await save_upload_file(upload, output_path, MAX_IMAGE_BYTES)
-            relative_path = relative_project_path(project_dir, output_path)
-            asset_data = {
-                "id": asset_id,
-                "kind": kind,
-                "label": label,
-                "description": description,
-                "prompt": prompt,
-                "reference_images": [relative_path],
-                "media_urls": [media_download_url(project_id, relative_path)],
-                "shot_ids": [],
-                "version": 1,
-            }
-            assets = workbench.read_asset_library(project_id)
-            assets.append(asset_data)
-            workbench.write_asset_library(project_id, assets)
-            series_bible["assets"] = assets
-            workbench.write_artifact(project_id, "series_bible.json", series_bible)
-            storyboard = workbench.read_artifact(project_id, "episode_storyboard.json") or {"shots": []}
-            continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
-            rewrite_workflow_artifacts(
-                workbench=workbench,
-                project_id=project_id,
-                series_bible=series_bible,
-                storyboard=storyboard,
-                render_runtime="ffmpeg",
-                video_model=DEFAULT_VIDEO_MODEL,
-                continuity_plan=continuity_plan,
-            )
-            project.updated_at = datetime.now(UTC)
-            db.commit()
-            return {
-                "media": {
-                    "path": relative_path,
-                    "media_url": media_download_url(project_id, relative_path),
-                    "filename": Path(relative_path).name,
-                    "content_type": media_content_type(output_path),
-                },
-                "asset": _decorate_asset_media(project_id, project_dir, asset_data),
-            }
+        with _project_mutation(
+            db=db,
+            workbench=workbench,
+            project_id=project_id,
+            failure_detail="Project update failed",
+        ):
+            async with _bounded_upload_form(request) as form:
+                kind = _form_text(form, "kind", max_length=32)
+                label = _form_text(form, "label", max_length=255)
+                description = _form_text(form, "description", default="", max_length=10_000)
+                prompt = _form_text(form, "prompt", default="", max_length=10_000)
+                upload = form.get("file")
+                if not isinstance(upload, UploadFile):
+                    raise HTTPException(status_code=422, detail="file is required")
+                if kind not in {"character", "scene", "prop"}:
+                    raise HTTPException(status_code=422, detail="Unsupported asset kind")
+                suffix = validate_upload_extension(upload.filename or "", IMAGE_EXTENSIONS)
+                asset_id = f"asset-{uuid.uuid4().hex}"
+                project_dir = workbench.project_dir(project_id)
+                output_path = safe_project_media_destination(
+                    project_dir,
+                    Path("assets") / "images" / kind,
+                    f"{asset_id}{suffix}",
+                )
+                await save_upload_file(upload, output_path, MAX_IMAGE_BYTES)
+                relative_path = relative_project_path(project_dir, output_path)
+                asset_data = {
+                    "id": asset_id,
+                    "kind": kind,
+                    "label": label,
+                    "description": description,
+                    "prompt": prompt,
+                    "reference_images": [relative_path],
+                    "media_urls": [media_download_url(project_id, relative_path)],
+                    "shot_ids": [],
+                    "version": 1,
+                }
+                assets = workbench.read_asset_library(project_id)
+                assets.append(asset_data)
+                workbench.write_asset_library(project_id, assets)
+                series_bible["assets"] = assets
+                workbench.write_artifact(project_id, "series_bible.json", series_bible)
+                storyboard = workbench.read_artifact(project_id, "episode_storyboard.json") or {"shots": []}
+                continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
+                rewrite_workflow_artifacts(
+                    workbench=workbench,
+                    project_id=project_id,
+                    series_bible=series_bible,
+                    storyboard=storyboard,
+                    render_runtime="ffmpeg",
+                    video_model=DEFAULT_VIDEO_MODEL,
+                    continuity_plan=continuity_plan,
+                )
+                project.updated_at = datetime.now(UTC)
+                response_data = {
+                    "media": {
+                        "path": relative_path,
+                        "media_url": media_download_url(project_id, relative_path),
+                        "filename": Path(relative_path).name,
+                        "content_type": media_content_type(output_path),
+                    },
+                    "asset": _decorate_asset_media(project_id, project_dir, asset_data),
+                }
+        return response_data
 
     @app.get("/api/projects/{project_id}/media/{relative_path:path}")
     def project_media(
@@ -801,7 +850,7 @@ def create_app(
         bus: EventBus = Depends(get_events),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        payload = await _parse_json_request(request, ShotSaveRequest)
+        payload = await parse_json_request(request, ShotSaveRequest)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
@@ -817,24 +866,29 @@ def create_app(
         series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
         workflow_settings = read_workflow_settings(workbench, project_id)
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
-        _persist_storyboard_state(
+        with _project_mutation(
+            db=db,
             workbench=workbench,
             project_id=project_id,
-            storyboard=storyboard,
-            series_bible=series_bible,
-            consistency_report=report,
-        )
-        rewrite_workflow_artifacts(
-            workbench=workbench,
-            project_id=project_id,
-            series_bible=series_bible,
-            storyboard=storyboard,
-            render_runtime=workflow_settings["render_runtime"],
-            video_model=workflow_settings["video_model"],
-            continuity_plan=continuity_plan,
-        )
-        project.updated_at = datetime.now(UTC)
-        db.commit()
+            failure_detail="Project update failed",
+        ):
+            _persist_storyboard_state(
+                workbench=workbench,
+                project_id=project_id,
+                storyboard=storyboard,
+                series_bible=series_bible,
+                consistency_report=report,
+            )
+            rewrite_workflow_artifacts(
+                workbench=workbench,
+                project_id=project_id,
+                series_bible=series_bible,
+                storyboard=storyboard,
+                render_runtime=workflow_settings["render_runtime"],
+                video_model=workflow_settings["video_model"],
+                continuity_plan=continuity_plan,
+            )
+            project.updated_at = datetime.now(UTC)
         event = bus.emit(project_id, job_id=job_id, stage="save", status="complete", message="Shot saved")
         return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
 
@@ -849,7 +903,7 @@ def create_app(
         project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
         workbench: WorkbenchStore = Depends(get_store),
     ) -> PromptOptimizeResponse:
-        payload = await _parse_json_request(request, PromptOptimizeRequest)
+        payload = await parse_json_request(request, PromptOptimizeRequest)
         try:
             result = optimize_text_prompt(
                 source_text=payload.source_text,
@@ -875,7 +929,7 @@ def create_app(
         bus: EventBus = Depends(get_events),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        payload = await _parse_json_request(request, ShotRegenerateRequest)
+        payload = await parse_json_request(request, ShotRegenerateRequest)
         if not payload.video_key:
             raise HTTPException(status_code=422, detail="video_key is required for shot regeneration")
         key_environment(payload.video_key, payload.base_url)
@@ -894,17 +948,56 @@ def create_app(
         shot["status"] = "generating"
         shot["output_path"] = None
         shot["output_url"] = None
-        try:
-            output = run_single_shot_generation(
-                project_dir=workbench.project_dir(project_id),
-                shot=shot,
-                series_bible=series_bible,
-                video_key=payload.video_key,
-                base_url=payload.base_url,
-                video_model=payload.video_model,
-            )
-        except Exception as exc:
-            shot["status"] = "failed"
+        with _project_mutation(
+            db=db,
+            workbench=workbench,
+            project_id=project_id,
+            failure_detail="Project update failed",
+            preserve_http_error_writes=True,
+        ):
+            try:
+                output = run_single_shot_generation(
+                    project_dir=workbench.project_dir(project_id),
+                    shot=shot,
+                    series_bible=series_bible,
+                    video_key=payload.video_key,
+                    base_url=payload.base_url,
+                    video_model=payload.video_model,
+                )
+            except Exception as exc:
+                shot["status"] = "failed"
+                report = evaluate_storyboard_consistency(series_bible, storyboard)
+                apply_consistency_scores(storyboard, report)
+                series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
+                workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
+                continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
+                _persist_storyboard_state(
+                    workbench=workbench,
+                    project_id=project_id,
+                    storyboard=storyboard,
+                    series_bible=series_bible,
+                    consistency_report=report,
+                )
+                rewrite_workflow_artifacts(
+                    workbench=workbench,
+                    project_id=project_id,
+                    series_bible=series_bible,
+                    storyboard=storyboard,
+                    render_runtime=workflow_settings["render_runtime"],
+                    video_model=payload.video_model,
+                    continuity_plan=continuity_plan,
+                )
+                bus.emit(
+                    project_id,
+                    job_id=job_id,
+                    stage="regenerate",
+                    status="failed",
+                    message=SHOT_GENERATION_FAILED,
+                )
+                raise HTTPException(status_code=500, detail=SHOT_GENERATION_FAILED) from exc
+            shot["status"] = "complete"
+            shot["output_path"] = output["output_path"]
+            shot["output_url"] = output["tool_result"].get("url")
             report = evaluate_storyboard_consistency(series_bible, storyboard)
             apply_consistency_scores(storyboard, report)
             series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
@@ -926,40 +1019,7 @@ def create_app(
                 video_model=payload.video_model,
                 continuity_plan=continuity_plan,
             )
-            bus.emit(
-                project_id,
-                job_id=job_id,
-                stage="regenerate",
-                status="failed",
-                message=SHOT_GENERATION_FAILED,
-            )
-            raise HTTPException(status_code=500, detail=SHOT_GENERATION_FAILED) from exc
-        shot["status"] = "complete"
-        shot["output_path"] = output["output_path"]
-        shot["output_url"] = output["tool_result"].get("url")
-        report = evaluate_storyboard_consistency(series_bible, storyboard)
-        apply_consistency_scores(storyboard, report)
-        series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
-        workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
-        continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
-        _persist_storyboard_state(
-            workbench=workbench,
-            project_id=project_id,
-            storyboard=storyboard,
-            series_bible=series_bible,
-            consistency_report=report,
-        )
-        rewrite_workflow_artifacts(
-            workbench=workbench,
-            project_id=project_id,
-            series_bible=series_bible,
-            storyboard=storyboard,
-            render_runtime=workflow_settings["render_runtime"],
-            video_model=payload.video_model,
-            continuity_plan=continuity_plan,
-        )
-        project.updated_at = datetime.now(UTC)
-        db.commit()
+            project.updated_at = datetime.now(UTC)
         event = bus.emit(project_id, job_id=job_id, stage="regenerate", status="complete", message="Shot regenerated")
         project_dir = workbench.project_dir(project_id)
         response_storyboard = _sanitize_storyboard_response(project_dir, storyboard)
@@ -985,7 +1045,7 @@ def create_app(
         bus: EventBus = Depends(get_events),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        payload = await _parse_json_request(request, RenderProjectRequest)
+        payload = await parse_json_request(request, RenderProjectRequest)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
@@ -1004,30 +1064,35 @@ def create_app(
                 message=public_message,
             )
 
-        emit("render", "running", "Starting final render")
-        try:
-            result = render_short_drama_project(
-                project_dir=workbench.project_dir(project_id),
-                series_bible=series_bible,
-                storyboard=storyboard,
-                video_key=payload.video_key,
-                base_url=payload.base_url,
-                continuity_plan=continuity_plan,
-                video_model=payload.video_model,
-                render_runtime="ffmpeg",
-                emit_event=emit,
-            )
-        except Exception as exc:
-            emit("render", "failed", PROJECT_RENDER_FAILED)
-            raise HTTPException(status_code=500, detail=PROJECT_RENDER_FAILED) from exc
+        with _project_mutation(
+            db=db,
+            workbench=workbench,
+            project_id=project_id,
+            failure_detail="Project update failed",
+        ):
+            emit("render", "running", "Starting final render")
+            try:
+                result = render_short_drama_project(
+                    project_dir=workbench.project_dir(project_id),
+                    series_bible=series_bible,
+                    storyboard=storyboard,
+                    video_key=payload.video_key,
+                    base_url=payload.base_url,
+                    continuity_plan=continuity_plan,
+                    video_model=payload.video_model,
+                    render_runtime="ffmpeg",
+                    emit_event=emit,
+                )
+            except Exception as exc:
+                emit("render", "failed", PROJECT_RENDER_FAILED)
+                raise HTTPException(status_code=500, detail=PROJECT_RENDER_FAILED) from exc
 
-        report = evaluate_storyboard_consistency(series_bible, result["storyboard"])
-        apply_consistency_scores(result["storyboard"], report)
-        workbench.write_artifact(project_id, "episode_storyboard.json", result["storyboard"])
-        workbench.write_artifact(project_id, "consistency_report.json", report)
-        workbench.write_artifact(project_id, "render_report.json", result["render_report"])
-        project.updated_at = datetime.now(UTC)
-        db.commit()
+            report = evaluate_storyboard_consistency(series_bible, result["storyboard"])
+            apply_consistency_scores(result["storyboard"], report)
+            workbench.write_artifact(project_id, "episode_storyboard.json", result["storyboard"])
+            workbench.write_artifact(project_id, "consistency_report.json", report)
+            workbench.write_artifact(project_id, "render_report.json", result["render_report"])
+            project.updated_at = datetime.now(UTC)
         project_dir = workbench.project_dir(project_id)
         response_storyboard = _sanitize_storyboard_response(project_dir, result["storyboard"])
         response_render_report = _sanitize_render_report_response(project_dir, result["render_report"])

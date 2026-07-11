@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from http.cookies import SimpleCookie
 
@@ -122,3 +123,40 @@ def test_media_path_check_happens_after_owner_check(ownership_context):
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Project not found"}
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/api/session/key",
+            {
+                "text_key": {"submitted": "gateway-validation-secret"},
+                "image_key": "image-key",
+                "video_key": "video-key",
+            },
+        ),
+        (
+            "/api/projects",
+            {
+                "title": {"submitted": "project-validation-secret"},
+                "project_type": "single_video",
+            },
+        ),
+    ],
+)
+def test_validation_errors_redact_gateway_and_project_inputs(
+    ownership_context, caplog, path, payload
+):
+    alice = ownership_context["clients"][ALICE_ID]
+    secret = next(iter(payload["text_key" if path.endswith("/key") else "title"].values()))
+
+    with caplog.at_level(logging.DEBUG):
+        response = alice.post(path, json=payload)
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert secret not in caplog.text
+    for error in response.json()["detail"]:
+        assert "input" not in error
+        assert "ctx" not in error

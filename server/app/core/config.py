@@ -1,8 +1,10 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import EmailStr, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 
 class AppSettings(BaseSettings):
@@ -14,8 +16,8 @@ class AppSettings(BaseSettings):
     public_origin: str = "http://127.0.0.1:5173"
     session_cookie_name: str = "om_session"
     session_cookie_secure: bool = True
-    session_idle_seconds: int = 7 * 24 * 60 * 60
-    session_absolute_seconds: int = 30 * 24 * 60 * 60
+    session_idle_seconds: int = Field(default=7 * 24 * 60 * 60, gt=0)
+    session_absolute_seconds: int = Field(default=30 * 24 * 60 * 60, gt=0)
     auth_hmac_secret: str = Field(min_length=32)
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
@@ -31,10 +33,54 @@ class AppSettings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production(self):
-        if self.environment == "production" and not self.session_cookie_secure:
-            raise ValueError("production cookies must be secure")
-        if self.environment == "production" and not self.public_origin.startswith("https://"):
-            raise ValueError("production public_origin must use https")
+        if self.session_idle_seconds > self.session_absolute_seconds:
+            raise ValueError("session idle lifetime cannot exceed absolute lifetime")
+        if self.environment != "production":
+            return self
+
+        issues: list[str] = []
+        if not self.session_cookie_secure:
+            issues.append("production cookies must be secure")
+        if not self.public_origin.startswith("https://"):
+            issues.append("production public_origin must use https")
+
+        if "database_url" not in self.model_fields_set:
+            issues.append("production database_url must be explicitly supplied")
+        try:
+            database = make_url(self.database_url)
+        except Exception:
+            database = None
+        if (
+            database is None
+            or database.drivername != "postgresql+psycopg"
+            or database.host in {None, "127.0.0.1", "localhost"}
+            or (database.username, database.password) == ("openmontage", "openmontage")
+        ):
+            issues.append("production requires a dedicated PostgreSQL psycopg URL")
+
+        redis = urlparse(self.redis_url)
+        try:
+            redis_db = int(redis.path.lstrip("/") or "0")
+        except ValueError:
+            redis_db = -1
+        redis_prefix = self.redis_prefix.strip().lower()
+        has_dedicated_prefix = redis_prefix.startswith("openmontage:")
+        if redis.scheme not in {"redis", "rediss"} or redis_db < 0:
+            issues.append("production Redis URL is invalid")
+        elif redis_db == 0 and not has_dedicated_prefix:
+            issues.append("production Redis isolation requires a nonzero DB or OpenMontage prefix")
+
+        smtp_values = (
+            self.smtp_host,
+            self.smtp_from_address,
+            self.smtp_username,
+            self.smtp_password,
+        )
+        if any(value is None for value in smtp_values):
+            issues.append("production SMTP settings are required")
+
+        if issues:
+            raise ValueError("; ".join(issues))
         return self
 
 

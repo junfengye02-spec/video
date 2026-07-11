@@ -23,6 +23,7 @@ from server.app.core.config import AppSettings, get_settings
 from server.app.db.base import Base
 from server.app.db.session import get_db
 from server.app.main import _json_request_openapi, create_app
+from server.app.projects.repository import ProjectRepository
 from server.app.redis import get_redis
 
 
@@ -794,6 +795,177 @@ def _valid_import_payload() -> dict:
     }
 
 
+def _workspace_bytes(store, project_id: str) -> dict[str, bytes]:
+    workspace = store.project_dir(project_id)
+    return {
+        path.relative_to(workspace).as_posix(): path.read_bytes()
+        for path in workspace.rglob("*")
+        if path.is_file()
+    }
+
+
+def _generated_storyboard_result() -> dict:
+    return {
+        "series_bible": {
+            "title": "Generated",
+            "mode": "short_drama",
+            "style_lock": "",
+            "characters": [],
+            "assets": [],
+        },
+        "storyboard": {
+            "shots": [
+                {
+                    "id": "s1",
+                    "scene_id": "scene-1",
+                    "index": 1,
+                    "beat": "Opening",
+                    "prompt": "Original prompt",
+                    "characters": [],
+                    "location": None,
+                    "props": [],
+                    "status": "ready",
+                    "consistency_score": 100,
+                    "output_url": None,
+                    "output_path": None,
+                    "asset_ids": [],
+                    "version": 1,
+                    "history": [],
+                }
+            ]
+        },
+    }
+
+
+@pytest.mark.parametrize("create_family", ["draft", "short_drama"])
+def test_create_commit_failure_rolls_back_record_and_new_workspace(
+    ownership_context, monkeypatch, create_family
+):
+    from server.app.projects.models import ProjectRecord
+
+    projects_root = ownership_context["tmp_path"] / "projects"
+    before_entries = sorted(path.name for path in projects_root.iterdir())
+    if create_family == "short_drama":
+        monkeypatch.setattr(
+            "server.app.main.generate_short_drama_storyboard",
+            lambda **kwargs: _generated_storyboard_result(),
+        )
+
+    def fail_commit():
+        raise RuntimeError("commit failed with password=create-secret")
+
+    monkeypatch.setattr(ownership_context["db"], "commit", fail_commit)
+    if create_family == "draft":
+        response = _alice(ownership_context).post(
+            "/api/projects",
+            json={"title": "Draft", "project_type": "single_video"},
+        )
+    else:
+        response = _alice(ownership_context).post(
+            "/api/projects/short-drama",
+            json={
+                "title": "Generated",
+                "prompt": "Generate a story",
+                "text_key": "text-key",
+                "image_key": "image-key",
+                "video_key": "video-key",
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project creation failed"}
+    assert list(ownership_context["db"].scalars(select(ProjectRecord))) == []
+    assert sorted(path.name for path in projects_root.iterdir()) == before_entries
+
+
+@pytest.mark.parametrize(
+    "mutation_family",
+    ["continuity", "upload", "shot", "regenerate", "render"],
+)
+def test_existing_project_commit_failure_restores_entire_workspace(
+    ownership_context, monkeypatch, mutation_family
+):
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Compensation")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    generated = _generated_storyboard_result()
+    store.write_artifact(project_id, "series_bible.json", generated["series_bible"])
+    store.write_asset_library(project_id, [])
+    store.write_artifact(project_id, "episode_storyboard.json", generated["storyboard"])
+    before_workspace = _workspace_bytes(store, project_id)
+    record = ProjectRepository(ownership_context["db"]).require_owned(project_id, ALICE_ID)
+    before_updated_at = record.updated_at
+
+    def fake_regenerate(**kwargs):
+        output = kwargs["project_dir"] / "assets" / "video" / "s1.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"generated-video")
+        return {
+            "operation": "reference_to_video",
+            "reference_image_paths": [],
+            "output_path": str(output),
+            "cost_usd": 0,
+            "tool_result": {"url": "https://video.example/s1.mp4"},
+        }
+
+    def fake_render(**kwargs):
+        output = kwargs["project_dir"] / "renders" / "final.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"rendered-video")
+        storyboard = kwargs["storyboard"]
+        storyboard["shots"][0]["status"] = "complete"
+        return {
+            "final_path": str(output),
+            "render_report": {"outputs": [{"path": str(output)}]},
+            "storyboard": storyboard,
+            "artifacts": {},
+            "outputs": [],
+        }
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_regenerate)
+    monkeypatch.setattr("server.app.main.render_short_drama_project", fake_render)
+
+    def fail_commit():
+        raise RuntimeError("commit failed with password=mutation-secret")
+
+    monkeypatch.setattr(ownership_context["db"], "commit", fail_commit)
+    if mutation_family == "continuity":
+        response = client.patch(
+            f"/api/projects/{project_id}/continuity",
+            json={
+                "project_type": "single_video",
+                "series_bible": {"worldview": "Changed"},
+            },
+        )
+    elif mutation_family == "upload":
+        response = client.post(
+            f"/api/projects/{project_id}/assets/upload",
+            data={"kind": "character", "label": "Uploaded"},
+            files={"file": ("uploaded.png", b"uploaded", "image/png")},
+        )
+    elif mutation_family == "shot":
+        response = client.patch(
+            f"/api/projects/{project_id}/shots/s1",
+            json={"prompt": "Changed prompt"},
+        )
+    elif mutation_family == "regenerate":
+        response = client.post(
+            f"/api/projects/{project_id}/shots/s1/regenerate",
+            json={"video_key": "video-key"},
+        )
+    else:
+        response = client.post(
+            f"/api/projects/{project_id}/render",
+            json={"video_key": "video-key"},
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project update failed"}
+    assert _workspace_bytes(store, project_id) == before_workspace
+    assert record.updated_at == before_updated_at
+
+
 def test_import_assigns_fresh_id_owner_and_keeps_browser_local_media(ownership_context):
     from server.app.projects.models import ProjectRecord
 
@@ -918,6 +1090,64 @@ def test_workspace_cleanup_rejects_linked_project_directory(
 
     with pytest.raises(ValueError, match="Project workspace path is invalid"):
         store.delete_project_workspace(project_id)
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "junction"])
+def test_workspace_checkpoint_capture_rejects_linked_project_directory(
+    ownership_context, monkeypatch, link_kind
+):
+    project_id = "eeeeeeeeeeee4eee8eeeeeeeeeeeeeee"
+    store = ownership_context["app"].state.store
+    store._ensure_project_dirs(project_id)
+    if link_kind == "symlink":
+        original = Path.is_symlink
+        monkeypatch.setattr(
+            Path,
+            "is_symlink",
+            lambda path: path.name == project_id or original(path),
+        )
+    else:
+        original = getattr(Path, "is_junction", lambda path: False)
+        monkeypatch.setattr(
+            Path,
+            "is_junction",
+            lambda path: path.name == project_id or original(path),
+            raising=False,
+        )
+
+    with pytest.raises(ValueError, match="Project workspace path is invalid"):
+        store.checkpoint_project_workspace(project_id)
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "junction"])
+def test_workspace_checkpoint_restore_fails_closed_for_linked_destination(
+    ownership_context, monkeypatch, link_kind
+):
+    project_id = "ffffffffffff4fff8fffffffffffffff"
+    store = ownership_context["app"].state.store
+    store.write_artifact(project_id, "state.json", {"version": "before"})
+    checkpoint = store.checkpoint_project_workspace(project_id)
+    store.write_artifact(project_id, "state.json", {"version": "after"})
+    if link_kind == "symlink":
+        original = Path.is_symlink
+        monkeypatch.setattr(
+            Path,
+            "is_symlink",
+            lambda path: path.name == project_id or original(path),
+        )
+    else:
+        original = getattr(Path, "is_junction", lambda path: False)
+        monkeypatch.setattr(
+            Path,
+            "is_junction",
+            lambda path: path.name == project_id or original(path),
+            raising=False,
+        )
+
+    with pytest.raises(ValueError, match="Project workspace path is invalid"):
+        checkpoint.restore()
+
+    assert store.read_artifact(project_id, "state.json") == {"version": "after"}
 
 
 def test_imported_assets_survive_a_later_reference_upload(ownership_context):

@@ -48,6 +48,7 @@ from server.app.auth.verification import (
 from server.app.core.config import AppSettings, get_settings
 from server.app.db.session import get_db
 from server.app.redis import get_redis
+from server.app.request_validation import parse_json_request
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -155,12 +156,12 @@ def csrf_bootstrap(
     response_model=DetailResponse,
     dependencies=[Depends(require_public_csrf)],
 )
-def send_verification(
-    payload: EmailRequest,
+async def send_verification(
     request: Request,
     verification_store: VerificationStore = Depends(get_verification_store),
     mailer: Mailer = Depends(get_mailer),
 ) -> DetailResponse:
+    payload = await parse_json_request(request, EmailRequest)
     email = normalize_email(str(payload.email))
     try:
         code = verification_store.issue(
@@ -180,8 +181,7 @@ def send_verification(
     response_model=AuthResponse,
     dependencies=[Depends(require_public_csrf)],
 )
-def register(
-    payload: RegisterRequest,
+async def register(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
@@ -190,6 +190,7 @@ def register(
     session_store: SessionStore = Depends(get_session_store),
     settings: AppSettings = Depends(get_settings),
 ) -> AuthResponse:
+    payload = await parse_json_request(request, RegisterRequest)
     try:
         result = register_user(
             db=db,
@@ -222,8 +223,7 @@ def register(
     response_model=AuthResponse,
     dependencies=[Depends(require_public_csrf)],
 )
-def login(
-    payload: LoginRequest,
+async def login(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
@@ -231,6 +231,7 @@ def login(
     session_store: SessionStore = Depends(get_session_store),
     settings: AppSettings = Depends(get_settings),
 ) -> AuthResponse:
+    payload = await parse_json_request(request, LoginRequest)
     try:
         result = authenticate_user(
             db=db,
@@ -299,13 +300,31 @@ def me(current: CurrentUser = Depends(require_user)) -> MeResponse:
     response_model=DetailResponse,
     dependencies=[Depends(require_public_csrf)],
 )
-def request_password_reset_route(
-    payload: EmailRequest,
+async def request_password_reset_endpoint(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     verification_store: VerificationStore = Depends(get_verification_store),
     mailer: Mailer = Depends(get_mailer),
+) -> DetailResponse:
+    payload = await parse_json_request(request, EmailRequest)
+    return request_password_reset_route(
+        payload=payload,
+        request=request,
+        background_tasks=background_tasks,
+        db=db,
+        verification_store=verification_store,
+        mailer=mailer,
+    )
+
+
+def request_password_reset_route(
+    payload: EmailRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session,
+    verification_store: VerificationStore,
+    mailer: Mailer,
 ) -> DetailResponse:
     email = normalize_email(str(payload.email))
     account_exists = password_reset_account_exists(db=db, email=email)
@@ -325,14 +344,15 @@ def request_password_reset_route(
     status_code=204,
     dependencies=[Depends(require_public_csrf)],
 )
-def confirm_password_reset(
-    payload: PasswordResetConfirmRequest,
+async def confirm_password_reset(
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     verification_store: VerificationStore = Depends(get_verification_store),
     session_store: SessionStore = Depends(get_session_store),
     settings: AppSettings = Depends(get_settings),
 ) -> None:
+    payload = await parse_json_request(request, PasswordResetConfirmRequest)
     try:
         reset_password(
             db=db,

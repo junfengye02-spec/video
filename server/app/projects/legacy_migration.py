@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -112,8 +112,8 @@ def _parse_datetime(value: object, project_id: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"Legacy project {project_id} has an invalid timestamp") from exc
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _same_legacy_metadata(existing: ProjectRecord, incoming: ProjectRecord) -> bool:
@@ -129,5 +129,5 @@ def _same_legacy_metadata(existing: ProjectRecord, incoming: ProjectRecord) -> b
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

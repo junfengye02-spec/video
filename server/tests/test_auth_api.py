@@ -106,6 +106,43 @@ def test_public_routes_validate_origin_before_payload_or_csrf(auth_client):
     assert missing_csrf.json() == {"detail": "Invalid CSRF token"}
 
 
+def test_malformed_login_json_checks_origin_before_body_parsing(auth_client):
+    _, token = _bootstrap(auth_client)
+
+    response = auth_client.post(
+        "/api/auth/login",
+        headers={
+            "Origin": "https://evil.example",
+            "X-CSRF-Token": token,
+            "Content-Type": "application/json",
+        },
+        content=b'{"email":',
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Invalid request origin"}
+
+
+def test_login_validation_never_exposes_submitted_password_or_context(
+    auth_client, caplog
+):
+    _bootstrap(auth_client)
+    secret = "login-validation-secret-" + ("x" * 64)
+
+    with caplog.at_level(logging.DEBUG):
+        response = auth_client.post(
+            "/api/auth/login",
+            json={"email": EMAIL, "password": secret},
+        )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert secret not in caplog.text
+    for error in response.json()["detail"]:
+        assert "input" not in error
+        assert "ctx" not in error
+
+
 @pytest.mark.parametrize(
     ("path", "payload"),
     [

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -8,9 +8,12 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC),
-        onupdate=lambda: datetime.now(UTC),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
