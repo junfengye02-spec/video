@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,16 @@ class WorkbenchStore:
 
     def project_dir(self, project_id: str) -> Path:
         return self.projects_root / canonical_project_id(project_id)
+
+    def delete_project_workspace(self, project_id: str) -> None:
+        canonical_id = canonical_project_id(project_id)
+        root = self.projects_root.resolve()
+        workspace = root / canonical_id
+        is_junction = getattr(workspace, "is_junction", lambda: False)
+        if workspace.parent != root or workspace.is_symlink() or is_junction():
+            raise ValueError("Project workspace path is invalid")
+        if workspace.exists():
+            shutil.rmtree(workspace)
 
     def artifact_dir(self, project_id: str) -> Path:
         return self.project_dir(project_id) / "artifacts"

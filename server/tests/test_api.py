@@ -1,3 +1,6 @@
+import json
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -393,7 +396,7 @@ def test_create_short_drama_project_returns_502_without_persisting_partial_proje
     )
 
     assert response.status_code == 502
-    assert response.json()["detail"].startswith("Text model storyboard generation failed:")
+    assert response.json()["detail"] == "Text model storyboard generation failed"
     assert list((tmp_path / "projects").iterdir()) == []
 
 
@@ -1043,7 +1046,8 @@ def test_regenerate_shot_failure_persists_failed_status_and_clears_outputs(tmp_p
         json={"video_key": VIDEO_TEST_KEY, "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
     )
     assert failed_response.status_code == 500
-    assert failed_response.json()["detail"] == "video provider timeout"
+    assert failed_response.json()["detail"] == "Shot generation failed"
+    assert app.state.events.history(project_id)[-1]["message"] == "Shot generation failed"
 
     loaded = client.get(f"/api/projects/{project_id}")
     assert loaded.status_code == 200
@@ -1165,7 +1169,7 @@ def test_optimize_prompt_route_returns_502_for_invalid_structured_response(tmp_p
     )
 
     assert response.status_code == 502
-    assert response.json()["detail"].startswith("Text model prompt optimization failed:")
+    assert response.json()["detail"] == "Text model prompt optimization failed"
 
 
 def test_optimize_prompt_route_rejects_whitespace_only_text_key(tmp_path):
@@ -1482,9 +1486,14 @@ def test_get_project_sanitizes_persisted_absolute_paths(tmp_path):
     assert body["final_path"] == "renders/final.mp4"
 
 
-def test_render_project_returns_provider_error_detail(tmp_path, monkeypatch):
+def test_render_project_sanitizes_provider_error_in_response_events_sse_and_logs(
+    tmp_path, monkeypatch, caplog
+):
+    from server.app.events import _format_sse
+
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
+    caplog.set_level(logging.DEBUG)
 
     created = client.post(
         "/api/projects/short-drama",
@@ -1502,11 +1511,16 @@ def test_render_project_returns_provider_error_detail(tmp_path, monkeypatch):
     ).json()
     project_id = created["project"]["id"]
 
+    leaked_values = [
+        "sk-live-fake-api-key",
+        "Authorization: Bearer fake-header-token",
+        "https://user:fake-password@credentials.example/provider?session=fake-session-code",
+    ]
+    provider_error = " | ".join(leaked_values)
+
     def fake_render_short_drama_project(**kwargs):
-        raise RuntimeError(
-            "SYAPI video HTTP error: POST https://api.0000238.xyz/v1/videos "
-            "status=403 model=omni_flash-10s provider_error=video model forbidden"
-        )
+        kwargs["emit_event"]("assets", "failed", provider_error)
+        raise RuntimeError(provider_error)
 
     monkeypatch.setattr("server.app.main.render_short_drama_project", fake_render_short_drama_project)
 
@@ -1525,8 +1539,21 @@ def test_render_project_returns_provider_error_detail(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 500
-    detail = response.json()["detail"]
-    assert "POST https://api.0000238.xyz/v1/videos" in detail
-    assert "status=403" in detail
-    assert "model=omni_flash-10s" in detail
-    assert "video model forbidden" in detail
+    assert response.json()["detail"] == "Project render failed"
+    events = app.state.events.history(project_id)
+    assert any(event["status"] == "failed" for event in events)
+    public_output = "\n".join(
+        [
+            response.text,
+            json.dumps(events),
+            *[_format_sse(event) for event in events],
+            caplog.text,
+        ]
+    )
+    for leaked_value in leaked_values:
+        assert leaked_value not in public_output
+    assert all(
+        event["message"] == "Project render failed"
+        for event in events
+        if event["status"] == "failed"
+    )

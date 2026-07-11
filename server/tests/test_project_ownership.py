@@ -9,6 +9,9 @@ from pathlib import Path
 import fakeredis
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartParser
+from starlette.requests import Request
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -282,6 +285,236 @@ def test_other_users_project_is_hidden_before_body_or_media_validation(
     assert response.json() == {"detail": "Project not found"}
 
 
+@pytest.mark.parametrize(
+    ("method", "path_suffix"),
+    [
+        ("PATCH", "/continuity"),
+        ("PATCH", "/shots/s1"),
+        ("POST", "/prompt-optimize"),
+        ("POST", "/shots/s1/regenerate"),
+        ("POST", "/render"),
+    ],
+)
+def test_other_users_project_is_hidden_before_malformed_json_parsing(
+    ownership_context, method, path_suffix
+):
+    project = _create_project(_bob(ownership_context), title="Bob's project")
+
+    response = _alice(ownership_context).request(
+        method,
+        f"/api/projects/{project['id']}{path_suffix}",
+        content=b'{"unterminated":',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Project not found"}
+
+
+def test_other_users_project_is_hidden_before_malformed_multipart_parsing(
+    ownership_context,
+):
+    project = _create_project(_bob(ownership_context), title="Bob's project")
+
+    response = _alice(ownership_context).post(
+        f"/api/projects/{project['id']}/assets/upload",
+        content=b"--wrong-boundary\r\ninvalid multipart",
+        headers={"Content-Type": "multipart/form-data; boundary=expected-boundary"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Project not found"}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/projects"),
+        ("POST", "/api/projects/import"),
+        ("POST", "/api/projects/short-drama"),
+        ("PATCH", "/api/projects/not-owned/continuity"),
+        ("PATCH", "/api/projects/not-owned/shots/s1"),
+        ("POST", "/api/projects/not-owned/prompt-optimize"),
+        ("POST", "/api/projects/not-owned/shots/s1/regenerate"),
+        ("POST", "/api/projects/not-owned/render"),
+    ],
+)
+def test_invalid_origin_precedes_malformed_project_json(
+    ownership_context, method, path
+):
+    response = _alice(ownership_context).request(
+        method,
+        path,
+        content=b'{"unterminated":',
+        headers={"Content-Type": "application/json", "Origin": "https://evil.example"},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Invalid request origin"}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/projects"),
+        ("POST", "/api/projects/import"),
+        ("POST", "/api/projects/short-drama"),
+        ("PATCH", "/api/projects/not-owned/continuity"),
+        ("PATCH", "/api/projects/not-owned/shots/s1"),
+        ("POST", "/api/projects/not-owned/prompt-optimize"),
+        ("POST", "/api/projects/not-owned/shots/s1/regenerate"),
+        ("POST", "/api/projects/not-owned/render"),
+    ],
+)
+def test_anonymous_json_mutation_rejects_before_reading_body(
+    ownership_context, monkeypatch, method, path
+):
+    body_reads: list[bool] = []
+
+    async def reject_body_read(request: Request) -> bytes:
+        body_reads.append(True)
+        pytest.fail("anonymous request body was read")
+
+    monkeypatch.setattr(Request, "body", reject_body_read)
+    client = TestClient(
+        ownership_context["app"],
+        base_url=AUTH_ORIGIN,
+        raise_server_exceptions=False,
+        headers={"Origin": AUTH_ORIGIN},
+    )
+
+    response = client.request(
+        method,
+        path,
+        content=b'{"title":"Unread"}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 401
+    assert body_reads == []
+
+
+def test_anonymous_upload_rejects_before_multipart_parsing(
+    ownership_context, monkeypatch
+):
+    form_parses: list[bool] = []
+
+    async def reject_form_parse(parser: MultiPartParser):
+        form_parses.append(True)
+        pytest.fail("anonymous multipart body was parsed")
+
+    monkeypatch.setattr(MultiPartParser, "parse", reject_form_parse)
+    client = TestClient(
+        ownership_context["app"],
+        base_url=AUTH_ORIGIN,
+        raise_server_exceptions=False,
+        headers={"Origin": AUTH_ORIGIN},
+    )
+
+    response = client.post(
+        "/api/projects/not-owned/assets/upload",
+        data={"kind": "character", "label": "Unread"},
+        files={"file": ("unread.png", b"unread", "image/png")},
+    )
+
+    assert response.status_code == 401
+    assert form_parses == []
+
+
+def test_invalid_origin_upload_rejects_before_multipart_parsing(
+    ownership_context, monkeypatch
+):
+    form_parses: list[bool] = []
+
+    async def reject_form_parse(parser: MultiPartParser):
+        form_parses.append(True)
+        pytest.fail("invalid-Origin multipart body was parsed")
+
+    monkeypatch.setattr(MultiPartParser, "parse", reject_form_parse)
+
+    response = _alice(ownership_context).post(
+        "/api/projects/not-owned/assets/upload",
+        headers={"Origin": "https://evil.example"},
+        data={"kind": "character", "label": "Unread"},
+        files={"file": ("unread.png", b"unread", "image/png")},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Invalid request origin"}
+    assert form_parses == []
+
+
+def test_authorized_malformed_project_bodies_preserve_validation_statuses(
+    ownership_context,
+):
+    project = _create_project(_alice(ownership_context), title="Alice's project")
+
+    malformed_json = _alice(ownership_context).patch(
+        f"/api/projects/{project['id']}/continuity",
+        content=b'{"unterminated":',
+        headers={"Content-Type": "application/json"},
+    )
+    malformed_multipart = _alice(ownership_context).post(
+        f"/api/projects/{project['id']}/assets/upload",
+        content=b"--wrong-boundary\r\ninvalid multipart",
+        headers={"Content-Type": "multipart/form-data; boundary=expected-boundary"},
+    )
+
+    assert malformed_json.status_code == 422
+    assert malformed_multipart.status_code == 400
+
+
+def test_authorized_upload_is_bounded_before_file_spooling(
+    ownership_context, monkeypatch
+):
+    from server.app.media_files import MAX_IMAGE_BYTES
+
+    project = _create_project(_alice(ownership_context), title="Alice's project")
+    original_write = UploadFile.write
+    spooled_bytes = 0
+
+    async def bounded_spool(upload: UploadFile, data: bytes) -> None:
+        nonlocal spooled_bytes
+        spooled_bytes += len(data)
+        if spooled_bytes > MAX_IMAGE_BYTES:
+            pytest.fail("multipart parser spooled an oversized file")
+        await original_write(upload, data)
+
+    monkeypatch.setattr(UploadFile, "write", bounded_spool)
+
+    response = _alice(ownership_context).post(
+        f"/api/projects/{project['id']}/assets/upload",
+        data={"kind": "character", "label": "Too large"},
+        files={
+            "file": (
+                "oversized.png",
+                b"x" * (MAX_IMAGE_BYTES + 128 * 1024),
+                "image/png",
+            )
+        },
+    )
+
+    assert response.status_code == 413
+    assert spooled_bytes <= MAX_IMAGE_BYTES
+
+
+def test_project_mutation_openapi_keeps_request_body_contracts(ownership_context):
+    paths = ownership_context["app"].openapi()["paths"]
+    operations = [
+        ("/api/projects", "post"),
+        ("/api/projects/import", "post"),
+        ("/api/projects/short-drama", "post"),
+        ("/api/projects/{project_id}/continuity", "patch"),
+        ("/api/projects/{project_id}/assets/upload", "post"),
+        ("/api/projects/{project_id}/shots/{shot_id}", "patch"),
+        ("/api/projects/{project_id}/prompt-optimize", "post"),
+        ("/api/projects/{project_id}/shots/{shot_id}/regenerate", "post"),
+        ("/api/projects/{project_id}/render", "post"),
+    ]
+
+    assert all(paths[path][method]["requestBody"]["required"] for path, method in operations)
+
+
 def test_repository_create_list_and_owned_lookup_are_owner_scoped(ownership_context):
     from server.app.projects.repository import ProjectRepository
 
@@ -491,6 +724,115 @@ def test_import_assigns_fresh_id_owner_and_keeps_browser_local_media(ownership_c
         "local://media/image-1.png"
     ]
     assert not (ownership_context["app"].state.store.project_dir(project_id) / "assets" / "images" / "image-1.png").exists()
+
+
+def test_import_write_failure_rolls_back_record_and_removes_workspace(
+    ownership_context, monkeypatch
+):
+    from server.app.projects.models import ProjectRecord
+
+    store = ownership_context["app"].state.store
+    original_write = store.write_artifact
+    writes = 0
+
+    def fail_mid_import(project_id, name, data):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("write failed at C:\\private\\workspace with token=fake-secret")
+        return original_write(project_id, name, data)
+
+    monkeypatch.setattr(store, "write_artifact", fail_mid_import)
+
+    response = _alice(ownership_context).post(
+        "/api/projects/import",
+        json=_valid_import_payload(),
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project import failed"}
+    assert list(ownership_context["db"].scalars(select(ProjectRecord))) == []
+    assert list(ownership_context["tmp_path"].joinpath("projects").iterdir()) == []
+
+
+def test_import_commit_failure_rolls_back_record_and_removes_workspace(
+    ownership_context, monkeypatch
+):
+    from server.app.projects.models import ProjectRecord
+
+    def fail_commit():
+        raise RuntimeError("commit failed with password=fake-secret")
+
+    monkeypatch.setattr(ownership_context["db"], "commit", fail_commit)
+
+    response = _alice(ownership_context).post(
+        "/api/projects/import",
+        json=_valid_import_payload(),
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project import failed"}
+    assert list(ownership_context["db"].scalars(select(ProjectRecord))) == []
+    assert list(ownership_context["tmp_path"].joinpath("projects").iterdir()) == []
+
+
+def test_import_cleanup_failure_does_not_expose_cleanup_details(
+    ownership_context, monkeypatch, caplog
+):
+    from server.app.projects.models import ProjectRecord
+
+    store = ownership_context["app"].state.store
+
+    def fail_write(project_id, name, data):
+        store._ensure_project_dirs(project_id)
+        raise OSError("write path C:\\private\\artifact token=fake-write-secret")
+
+    def fail_cleanup(project_id):
+        raise OSError("cleanup path C:\\private\\workspace password=fake-cleanup-secret")
+
+    monkeypatch.setattr(store, "write_artifact", fail_write)
+    monkeypatch.setattr(store, "delete_project_workspace", fail_cleanup)
+
+    response = _alice(ownership_context).post(
+        "/api/projects/import",
+        json=_valid_import_payload(),
+    )
+
+    public_output = response.text + caplog.text
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project import failed"}
+    assert "fake-write-secret" not in public_output
+    assert "fake-cleanup-secret" not in public_output
+    assert "C:\\private" not in public_output
+    assert list(ownership_context["db"].scalars(select(ProjectRecord))) == []
+
+
+def test_workspace_cleanup_rejects_noncanonical_project_ids(ownership_context):
+    store = ownership_context["app"].state.store
+    outside = ownership_context["tmp_path"] / "outside"
+    outside.mkdir()
+
+    with pytest.raises(ValueError, match="canonical server UUID"):
+        store.delete_project_workspace("../outside")
+
+    assert outside.is_dir()
+
+
+def test_workspace_cleanup_rejects_linked_project_directory(
+    ownership_context, monkeypatch
+):
+    project_id = "dddddddddddd4ddd8ddddddddddddddd"
+    store = ownership_context["app"].state.store
+    original_is_symlink = Path.is_symlink
+
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path.name == project_id or original_is_symlink(path),
+    )
+
+    with pytest.raises(ValueError, match="Project workspace path is invalid"):
+        store.delete_project_workspace(project_id)
 
 
 def test_imported_assets_survive_a_later_reference_upload(ownership_context):

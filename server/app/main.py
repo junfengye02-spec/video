@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import json
 import uuid
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, AsyncIterator, TypeVar
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from python_multipart.exceptions import MultipartParseError
 from redis import Redis
 from sqlalchemy.orm import Session
+from starlette.datastructures import FormData, UploadFile
 
 from server.app.artifact_sync import read_workflow_settings, rewrite_workflow_artifacts, sync_asset_shot_ids
 from server.app.auth.dependencies import CurrentUser, require_csrf, require_user
@@ -64,6 +69,16 @@ from server.app.storage import WorkbenchStore
 DEFAULT_TEXT_MODEL = "gpt-5.5"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_VIDEO_MODEL = "omni_flash-10s"
+STORYBOARD_GENERATION_FAILED = "Text model storyboard generation failed"
+PROMPT_OPTIMIZATION_FAILED = "Text model prompt optimization failed"
+SHOT_GENERATION_FAILED = "Shot generation failed"
+PROJECT_RENDER_FAILED = "Project render failed"
+MAX_MULTIPART_FIELD_BYTES = 64 * 1024
+MAX_MULTIPART_FIELDS = 4
+MAX_MULTIPART_FILES = 1
+MAX_MULTIPART_REQUEST_BYTES = MAX_IMAGE_BYTES + MAX_MULTIPART_FIELD_BYTES
+
+JsonRequestModel = TypeVar("JsonRequestModel", bound=BaseModel)
 
 
 def sanitize_project_path(project_dir: Path, path_value: Any) -> str | None:
@@ -237,13 +252,115 @@ def _require_owned_csrf(
     return ProjectRepository(db).require_owned(project_id, current.id)
 
 
-async def _require_import_csrf(
+async def _parse_json_request(
     request: Request,
-    current: CurrentUser = Depends(require_csrf),
-) -> CurrentUser:
-    if len(await request.body()) > MAX_IMPORT_ARTIFACT_BYTES:
+    model: type[JsonRequestModel],
+    *,
+    max_bytes: int | None = None,
+) -> JsonRequestModel:
+    raw_body = await request.body()
+    if max_bytes is not None and len(raw_body) > max_bytes:
         raise HTTPException(status_code=413, detail="Imported project JSON is too large")
-    return current
+    try:
+        raw_payload = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "json_invalid",
+                    "loc": ("body",),
+                    "msg": "JSON decode error",
+                    "input": None,
+                    "ctx": {"error": "Malformed JSON"},
+                }
+            ]
+        ) from exc
+    try:
+        return model.model_validate(raw_payload)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors(include_url=False)) from exc
+
+
+def _json_request_openapi(model: type[BaseModel]) -> dict[str, Any]:
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": model.model_json_schema()}},
+        }
+    }
+
+
+def _upload_request_openapi() -> dict[str, Any]:
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["kind", "label", "file"],
+                        "properties": {
+                            "kind": {"type": "string"},
+                            "label": {"type": "string"},
+                            "description": {"type": "string", "default": ""},
+                            "prompt": {"type": "string", "default": ""},
+                            "file": {"type": "string", "format": "binary"},
+                        },
+                    }
+                }
+            },
+        }
+    }
+
+
+def _form_text(
+    form: FormData,
+    field: str,
+    *,
+    default: str | None = None,
+    max_length: int,
+) -> str:
+    value = form.get(field, default)
+    if not isinstance(value, str):
+        raise HTTPException(status_code=422, detail=f"{field} is required")
+    if len(value.encode("utf-8")) > max_length:
+        raise HTTPException(status_code=422, detail=f"{field} is too large")
+    return value
+
+
+@asynccontextmanager
+async def _bounded_upload_form(request: Request) -> AsyncIterator[FormData]:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_bytes = int(content_length)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
+        if declared_bytes > MAX_MULTIPART_REQUEST_BYTES:
+            raise HTTPException(status_code=413, detail="Uploaded media is too large")
+
+    upstream_receive = request.receive
+    received_bytes = 0
+
+    async def bounded_receive() -> dict[str, Any]:
+        nonlocal received_bytes
+        message = await upstream_receive()
+        if message["type"] == "http.request":
+            received_bytes += len(message.get("body", b""))
+            if received_bytes > MAX_MULTIPART_REQUEST_BYTES:
+                raise HTTPException(status_code=413, detail="Uploaded media is too large")
+        return message
+
+    bounded_request = Request(request.scope, receive=bounded_receive)
+    try:
+        async with bounded_request.form(
+            max_files=MAX_MULTIPART_FILES,
+            max_fields=MAX_MULTIPART_FIELDS,
+            max_part_size=MAX_MULTIPART_FIELD_BYTES,
+        ) as form:
+            yield form
+    except MultipartParseError as exc:
+        raise HTTPException(status_code=400, detail="Malformed multipart body") from exc
 
 
 class KeySessionRequest(BaseModel):
@@ -328,13 +445,17 @@ def create_app(
             "valid": True,
         }
 
-    @app.post("/api/projects")
-    def create_draft_project(
-        payload: ProjectCreateRequest,
+    @app.post(
+        "/api/projects",
+        openapi_extra=_json_request_openapi(ProjectCreateRequest),
+    )
+    async def create_draft_project(
+        request: Request,
         workbench: WorkbenchStore = Depends(get_store),
         current: CurrentUser = Depends(require_csrf),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
+        payload = await _parse_json_request(request, ProjectCreateRequest)
         project = ProjectRepository(db).create(
             owner_user_id=current.id,
             title=payload.title,
@@ -371,38 +492,62 @@ def create_app(
         db.commit()
         return _project_snapshot(workbench, project)
 
-    @app.post("/api/projects/import", status_code=201)
-    def import_project(
-        payload: ProjectImportRequest,
-        workbench: WorkbenchStore = Depends(get_store),
-        current: CurrentUser = Depends(_require_import_csrf),
-        db: Session = Depends(get_db),
-    ) -> dict[str, Any]:
-        if payload.artifact_size_bytes() > MAX_IMPORT_ARTIFACT_BYTES:
-            raise HTTPException(status_code=413, detail="Imported project JSON is too large")
-        project = ProjectRepository(db).create(
-            owner_user_id=current.id,
-            title=payload.title,
-            mode="short_drama",
-            project_type=payload.project_type,
-        )
-        artifacts = payload.artifact_payloads()
-        for filename, artifact in artifacts.items():
-            workbench.write_artifact(project.id, filename, artifact)
-        workbench.write_asset_library(
-            project.id,
-            list(artifacts["series_bible.json"]["assets"]),
-        )
-        db.commit()
-        return _project_snapshot(workbench, project)
-
-    @app.post("/api/projects/short-drama")
-    def create_short_drama_project(
-        payload: ShortDramaRequest,
+    @app.post(
+        "/api/projects/import",
+        status_code=201,
+        openapi_extra=_json_request_openapi(ProjectImportRequest),
+    )
+    async def import_project(
+        request: Request,
         workbench: WorkbenchStore = Depends(get_store),
         current: CurrentUser = Depends(require_csrf),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
+        payload = await _parse_json_request(
+            request,
+            ProjectImportRequest,
+            max_bytes=MAX_IMPORT_ARTIFACT_BYTES,
+        )
+        if payload.artifact_size_bytes() > MAX_IMPORT_ARTIFACT_BYTES:
+            raise HTTPException(status_code=413, detail="Imported project JSON is too large")
+        project: ProjectRecord | None = None
+        try:
+            project = ProjectRepository(db).create(
+                owner_user_id=current.id,
+                title=payload.title,
+                mode="short_drama",
+                project_type=payload.project_type,
+            )
+            artifacts = payload.artifact_payloads()
+            for filename, artifact in artifacts.items():
+                workbench.write_artifact(project.id, filename, artifact)
+            workbench.write_asset_library(
+                project.id,
+                list(artifacts["series_bible.json"]["assets"]),
+            )
+            response = _project_snapshot(workbench, project)
+            db.commit()
+            return response
+        except Exception as exc:
+            db.rollback()
+            if project is not None:
+                try:
+                    workbench.delete_project_workspace(project.id)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail="Project import failed") from exc
+
+    @app.post(
+        "/api/projects/short-drama",
+        openapi_extra=_json_request_openapi(ShortDramaRequest),
+    )
+    async def create_short_drama_project(
+        request: Request,
+        workbench: WorkbenchStore = Depends(get_store),
+        current: CurrentUser = Depends(require_csrf),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        payload = await _parse_json_request(request, ShortDramaRequest)
         key_environment(payload.video_key, payload.base_url)
         try:
             result = generate_short_drama_storyboard(
@@ -414,7 +559,7 @@ def create_app(
                 shot_count=payload.shot_count,
             )
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Text model storyboard generation failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=STORYBOARD_GENERATION_FAILED) from exc
 
         result["consistency_report"] = evaluate_storyboard_consistency(
             result["series_bible"],
@@ -474,14 +619,18 @@ def create_app(
     ) -> dict[str, Any]:
         return _project_snapshot(workbench, project)
 
-    @app.patch("/api/projects/{project_id}/continuity")
-    def save_continuity_plan(
+    @app.patch(
+        "/api/projects/{project_id}/continuity",
+        openapi_extra=_json_request_openapi(ContinuityPlan),
+    )
+    async def save_continuity_plan(
+        request: Request,
         project_id: str,
         project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
-        payload: ContinuityPlan,
         workbench: WorkbenchStore = Depends(get_store),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
+        payload = await _parse_json_request(request, ContinuityPlan)
         plan = payload.model_dump()
         plan["project_type"] = project.project_type
         if project.project_type == "single_video":
@@ -503,71 +652,78 @@ def create_app(
         db.commit()
         return {"project": _project_data(project), "continuity_plan": plan}
 
-    @app.post("/api/projects/{project_id}/assets/upload")
+    @app.post(
+        "/api/projects/{project_id}/assets/upload",
+        openapi_extra=_upload_request_openapi(),
+    )
     async def upload_reference_image(
+        request: Request,
         project_id: str,
         project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
-        kind: str = Form(...),
-        label: str = Form(...),
-        description: str = Form(""),
-        prompt: str = Form(""),
-        file: UploadFile = File(...),
         workbench: WorkbenchStore = Depends(get_store),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         if series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
-        if kind not in {"character", "scene", "prop"}:
-            raise HTTPException(status_code=422, detail="Unsupported asset kind")
-        suffix = validate_upload_extension(file.filename or "", IMAGE_EXTENSIONS)
-        asset_id = f"asset-{uuid.uuid4().hex}"
-        project_dir = workbench.project_dir(project_id)
-        output_path = safe_project_media_destination(
-            project_dir,
-            Path("assets") / "images" / kind,
-            f"{asset_id}{suffix}",
-        )
-        await save_upload_file(file, output_path, MAX_IMAGE_BYTES)
-        relative_path = relative_project_path(project_dir, output_path)
-        asset_data = {
-            "id": asset_id,
-            "kind": kind,
-            "label": label,
-            "description": description,
-            "prompt": prompt,
-            "reference_images": [relative_path],
-            "media_urls": [media_download_url(project_id, relative_path)],
-            "shot_ids": [],
-            "version": 1,
-        }
-        assets = workbench.read_asset_library(project_id)
-        assets.append(asset_data)
-        workbench.write_asset_library(project_id, assets)
-        series_bible["assets"] = assets
-        workbench.write_artifact(project_id, "series_bible.json", series_bible)
-        storyboard = workbench.read_artifact(project_id, "episode_storyboard.json") or {"shots": []}
-        continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
-        rewrite_workflow_artifacts(
-            workbench=workbench,
-            project_id=project_id,
-            series_bible=series_bible,
-            storyboard=storyboard,
-            render_runtime="ffmpeg",
-            video_model=DEFAULT_VIDEO_MODEL,
-            continuity_plan=continuity_plan,
-        )
-        project.updated_at = datetime.now(UTC)
-        db.commit()
-        return {
-            "media": {
-                "path": relative_path,
-                "media_url": media_download_url(project_id, relative_path),
-                "filename": Path(relative_path).name,
-                "content_type": media_content_type(output_path),
-            },
-            "asset": _decorate_asset_media(project_id, project_dir, asset_data),
-        }
+        async with _bounded_upload_form(request) as form:
+            kind = _form_text(form, "kind", max_length=32)
+            label = _form_text(form, "label", max_length=255)
+            description = _form_text(form, "description", default="", max_length=10_000)
+            prompt = _form_text(form, "prompt", default="", max_length=10_000)
+            upload = form.get("file")
+            if not isinstance(upload, UploadFile):
+                raise HTTPException(status_code=422, detail="file is required")
+            if kind not in {"character", "scene", "prop"}:
+                raise HTTPException(status_code=422, detail="Unsupported asset kind")
+            suffix = validate_upload_extension(upload.filename or "", IMAGE_EXTENSIONS)
+            asset_id = f"asset-{uuid.uuid4().hex}"
+            project_dir = workbench.project_dir(project_id)
+            output_path = safe_project_media_destination(
+                project_dir,
+                Path("assets") / "images" / kind,
+                f"{asset_id}{suffix}",
+            )
+            await save_upload_file(upload, output_path, MAX_IMAGE_BYTES)
+            relative_path = relative_project_path(project_dir, output_path)
+            asset_data = {
+                "id": asset_id,
+                "kind": kind,
+                "label": label,
+                "description": description,
+                "prompt": prompt,
+                "reference_images": [relative_path],
+                "media_urls": [media_download_url(project_id, relative_path)],
+                "shot_ids": [],
+                "version": 1,
+            }
+            assets = workbench.read_asset_library(project_id)
+            assets.append(asset_data)
+            workbench.write_asset_library(project_id, assets)
+            series_bible["assets"] = assets
+            workbench.write_artifact(project_id, "series_bible.json", series_bible)
+            storyboard = workbench.read_artifact(project_id, "episode_storyboard.json") or {"shots": []}
+            continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
+            rewrite_workflow_artifacts(
+                workbench=workbench,
+                project_id=project_id,
+                series_bible=series_bible,
+                storyboard=storyboard,
+                render_runtime="ffmpeg",
+                video_model=DEFAULT_VIDEO_MODEL,
+                continuity_plan=continuity_plan,
+            )
+            project.updated_at = datetime.now(UTC)
+            db.commit()
+            return {
+                "media": {
+                    "path": relative_path,
+                    "media_url": media_download_url(project_id, relative_path),
+                    "filename": Path(relative_path).name,
+                    "content_type": media_content_type(output_path),
+                },
+                "asset": _decorate_asset_media(project_id, project_dir, asset_data),
+            }
 
     @app.get("/api/projects/{project_id}/media/{relative_path:path}")
     def project_media(
@@ -581,16 +737,20 @@ def create_app(
             raise HTTPException(status_code=404, detail="Media file not found")
         return FileResponse(media_path, media_type=media_content_type(media_path))
 
-    @app.patch("/api/projects/{project_id}/shots/{shot_id}")
-    def save_shot(
+    @app.patch(
+        "/api/projects/{project_id}/shots/{shot_id}",
+        openapi_extra=_json_request_openapi(ShotSaveRequest),
+    )
+    async def save_shot(
+        request: Request,
         project_id: str,
         shot_id: str,
         project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
-        payload: ShotSaveRequest,
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
+        payload = await _parse_json_request(request, ShotSaveRequest)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
@@ -627,13 +787,18 @@ def create_app(
         event = bus.emit(project_id, job_id=job_id, stage="save", status="complete", message="Shot saved")
         return {"job_id": job_id, "event": event, "shot": shot, "storyboard": storyboard, "consistency_report": report}
 
-    @app.post("/api/projects/{project_id}/prompt-optimize", response_model=PromptOptimizeResponse)
-    def optimize_prompt(
+    @app.post(
+        "/api/projects/{project_id}/prompt-optimize",
+        response_model=PromptOptimizeResponse,
+        openapi_extra=_json_request_openapi(PromptOptimizeRequest),
+    )
+    async def optimize_prompt(
+        request: Request,
         project_id: str,
         project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
-        payload: PromptOptimizeRequest,
         workbench: WorkbenchStore = Depends(get_store),
     ) -> PromptOptimizeResponse:
+        payload = await _parse_json_request(request, PromptOptimizeRequest)
         try:
             result = optimize_text_prompt(
                 source_text=payload.source_text,
@@ -644,18 +809,22 @@ def create_app(
             )
             return PromptOptimizeResponse(project_id=project_id, model=payload.text_model, **result)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Text model prompt optimization failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=PROMPT_OPTIMIZATION_FAILED) from exc
 
-    @app.post("/api/projects/{project_id}/shots/{shot_id}/regenerate")
-    def regenerate_shot(
+    @app.post(
+        "/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        openapi_extra=_json_request_openapi(ShotRegenerateRequest),
+    )
+    async def regenerate_shot(
+        request: Request,
         project_id: str,
         shot_id: str,
         project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
-        payload: ShotRegenerateRequest,
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
+        payload = await _parse_json_request(request, ShotRegenerateRequest)
         if not payload.video_key:
             raise HTTPException(status_code=422, detail="video_key is required for shot regeneration")
         key_environment(payload.video_key, payload.base_url)
@@ -706,8 +875,14 @@ def create_app(
                 video_model=payload.video_model,
                 continuity_plan=continuity_plan,
             )
-            bus.emit(project_id, job_id=job_id, stage="regenerate", status="failed", message=str(exc))
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            bus.emit(
+                project_id,
+                job_id=job_id,
+                stage="regenerate",
+                status="failed",
+                message=SHOT_GENERATION_FAILED,
+            )
+            raise HTTPException(status_code=500, detail=SHOT_GENERATION_FAILED) from exc
         shot["status"] = "complete"
         shot["output_path"] = output["output_path"]
         shot["output_url"] = output["tool_result"].get("url")
@@ -747,15 +922,19 @@ def create_app(
             "generation": _sanitize_generation_output(project_dir, output),
         }
 
-    @app.post("/api/projects/{project_id}/render")
-    def render_project(
+    @app.post(
+        "/api/projects/{project_id}/render",
+        openapi_extra=_json_request_openapi(RenderProjectRequest),
+    )
+    async def render_project(
+        request: Request,
         project_id: str,
         project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
-        payload: RenderProjectRequest,
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
+        payload = await _parse_json_request(request, RenderProjectRequest)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
@@ -765,7 +944,14 @@ def create_app(
         job_id = uuid.uuid4().hex
 
         def emit(stage: str, status: str, message: str) -> None:
-            bus.emit(project_id, job_id=job_id, stage=stage, status=status, message=message)
+            public_message = PROJECT_RENDER_FAILED if status == "failed" else message
+            bus.emit(
+                project_id,
+                job_id=job_id,
+                stage=stage,
+                status=status,
+                message=public_message,
+            )
 
         emit("render", "running", "Starting final render")
         try:
@@ -781,8 +967,8 @@ def create_app(
                 emit_event=emit,
             )
         except Exception as exc:
-            emit("render", "failed", str(exc))
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            emit("render", "failed", PROJECT_RENDER_FAILED)
+            raise HTTPException(status_code=500, detail=PROJECT_RENDER_FAILED) from exc
 
         report = evaluate_storyboard_consistency(series_bible, result["storyboard"])
         apply_consistency_scores(result["storyboard"], report)
