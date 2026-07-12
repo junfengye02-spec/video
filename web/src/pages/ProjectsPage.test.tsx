@@ -9,9 +9,14 @@ import {
 import { createProjectResponse } from "../test/fixtures";
 import { ProjectsPage } from "./ProjectsPage";
 
-const projectStoreMocks = vi.hoisted(() => ({
-  listProjectSummaries: vi.fn(),
-  deleteProject: vi.fn(),
+const projectRepositoryMocks = vi.hoisted(() => ({
+  projectRepository: {
+    list: vi.fn(),
+    delete: vi.fn(),
+    exportBackup: vi.fn(),
+    importBackup: vi.fn(),
+    importBackupDirectory: vi.fn(),
+  },
 }));
 
 const projectBackupMocks = vi.hoisted(() => {
@@ -24,9 +29,6 @@ const projectBackupMocks = vi.hoisted(() => {
     }
   }
   return {
-    exportProjectBackup: vi.fn(),
-    importProjectBackup: vi.fn(),
-    importProjectBackupDirectory: vi.fn(),
     ProjectImportConflictError,
   };
 });
@@ -35,7 +37,7 @@ const downloadMocks = vi.hoisted(() => ({
   downloadBlob: vi.fn(),
 }));
 
-vi.mock("../localdb/projectStore", () => projectStoreMocks);
+vi.mock("../features/projects/ProjectRepository", () => projectRepositoryMocks);
 vi.mock("../localdb/exportProject", () => projectBackupMocks);
 vi.mock("../utils/downloadBlob", () => downloadMocks);
 
@@ -63,11 +65,11 @@ function LocationProbe() {
 }
 
 beforeEach(() => {
-  projectStoreMocks.listProjectSummaries.mockReset().mockResolvedValue([]);
-  projectStoreMocks.deleteProject.mockReset().mockResolvedValue(undefined);
-  projectBackupMocks.exportProjectBackup.mockReset();
-  projectBackupMocks.importProjectBackup.mockReset();
-  projectBackupMocks.importProjectBackupDirectory.mockReset();
+  projectRepositoryMocks.projectRepository.list.mockReset().mockResolvedValue([]);
+  projectRepositoryMocks.projectRepository.delete.mockReset().mockResolvedValue(undefined);
+  projectRepositoryMocks.projectRepository.exportBackup.mockReset();
+  projectRepositoryMocks.projectRepository.importBackup.mockReset();
+  projectRepositoryMocks.projectRepository.importBackupDirectory.mockReset();
   downloadMocks.downloadBlob.mockReset();
 });
 
@@ -86,7 +88,7 @@ describe("ProjectsPage", () => {
   });
 
   it("lists browser-local projects and opens the selected project", async () => {
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
     expect(await screen.findByText("雨夜来信")).toBeInTheDocument();
@@ -100,39 +102,39 @@ describe("ProjectsPage", () => {
   });
 
   it("requires confirmation before deleting a local project", async () => {
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
     fireEvent.click(await screen.findByRole("button", { name: "删除 雨夜来信" }));
     expect(screen.getByRole("dialog", { name: "删除项目" })).toBeInTheDocument();
-    expect(projectStoreMocks.deleteProject).not.toHaveBeenCalled();
+    expect(projectRepositoryMocks.projectRepository.delete).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
-    await waitFor(() => expect(projectStoreMocks.deleteProject).toHaveBeenCalledWith("p1"));
+    await waitFor(() => expect(projectRepositoryMocks.projectRepository.delete).toHaveBeenCalledWith("p1"));
     await waitFor(() => expect(screen.queryByText("雨夜来信")).not.toBeInTheDocument());
   });
 
   it("closes delete confirmation from Escape or cancel without deleting", async () => {
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
     const opener = await screen.findByRole("button", { name: "删除 雨夜来信" });
     fireEvent.click(opener);
     fireEvent.keyDown(screen.getByRole("dialog", { name: "删除项目" }), { key: "Escape" });
 
-    expect(projectStoreMocks.deleteProject).not.toHaveBeenCalled();
+    expect(projectRepositoryMocks.projectRepository.delete).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "删除项目" })).not.toBeInTheDocument();
     await waitFor(() => expect(opener).toHaveFocus());
 
     fireEvent.click(opener);
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
-    expect(projectStoreMocks.deleteProject).not.toHaveBeenCalled();
+    expect(projectRepositoryMocks.projectRepository.delete).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "删除项目" })).not.toBeInTheDocument();
   });
 
   it("uses a stable-width async action for project deletion", async () => {
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
     fireEvent.click(await screen.findByRole("button", { name: "删除 雨夜来信" }));
@@ -142,8 +144,8 @@ describe("ProjectsPage", () => {
 
   it("exports the selected project as an omproj backup", async () => {
     const blob = new Blob(["backup"], { type: "application/zip" });
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
-    projectBackupMocks.exportProjectBackup.mockResolvedValue(blob);
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.exportBackup.mockResolvedValue(blob);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
     fireEvent.click(await screen.findByRole("button", { name: "导出 雨夜来信" }));
@@ -152,8 +154,8 @@ describe("ProjectsPage", () => {
       blob,
       "雨夜来信.omproj",
     ));
-    expect(projectBackupMocks.exportProjectBackup).toHaveBeenCalledWith("p1");
-    expect(projectBackupMocks.exportProjectBackup.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(projectRepositoryMocks.projectRepository.exportBackup).toHaveBeenCalledWith("p1");
+    expect(projectRepositoryMocks.projectRepository.exportBackup.mock.invocationCallOrder[0]).toBeLessThan(
       downloadMocks.downloadBlob.mock.invocationCallOrder[0],
     );
   });
@@ -161,8 +163,8 @@ describe("ProjectsPage", () => {
   it("guards repeated export clicks before the pending state renders", async () => {
     const pending = deferred<Blob>();
     const project = { ...summary, title: "Project One" };
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([project]);
-    projectBackupMocks.exportProjectBackup.mockReturnValue(pending.promise);
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([project]);
+    projectRepositoryMocks.projectRepository.exportBackup.mockReturnValue(pending.promise);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
     const exportButton = await screen.findByRole("button", {
       name: strings.exportProject(project.title),
@@ -173,7 +175,7 @@ describe("ProjectsPage", () => {
       exportButton.click();
     });
 
-    expect(projectBackupMocks.exportProjectBackup).toHaveBeenCalledTimes(1);
+    expect(projectRepositoryMocks.projectRepository.exportBackup).toHaveBeenCalledTimes(1);
   });
 
   it("tracks two overlapping project exports independently", async () => {
@@ -181,8 +183,8 @@ describe("ProjectsPage", () => {
     const second = deferred<Blob>();
     const firstProject = { ...summary, title: "Project One" };
     const secondProject = { ...summary, id: "p2", title: "Project Two" };
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([firstProject, secondProject]);
-    projectBackupMocks.exportProjectBackup.mockImplementation((projectId: string) => (
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([firstProject, secondProject]);
+    projectRepositoryMocks.projectRepository.exportBackup.mockImplementation((projectId: string) => (
       projectId === firstProject.id ? first.promise : second.promise
     ));
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
@@ -209,7 +211,7 @@ describe("ProjectsPage", () => {
 
   it("imports a backup before navigating to its storyboard", async () => {
     const file = new File(["backup"], "project.omproj", { type: "application/zip" });
-    projectBackupMocks.importProjectBackup.mockResolvedValue(createProjectResponse());
+    projectRepositoryMocks.projectRepository.importBackup.mockResolvedValue(createProjectResponse());
     render(
       <MemoryRouter future={routerFuture} initialEntries={["/projects"]}>
         <ProjectsPage />
@@ -219,7 +221,7 @@ describe("ProjectsPage", () => {
 
     fireEvent.change(screen.getByLabelText("导入项目"), { target: { files: [file] } });
 
-    await waitFor(() => expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledWith(
+    await waitFor(() => expect(projectRepositoryMocks.projectRepository.importBackup).toHaveBeenCalledWith(
       file,
       expect.objectContaining({
         signal: expect.any(AbortSignal),
@@ -233,8 +235,8 @@ describe("ProjectsPage", () => {
 
   it("does not overwrite a conflicting import when confirmation is cancelled", async () => {
     const file = new File(["backup"], "project.omproj", { type: "application/zip" });
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
-    projectBackupMocks.importProjectBackup.mockRejectedValue(
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.importBackup.mockRejectedValue(
       new projectBackupMocks.ProjectImportConflictError("p1"),
     );
     render(
@@ -249,8 +251,8 @@ describe("ProjectsPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: strings.cancelAction }));
 
-    expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledTimes(1);
-    expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledWith(
+    expect(projectRepositoryMocks.projectRepository.importBackup).toHaveBeenCalledTimes(1);
+    expect(projectRepositoryMocks.projectRepository.importBackup).toHaveBeenCalledWith(
       file,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -260,8 +262,8 @@ describe("ProjectsPage", () => {
 
   it("overwrites a conflicting import only after explicit confirmation", async () => {
     const file = new File(["backup"], "project.omproj", { type: "application/zip" });
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
-    projectBackupMocks.importProjectBackup
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.importBackup
       .mockRejectedValueOnce(new projectBackupMocks.ProjectImportConflictError("p1"))
       .mockResolvedValueOnce(createProjectResponse());
     render(
@@ -275,7 +277,7 @@ describe("ProjectsPage", () => {
     await screen.findByRole("dialog", { name: "\u8986\u76d6\u73b0\u6709\u9879\u76ee" });
     fireEvent.click(screen.getByRole("button", { name: "\u786e\u8ba4\u8986\u76d6" }));
 
-    await waitFor(() => expect(projectBackupMocks.importProjectBackup).toHaveBeenLastCalledWith(
+    await waitFor(() => expect(projectRepositoryMocks.projectRepository.importBackup).toHaveBeenLastCalledWith(
       file,
       expect.objectContaining({
         overwrite: true,
@@ -283,7 +285,7 @@ describe("ProjectsPage", () => {
         onProgress: expect.any(Function),
       }),
     ));
-    expect(projectBackupMocks.importProjectBackup).toHaveBeenCalledTimes(2);
+    expect(projectRepositoryMocks.projectRepository.importBackup).toHaveBeenCalledTimes(2);
     expect(await screen.findByRole("status")).toHaveTextContent(
       "/projects/p1/storyboard",
     );
@@ -294,8 +296,8 @@ describe("ProjectsPage", () => {
       new File(["project"], "openmontage-project.json", { type: "application/json" }),
       new File(["media"], "clip.mp4", { type: "video/mp4" }),
     ];
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
-    projectBackupMocks.importProjectBackupDirectory
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.importBackupDirectory
       .mockRejectedValueOnce(new projectBackupMocks.ProjectImportConflictError("p1"))
       .mockResolvedValueOnce(createProjectResponse());
     render(
@@ -309,7 +311,7 @@ describe("ProjectsPage", () => {
     await screen.findByRole("dialog", { name: "覆盖现有项目" });
     fireEvent.click(screen.getByRole("button", { name: "确认覆盖" }));
 
-    await waitFor(() => expect(projectBackupMocks.importProjectBackupDirectory)
+    await waitFor(() => expect(projectRepositoryMocks.projectRepository.importBackupDirectory)
       .toHaveBeenLastCalledWith(
         files,
         expect.objectContaining({
@@ -318,7 +320,7 @@ describe("ProjectsPage", () => {
           onProgress: expect.any(Function),
         }),
       ));
-    expect(projectBackupMocks.importProjectBackup).not.toHaveBeenCalled();
+    expect(projectRepositoryMocks.projectRepository.importBackup).not.toHaveBeenCalled();
     expect(await screen.findByRole("status", { name: "当前路径" })).toHaveTextContent(
       "/projects/p1/storyboard",
     );
@@ -326,8 +328,8 @@ describe("ProjectsPage", () => {
 
   it("keeps the project list and route unchanged when directory validation fails", async () => {
     const files = [new File(["broken"], "openmontage-project.json")];
-    projectStoreMocks.listProjectSummaries.mockResolvedValue([summary]);
-    projectBackupMocks.importProjectBackupDirectory.mockRejectedValue(
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
+    projectRepositoryMocks.projectRepository.importBackupDirectory.mockRejectedValue(
       new Error("备份目录不完整，请重新选择。"),
     );
     render(
@@ -343,12 +345,12 @@ describe("ProjectsPage", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("备份目录不完整，请重新选择。");
     expect(screen.getByText(summary.title)).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "当前路径" })).toHaveTextContent("/projects");
-    expect(projectBackupMocks.importProjectBackup).not.toHaveBeenCalled();
+    expect(projectRepositoryMocks.projectRepository.importBackup).not.toHaveBeenCalled();
   });
 
   it("promotes the directory action only when the module Worker is unavailable", async () => {
     const file = new File(["backup"], "project.omproj", { type: "application/zip" });
-    projectBackupMocks.importProjectBackup.mockRejectedValue(
+    projectRepositoryMocks.projectRepository.importBackup.mockRejectedValue(
       new BackupWorkerUnavailableError("Backup module Worker is unavailable"),
     );
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
@@ -364,7 +366,7 @@ describe("ProjectsPage", () => {
 
   it("keeps protocol failures distinct from Worker unavailability", async () => {
     const file = new File(["backup"], "project.omproj", { type: "application/zip" });
-    projectBackupMocks.importProjectBackup.mockRejectedValue(
+    projectRepositoryMocks.projectRepository.importBackup.mockRejectedValue(
       new BackupWorkerProtocolError("备份读取协议异常，请重试。"),
     );
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
@@ -379,7 +381,7 @@ describe("ProjectsPage", () => {
 
   it("shows byte and entry progress and cancels the active import without failure", async () => {
     const file = new File(["backup"], "project.omproj", { type: "application/zip" });
-    projectBackupMocks.importProjectBackup.mockImplementation((
+    projectRepositoryMocks.projectRepository.importBackup.mockImplementation((
       _file: File,
       options: { signal: AbortSignal; onProgress: (progress: unknown) => void },
     ) => new Promise((_resolve, reject) => {
@@ -408,7 +410,7 @@ describe("ProjectsPage", () => {
 
   it("shows loading and load failure states", async () => {
     let rejectLoad: (reason: unknown) => void = () => undefined;
-    projectStoreMocks.listProjectSummaries.mockReturnValue(new Promise((_, reject) => {
+    projectRepositoryMocks.projectRepository.list.mockReturnValue(new Promise((_, reject) => {
       rejectLoad = reject;
     }));
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);

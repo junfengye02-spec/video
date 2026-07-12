@@ -393,9 +393,6 @@ export async function commitImportedProject(
       ) {
         throw new Error(`Import session ${sessionId} no longer holds its owner lease`);
       }
-      if (session.projectId !== snapshot.project.id) {
-        rejection = new Error(`Import session ${sessionId} belongs to another project`);
-      }
 
       const existing = await requestToPromise<LocalProjectSnapshot | undefined>(
         projectStore.get(snapshot.project.id),
@@ -448,6 +445,7 @@ export async function commitImportedProject(
         const record = mediaById.get(mediaId)!;
         mediaStore.put({
           ...record,
+          projectId: snapshot.project.id,
           projectIncarnation,
           state: "committed",
           importSessionId: null,

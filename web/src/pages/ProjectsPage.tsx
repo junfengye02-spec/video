@@ -2,16 +2,11 @@ import { Download, FilePlus2, FolderOpen, Trash2, Upload, X } from "lucide-react
 import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { projectRoutes } from "../app/routes";
+import { projectRepository } from "../features/projects/ProjectRepository";
 import { getStrings } from "../i18n";
-import {
-  exportProjectBackup,
-  importProjectBackup,
-  importProjectBackupDirectory,
-  ProjectImportConflictError,
-} from "../localdb/exportProject";
+import { ProjectImportConflictError } from "../localdb/exportProject";
 import { BackupWorkerUnavailableError } from "../localdb/backupArchiveClient";
 import type { BackupReadProgress } from "../localdb/backupFormat";
-import { deleteProject, listProjectSummaries } from "../localdb/projectStore";
 import type { LocalProjectSummary } from "../localdb/types";
 import { downloadBlob } from "../utils/downloadBlob";
 
@@ -53,7 +48,7 @@ export function ProjectsPage() {
   useEffect(() => {
     let active = true;
 
-    listProjectSummaries()
+    projectRepository.list()
       .then((summaries) => {
         if (active) setProjects(summaries);
       })
@@ -76,7 +71,7 @@ export function ProjectsPage() {
     setError(null);
 
     try {
-      await deleteProject(deleteTarget.id);
+      await projectRepository.delete(deleteTarget.id);
       setProjects((current) => current.filter((project) => project.id !== deleteTarget.id));
       setDeleteTarget(null);
     } catch (deleteError) {
@@ -116,7 +111,7 @@ export function ProjectsPage() {
     setError(null);
 
     try {
-      const blob = await exportProjectBackup(project.id);
+      const blob = await projectRepository.exportBackup(project.id);
       downloadBlob(blob, `${project.title}.omproj`);
     } catch (exportError) {
       setError(errorMessage(exportError, strings.exportError));
@@ -139,8 +134,8 @@ export function ProjectsPage() {
         onProgress: (progress: BackupReadProgress) => { setImportProgress(progress); },
       };
       const snapshot = source.kind === "archive"
-        ? await importProjectBackup(source.file, options)
-        : await importProjectBackupDirectory(source.files, options);
+        ? await projectRepository.importBackup(source.file, options)
+        : await projectRepository.importBackupDirectory(source.files, options);
       navigate(projectRoutes.storyboard(snapshot.project.id));
     } catch (importError) {
       if (importError instanceof ProjectImportConflictError && !overwrite) {

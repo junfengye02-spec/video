@@ -417,6 +417,36 @@ describe("projectStore", () => {
     expect(await getRecord("mediaOperations", sessionId)).toBeNull();
   });
 
+  it("commits a staged import under the canonical server project id", async () => {
+    const sessionId = await projectImportApi.beginProjectImport("legacy-import");
+    const writer = await beginMediaWrite({
+      projectId: "legacy-import",
+      importSessionId: sessionId,
+      sourcePath: "assets/imported.mp4",
+      contentType: "video/mp4",
+      sizeBytes: 5,
+    });
+    await writer.write(new TextEncoder().encode("video"));
+    await writer.commit();
+
+    await projectImportApi.commitImportedProject(
+      snapshot("server-import", "Imported", { finalPath: writer.mediaRef }),
+      sessionId,
+      { overwrite: false, leaseOwner: sessionId },
+    );
+
+    const mediaId = writer.mediaRef.split("/").pop()!;
+    expect(await loadProjectSnapshot("legacy-import")).toBeNull();
+    expect(await loadProjectSnapshot("server-import")).toMatchObject({
+      title: "Imported",
+    });
+    expect(await getRecord<LocalMediaRecord>("media", mediaId)).toMatchObject({
+      projectId: "server-import",
+      state: "committed",
+      importSessionId: null,
+    });
+  });
+
   it("aborts every queued final-import write when a later media put throws", async () => {
     await saveProjectSnapshot(snapshot("existing", "Existing"));
     const sessionId = await projectImportApi.beginProjectImport("atomic-failure");

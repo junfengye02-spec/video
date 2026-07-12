@@ -53,6 +53,12 @@ export type ImportProjectBackupOptions = {
   onProgress?: (progress: BackupReadProgress) => void | Promise<void>;
 };
 
+export interface PreparedProjectBackupImport {
+  snapshot: ShortDramaProjectResponse;
+  commit(snapshot?: ShortDramaProjectResponse): Promise<void>;
+  abort(cause?: unknown): Promise<void>;
+}
+
 type BackupReader = (
   callbacks: BackupEntryCallbacks,
   signal?: AbortSignal,
@@ -243,10 +249,10 @@ function throwIfImportAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError();
 }
 
-async function importProjectBackupFromReader(
+async function prepareProjectBackupImportFromReader(
   readBackup: BackupReader,
   options: ImportProjectBackupOptions = {},
-): Promise<ShortDramaProjectResponse> {
+): Promise<PreparedProjectBackupImport> {
   const refMap = new Map<LocalMediaRef, LocalMediaRef>();
   let sessionId: string | null = null;
   let activeWriter: {
@@ -321,11 +327,25 @@ async function importProjectBackupFromReader(
     throwIfImportAborted(options.signal);
     await renewImportSessionLease(sessionId);
     throwIfImportAborted(options.signal);
-    await commitImportedProject(validatedSnapshot, sessionId, {
-      overwrite: options.overwrite ?? false,
-      leaseOwner: sessionId,
-    });
-    return validatedSnapshot;
+    return {
+      snapshot: validatedSnapshot,
+      async commit(snapshot = validatedSnapshot) {
+        if (!sessionId) throw new Error("Backup import session was not established");
+        throwIfImportAborted(options.signal);
+        await renewImportSessionLease(sessionId);
+        throwIfImportAborted(options.signal);
+        await commitImportedProject(snapshot, sessionId, {
+          overwrite: options.overwrite ?? false,
+          leaseOwner: sessionId,
+        });
+      },
+      async abort(cause?: unknown) {
+        if (sessionId) {
+          await abortProjectImport(sessionId, cause).catch(() => undefined);
+          await runMediaRecovery().catch(() => undefined);
+        }
+      },
+    };
   } catch (error) {
     const wasAborted = options.signal?.aborted ?? false;
     await abortActiveWriter(error);
@@ -336,6 +356,40 @@ async function importProjectBackupFromReader(
     if (wasAborted) throw abortError();
     throw error;
   }
+}
+
+async function importProjectBackupFromReader(
+  readBackup: BackupReader,
+  options: ImportProjectBackupOptions = {},
+): Promise<ShortDramaProjectResponse> {
+  const prepared = await prepareProjectBackupImportFromReader(readBackup, options);
+  try {
+    await prepared.commit();
+    return prepared.snapshot;
+  } catch (error) {
+    await prepared.abort(error);
+    throw error;
+  }
+}
+
+export function prepareProjectBackupImport(
+  file: File,
+  options: ImportProjectBackupOptions = {},
+): Promise<PreparedProjectBackupImport> {
+  return prepareProjectBackupImportFromReader(
+    (callbacks, signal) => readBackupArchive(file, callbacks, signal),
+    options,
+  );
+}
+
+export function prepareProjectBackupDirectoryImport(
+  files: Iterable<File> | ArrayLike<File>,
+  options: ImportProjectBackupOptions = {},
+): Promise<PreparedProjectBackupImport> {
+  return prepareProjectBackupImportFromReader(
+    (callbacks, signal) => readBackupDirectory(files, callbacks, signal),
+    options,
+  );
 }
 
 export function importProjectBackup(
