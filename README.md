@@ -222,6 +222,30 @@ For a phase-two database rollback, stop application writes, deploy the matching 
 
 Password reset, account bans, and administrator role changes revoke affected sessions. Operational account changes must call `SessionStore.revoke_all(user.id)` after the database commit; deleting browser cookies alone is not server-side revocation. Rotating `AUTH_HMAC_SECRET` invalidates verification material and should be treated as a coordinated incident operation, not routine session cleanup.
 
+### Billing and payment operations
+
+Provider billing is alias based. Configure `NEWAPI_TEXT_TOKEN_KEYS_JSON`, `NEWAPI_IMAGE_TOKEN_KEYS_JSON`, and `NEWAPI_VIDEO_TOKEN_KEYS_JSON` as JSON objects whose keys are non-secret aliases and whose values come from the secret store. Point `NEWAPI_TEXT_CURRENT_TOKEN_ALIAS`, `NEWAPI_IMAGE_CURRENT_TOKEN_ALIAS`, and `NEWAPI_VIDEO_CURRENT_TOKEN_ALIAS` at the active alias for each capability. During rotation, add the new alias, switch the current alias, and keep old aliases until no `generation_jobs`, receipts, or open reconciliations reference them. Do not put raw NewAPI tokens in README, `.env.example`, browser storage, project exports, responses, or logs.
+
+Set `BILLING_REFERENCE_RECOVERY_SECONDS`, `BILLING_RECEIPT_DEADLINE_SECONDS`, and `BILLING_HOLD_TIMEOUT_SECONDS` to the operator-approved recovery windows. NewAPI quote IDs, token aliases, quote billing fingerprints, and staged receipt metadata are retained so accepted provider calls can be recovered without replaying the accepted quote. If a provider accepted a request but the response was lost, do not submit the quote again; run the reconciliation worker and let the reference/receipt recovery path resolve the original job. Receipts with `refund_pending` mean the provider has not completed the refund; keep the wallet hold/reconciliation open until a later receipt reports `refunded` or the incident is manually resolved with audit notes.
+
+Configure EPay/Alipay with `EPAY_PAY_ADDRESS`, `EPAY_ID`, and `EPAY_KEY`. `PUBLIC_ORIGIN` must be the public HTTPS origin because it derives the callback URLs sent to EPay: `/api/payments/epay/notify` and `/api/payments/epay/return`. Only a signed notify may credit a wallet. A signed return URL is display-only and must never credit a pending order by itself.
+
+Run exactly one supervised billing reconciliation worker per environment:
+
+```bash
+python -m server.billing_worker
+```
+
+For operator recovery, a one-shot run is also available:
+
+```bash
+python -m server.manage reconcile-billing --once
+```
+
+Alert on any worker exit loop, missing worker process, open reconciliations past their next retry time, increasing reconciliation attempts, generation jobs stuck in reference recovery or receipt pending states, holds older than `BILLING_HOLD_TIMEOUT_SECONDS`, aging `refund_pending` receipts, repeated EPay notify `fail` responses, NewAPI quote stale/rate-limit spikes, and errors writing or reading `.billing-results` artifacts.
+
+Before enabling production Alipay, run the sandbox checklist with a dedicated product and masked IDs only: create one exact-amount order, submit one valid signed `TRADE_SUCCESS` notify and verify `success`, one paid transition, and one `topup:{order_id}` wallet entry; submit the identical notify concurrently eight times and verify no extra credit; submit a signed one-fen mismatch to a fresh order and verify `fail` with zero credit; visit only a signed return URL for another pending order and verify status display with zero credit.
+
 ## Billing handoff
 
 Billing consumes OpenMontage identity and database boundaries through only these imports:

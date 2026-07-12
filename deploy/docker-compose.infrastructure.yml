@@ -30,3 +30,19 @@ services:
 volumes:
   postgres_data:
   redis_data:
+
+x-openmontage-operations:
+  billing_worker:
+    command: python -m server.billing_worker
+    one_shot_command: python -m server.manage reconcile-billing --once
+    supervision: run exactly one worker process per environment with restart-on-failure
+    requires:
+      - DATABASE_URL
+      - REDIS_URL
+      - AUTH_HMAC_SECRET
+      - NEWAPI_TEXT_TOKEN_KEYS_JSON
+      - NEWAPI_IMAGE_TOKEN_KEYS_JSON
+      - NEWAPI_VIDEO_TOKEN_KEYS_JSON
+      - BILLING_REFERENCE_RECOVERY_SECONDS
+      - BILLING_RECEIPT_DEADLINE_SECONDS
+      - BILLING_HOLD_TIMEOUT_SECONDS
