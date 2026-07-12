@@ -367,4 +367,3 @@ Expected: all tests/build pass; no production credential matches.
 - [ ] **Step 3: Report Session 6 interfaces**
 
 Report commits and exact exported interfaces for `HttpClient`, `ProjectRepository`, `BrowserProjectCache`, `MediaRepository`, and `GenerationService`; backend delete behavior; test totals; and preserved dirty files. Session 6 starts only after this gate is green.
-

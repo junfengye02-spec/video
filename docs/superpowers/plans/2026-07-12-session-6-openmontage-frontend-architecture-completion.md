@@ -296,4 +296,3 @@ git log -15 --oneline
 ```
 
 Report all commits, automated totals, build result, three-viewport workflows, architecture scans, remaining Alipay-only external gate if any, and preserved unrelated changes. Do not claim completion without fresh evidence from this final tree.
-

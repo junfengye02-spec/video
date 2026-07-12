@@ -298,4 +298,3 @@ Expected: sensitive names occur only in negative/redaction tests or internal sel
 - [ ] **Step 4: Handoff**
 
 Report commit hashes, endpoint/method matrix, response model fields, focused/full test totals, migration result, and preserved dirty files. Session 3 starts only when these APIs and their tests are green.
-
