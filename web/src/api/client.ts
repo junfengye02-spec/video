@@ -2,11 +2,9 @@ import type {
   ContinuityPlan,
   ContinuityPlanResponse,
   DraftProjectRequest,
-  GatewayKeySession,
   JobEvent,
   PromptOptimizeRequest,
   PromptOptimizeResponse,
-  ProviderCredentials,
   ReferenceImageUploadRequest,
   ReferenceImageUploadResponse,
   RenderProjectRequest,
@@ -107,13 +105,6 @@ export function mediaUrl(path: string | null | undefined, projectId?: string | n
     return `/api/projects/${encodeURIComponent(projectId)}/media/${encodedPath}`;
   }
   return null;
-}
-
-export function saveGatewayKey(
-  payload: ProviderCredentials,
-  fetcher?: typeof fetch,
-): Promise<GatewayKeySession> {
-  return postJson<GatewayKeySession>("/api/session/key", payload, fetcher);
 }
 
 export function createShortDramaProject(

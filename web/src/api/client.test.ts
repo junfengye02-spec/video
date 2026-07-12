@@ -28,7 +28,7 @@ describe("mediaUrl", () => {
 });
 
 describe("createShortDramaProject", () => {
-  it("posts prompt, provider keys, and model choices to backend", async () => {
+  it("posts only project planning fields to backend", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ project: { id: "p1", title: "Rain Alley" } }),
@@ -38,13 +38,6 @@ describe("createShortDramaProject", () => {
       {
         title: "Rain Alley",
         prompt: "rainy short drama",
-        text_key: "text-key",
-        image_key: "image-key",
-        video_key: "video-key",
-        base_url: "https://api.0000238.xyz",
-        text_model: "gpt-5.5",
-        image_model: "gpt-image-2",
-        video_model: "veo_3_1-lite",
       },
       fetchMock as unknown as typeof fetch,
     );
@@ -56,13 +49,6 @@ describe("createShortDramaProject", () => {
         body: JSON.stringify({
           title: "Rain Alley",
           prompt: "rainy short drama",
-          text_key: "text-key",
-          image_key: "image-key",
-          video_key: "video-key",
-          base_url: "https://api.0000238.xyz",
-          text_model: "gpt-5.5",
-          image_model: "gpt-image-2",
-          video_model: "veo_3_1-lite",
         }),
       }),
     );
@@ -111,13 +97,6 @@ describe("createShortDramaProject", () => {
       {
         title: "Rain Alley",
         prompt: "rainy short drama",
-        text_key: "text-key",
-        image_key: "image-key",
-        video_key: "video-key",
-        base_url: "https://api.0000238.xyz",
-        text_model: "gpt-5.5",
-        image_model: "gpt-image-2",
-        video_model: "veo_3_1-lite",
       },
       fetchMock as unknown as typeof fetch,
     );
@@ -324,9 +303,6 @@ describe("optimizePrompt", () => {
       target: "shot",
       target_id: "s1",
       source_text: "Lin opens envelope.",
-      text_key: "text-key",
-      base_url: "https://api.0000238.xyz",
-      text_model: "gpt-5.5",
       mode: "shot_json",
     };
 
@@ -355,9 +331,6 @@ describe("optimizePrompt", () => {
       target: "project",
       target_id: "brief-1",
       source_text: "Lin opens envelope.",
-      text_key: "text-key",
-      base_url: "https://api.0000238.xyz",
-      text_model: "gpt-5.5",
     };
 
     const result = await optimizePrompt("p1", payload, fetchMock as unknown as typeof fetch);
@@ -376,7 +349,7 @@ describe("optimizePrompt", () => {
 });
 
 describe("regenerateShot", () => {
-  it("posts provider fields only to the regenerate endpoint", async () => {
+  it("posts an empty browser payload to the regenerate endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -393,11 +366,7 @@ describe("regenerateShot", () => {
         },
       }),
     });
-    const payload: ShotRegenerateRequest = {
-      video_key: "video-key",
-      base_url: "https://api.0000238.xyz",
-      video_model: "omni_flash-10s",
-    };
+    const payload: ShotRegenerateRequest = {};
 
     const result = await regenerateShot("p1", "s1", payload, fetchMock as unknown as typeof fetch);
 
@@ -412,7 +381,7 @@ describe("regenerateShot", () => {
 });
 
 describe("renderProject", () => {
-  it("posts only the required video key and render choices to the project render endpoint", async () => {
+  it("posts only render choices to the project render endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ final_path: "projects/p1/renders/final.mp4" }),
@@ -421,9 +390,6 @@ describe("renderProject", () => {
     const result = await renderProject(
       "p1",
       {
-        video_key: "video-key",
-        base_url: "https://api.0000238.xyz",
-        video_model: "veo_3_1-fast-fl",
         render_runtime: "ffmpeg",
       },
       fetchMock as unknown as typeof fetch,
@@ -434,9 +400,6 @@ describe("renderProject", () => {
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
-          video_key: "video-key",
-          base_url: "https://api.0000238.xyz",
-          video_model: "veo_3_1-fast-fl",
           render_runtime: "ffmpeg",
         }),
       }),

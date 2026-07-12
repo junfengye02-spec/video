@@ -89,7 +89,6 @@ export interface UIStrings {
     longSeries: string;
     promptLabel: string;
     promptPlaceholder: string;
-    openProvider: string;
     createAction: string;
     creatingAction: string;
     createError: string;
@@ -109,20 +108,6 @@ export interface UIStrings {
     longSeries: string;
     lockedHint: string;
   };
-  keyGate: {
-    textKeyLabel: string;
-    imageKeyLabel: string;
-    videoKeyLabel: string;
-    textModelLabel: string;
-    imageModelLabel: string;
-    videoModelLabel: string;
-    baseUrlLabel: string;
-    useKeysAction: string;
-    updateKeysAction: string;
-    checkingAction: string;
-    keysNotSet: string;
-    activeKeysStatus: (maskedKeys: { text: string; image: string; video: string }) => string;
-  };
   chatPanel: {
     regionLabel: string;
     title: string;
@@ -132,9 +117,6 @@ export interface UIStrings {
     creatingStoryboardAction: string;
   };
   errors: {
-    saveKeysRequiresAll: string;
-    saveKeysFallback: string;
-    createStoryboardRequiresKeys: string;
     createProjectFallback: string;
     renderRequiresStoryboard: string;
     renderFallback: string;
@@ -147,9 +129,6 @@ export interface UIStrings {
     exportProjectFallback: string;
     importProjectFallback: string;
     downloadFinalVideoFallback: string;
-    missingTextKeyForOptimize: string;
-    missingVideoKeyForRender: string;
-    missingVideoKeyForRegenerate: string;
     regenerateShotFallback: (shotId: string) => string;
   };
   shotEditor: {
@@ -453,7 +432,6 @@ const STRINGS: Record<Locale, UIStrings> = {
       longSeries: "Long series",
       promptLabel: "Story and visual requirements",
       promptPlaceholder: "Describe the story, characters, mood, and visual direction.",
-      openProvider: "Open provider settings",
       createAction: "Plan storyboard with AI",
       creatingAction: "Planning storyboard...",
       createError: "Unable to plan the storyboard.",
@@ -473,20 +451,6 @@ const STRINGS: Record<Locale, UIStrings> = {
       longSeries: "Long series",
       lockedHint: "Project type is locked after creation.",
     },
-    keyGate: {
-      textKeyLabel: "Text API Key",
-      imageKeyLabel: "Image API Key",
-      videoKeyLabel: "Video API Key",
-      textModelLabel: "Text Model",
-      imageModelLabel: "Image Model",
-      videoModelLabel: "Video Model",
-      baseUrlLabel: "Gateway Base URL",
-      useKeysAction: "Validate keys",
-      updateKeysAction: "Revalidate keys",
-      checkingAction: "Validating",
-      keysNotSet: "Keys not validated",
-      activeKeysStatus: (maskedKeys) => `Active T ${maskedKeys.text} / I ${maskedKeys.image} / V ${maskedKeys.video}`,
-    },
     chatPanel: {
       regionLabel: "Production assistant",
       title: "Production Assistant",
@@ -496,9 +460,6 @@ const STRINGS: Record<Locale, UIStrings> = {
       creatingStoryboardAction: "Creating",
     },
     errors: {
-      saveKeysRequiresAll: "Enter text, image, and video API keys first.",
-      saveKeysFallback: "Unable to validate keys.",
-      createStoryboardRequiresKeys: "Enter text, image, and video API keys before creating a storyboard.",
       createProjectFallback: "Unable to create project.",
       renderRequiresStoryboard: "Create a storyboard before rendering final video.",
       renderFallback: "Unable to render final video.",
@@ -512,9 +473,6 @@ const STRINGS: Record<Locale, UIStrings> = {
       exportProjectFallback: "Project export failed.",
       importProjectFallback: "Project import failed.",
       downloadFinalVideoFallback: "Final video download failed.",
-      missingTextKeyForOptimize: "Enter a text API key before optimizing a shot prompt.",
-      missingVideoKeyForRender: "Enter a video API key before rendering final video.",
-      missingVideoKeyForRegenerate: "Enter a video API key before regenerating a shot.",
       regenerateShotFallback: (shotId: string) => `Unable to regenerate ${shotId}.`,
     },
     shotEditor: {
@@ -893,7 +851,6 @@ const STRINGS: Record<Locale, UIStrings> = {
       longSeries: "\u957f\u7cfb\u5217",
       promptLabel: "\u6545\u4e8b\u4e0e\u753b\u9762\u8981\u6c42",
       promptPlaceholder: "\u63cf\u8ff0\u6545\u4e8b\u3001\u89d2\u8272\u3001\u6c1b\u56f4\u548c\u753b\u9762\u65b9\u5411\u3002",
-      openProvider: "\u6253\u5f00\u63a5\u53e3\u914d\u7f6e",
       createAction: "AI \u89c4\u5212\u5206\u955c",
       creatingAction: "\u6b63\u5728\u89c4\u5212\u5206\u955c...",
       createError: "\u65e0\u6cd5\u89c4\u5212\u5206\u955c\u3002",
@@ -913,21 +870,6 @@ const STRINGS: Record<Locale, UIStrings> = {
       longSeries: "\u957f\u7cfb\u5217",
       lockedHint: "\u9879\u76ee\u521b\u5efa\u540e\uff0c\u9879\u76ee\u7c7b\u578b\u4e0d\u53ef\u66f4\u6539\u3002",
     },
-    keyGate: {
-      textKeyLabel: "Text API \u5bc6\u94a5",
-      imageKeyLabel: "Image API \u5bc6\u94a5",
-      videoKeyLabel: "Video API \u5bc6\u94a5",
-      textModelLabel: "Text \u6a21\u578b",
-      imageModelLabel: "Image \u6a21\u578b",
-      videoModelLabel: "Video \u6a21\u578b",
-      baseUrlLabel: "\u7f51\u5173 Base URL",
-      useKeysAction: "\u9a8c\u8bc1\u5bc6\u94a5",
-      updateKeysAction: "\u91cd\u65b0\u9a8c\u8bc1\u5bc6\u94a5",
-      checkingAction: "\u6b63\u5728\u9a8c\u8bc1",
-      keysNotSet: "\u5bc6\u94a5\u672a\u9a8c\u8bc1",
-      activeKeysStatus: (maskedKeys) =>
-        `\u5f53\u524d T ${maskedKeys.text} / I ${maskedKeys.image} / V ${maskedKeys.video}`,
-    },
     chatPanel: {
       regionLabel: "\u5236\u4f5c\u52a9\u624b",
       title: "\u5236\u4f5c\u52a9\u624b",
@@ -937,10 +879,6 @@ const STRINGS: Record<Locale, UIStrings> = {
       creatingStoryboardAction: "\u6b63\u5728\u521b\u5efa",
     },
     errors: {
-      saveKeysRequiresAll: "\u8bf7\u5148\u8f93\u5165 text\u3001image \u548c video API key\u3002",
-      saveKeysFallback: "\u65e0\u6cd5\u9a8c\u8bc1 key\u3002",
-      createStoryboardRequiresKeys:
-        "\u8bf7\u5148\u8f93\u5165 text\u3001image \u548c video API key\uff0c\u518d\u521b\u5efa\u6545\u4e8b\u677f\u3002",
       createProjectFallback: "\u65e0\u6cd5\u521b\u5efa\u9879\u76ee\u3002",
       renderRequiresStoryboard: "\u8bf7\u5148\u521b\u5efa\u6545\u4e8b\u677f\uff0c\u518d\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
       renderFallback: "\u65e0\u6cd5\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
@@ -954,12 +892,6 @@ const STRINGS: Record<Locale, UIStrings> = {
       exportProjectFallback: "\u9879\u76ee\u5bfc\u51fa\u5931\u8d25\u3002",
       importProjectFallback: "\u9879\u76ee\u5bfc\u5165\u5931\u8d25\u3002",
       downloadFinalVideoFallback: "\u6700\u7ec8\u89c6\u9891\u4e0b\u8f7d\u5931\u8d25\u3002",
-      missingTextKeyForOptimize:
-        "\u8bf7\u5148\u8f93\u5165 text API key\uff0c\u518d\u4f18\u5316\u955c\u5934\u63d0\u793a\u8bcd\u3002",
-      missingVideoKeyForRender:
-        "\u8bf7\u5148\u8f93\u5165 video API key\uff0c\u518d\u6e32\u67d3\u6700\u7ec8\u89c6\u9891\u3002",
-      missingVideoKeyForRegenerate:
-        "\u8bf7\u5148\u8f93\u5165 video API key\uff0c\u518d\u91cd\u65b0\u751f\u6210\u955c\u5934\u3002",
       regenerateShotFallback: (shotId: string) =>
         `\u65e0\u6cd5\u91cd\u65b0\u751f\u6210\u955c\u5934 ${shotId}\u3002`,
     },

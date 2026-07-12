@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppShell } from "./AppShell";
@@ -14,7 +14,6 @@ describe("AppShell", () => {
     const props = {
       children: <div />,
       project: { id: "p1", title: "雨夜来信", mode: "short_drama" as const },
-      providerPanel: <div>接口表单</div>,
       onBeforeNavigate,
     } as ComponentProps<typeof AppShell>;
     render(
@@ -34,15 +33,27 @@ describe("AppShell", () => {
     expect(onBeforeNavigate).toHaveBeenCalledTimes(5);
   });
 
-  it("shows project navigation and keeps recharge as a development notice", () => {
+  it("navigates the wallet action and removes provider configuration controls", async () => {
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
-        <AppShell
-          project={{ id: "p1", title: "雨夜来信", mode: "short_drama" }}
-          providerPanel={<div>接口表单</div>}
-        >
-          <div>页面内容</div>
-        </AppShell>
+      <MemoryRouter
+        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+        initialEntries={["/projects/p1/storyboard"]}
+      >
+        <Routes>
+          <Route
+            path="/projects/:projectId/storyboard"
+            element={(
+              <AppShell
+                project={{ id: "p1", title: "雨夜来信", mode: "short_drama" }}
+                accountEmail="user@example.com"
+                walletAvailableUnits={1234}
+              >
+                <div>页面内容</div>
+              </AppShell>
+            )}
+          />
+          <Route path="/wallet" element={<h1>Wallet destination</h1>} />
+        </Routes>
       </MemoryRouter>,
     );
 
@@ -50,51 +61,47 @@ describe("AppShell", () => {
       "href",
       "/projects/p1/storyboard",
     );
-    expect(screen.queryByRole("link", { name: "钱包" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "接口配置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: /credential/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "充值" }));
-    expect(screen.getByRole("status")).toHaveTextContent("功能开发中");
+    fireEvent.click(screen.getByRole("link", { name: /钱包 1,234/ }));
+    expect(await screen.findByRole("heading", { name: "Wallet destination" })).toBeInTheDocument();
   });
 
-  it("opens and closes the interface configuration drawer", () => {
-    const onOpenChange = vi.fn();
-    render(
+  it("shows account actions and only exposes billing administration to admins", () => {
+    const onLogout = vi.fn();
+    const { rerender } = render(
       <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
         <AppShell
           project={null}
-          providerPanel={<div>接口表单</div>}
-          providerOpen={false}
-          onProviderOpenChange={onOpenChange}
+          accountEmail="user@example.com"
+          onLogout={onLogout}
         >
           <div>项目列表</div>
         </AppShell>
       </MemoryRouter>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "接口配置" }));
-    expect(onOpenChange).toHaveBeenCalledWith(true);
-  });
+    expect(screen.getByText("user@example.com")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "账单管理" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "退出" }));
+    expect(onLogout).toHaveBeenCalledTimes(1);
 
-  it("focuses the provider drawer, closes it on Escape and restores its opener", async () => {
-    render(
+    rerender(
       <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
-        <AppShell project={null} providerPanel={<label>接口字段<input /></label>}>
+        <AppShell
+          project={null}
+          accountEmail="admin@example.com"
+          isAdmin
+        >
           <div>项目列表</div>
         </AppShell>
       </MemoryRouter>,
     );
 
-    const opener = screen.getByRole("button", { name: "接口配置" });
-    fireEvent.click(opener);
-
-    const drawer = screen.getByRole("dialog", { name: "接口配置" });
-    const close = within(drawer).getByRole("button", { name: "关闭接口配置" });
-    expect(close).toHaveAttribute("title", "关闭接口配置");
-    await waitFor(() => expect(close).toHaveFocus());
-
-    fireEvent.keyDown(drawer, { key: "Escape" });
-
-    expect(screen.queryByRole("dialog", { name: "接口配置" })).not.toBeInTheDocument();
-    await waitFor(() => expect(opener).toHaveFocus());
+    expect(screen.getByRole("link", { name: "账单管理" })).toHaveAttribute(
+      "href",
+      "/admin/billing",
+    );
   });
 });

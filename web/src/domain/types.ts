@@ -10,34 +10,6 @@ export interface Project {
   updated_at?: string;
 }
 
-export interface GatewayKeySession {
-  masked_keys: {
-    text: string;
-    image: string;
-    video: string;
-  };
-  provider: "syapi";
-  base_url: string;
-  models: ProviderModels;
-  valid: boolean;
-}
-
-export interface ProviderCredentials {
-  text_key: string;
-  image_key: string;
-  video_key: string;
-  base_url: string;
-  text_model: string;
-  image_model: string;
-  video_model: string;
-}
-
-export interface ProviderModels {
-  text: string;
-  image: string;
-  video: string;
-}
-
 export interface Character {
   id: string;
   name: string;
@@ -233,13 +205,6 @@ export interface ShortDramaProjectRequest {
   prompt: string;
   project_type?: ProjectType;
   shot_count?: number;
-  text_key: string;
-  image_key: string;
-  video_key: string;
-  base_url: string;
-  text_model: string;
-  image_model: string;
-  video_model: string;
 }
 
 export interface ShortDramaProjectResponse {
@@ -300,13 +265,6 @@ export interface RenderProjectResponse {
 }
 
 export interface RenderProjectRequest {
-  text_key?: string | null;
-  image_key?: string | null;
-  video_key: string;
-  base_url: string;
-  text_model?: string | null;
-  image_model?: string | null;
-  video_model: string;
   render_runtime: "ffmpeg";
 }
 
@@ -314,9 +272,6 @@ export interface PromptOptimizeRequest {
   target: "project" | "shot" | "asset";
   target_id: string;
   source_text: string;
-  text_key: string;
-  base_url: string;
-  text_model: string;
   mode?: "text" | "shot_json";
 }
 
@@ -339,11 +294,7 @@ export interface ShotSaveRequest {
   shot_language?: ShotLanguage | null;
 }
 
-export interface ShotRegenerateRequest {
-  video_key: string;
-  base_url: string;
-  video_model: string;
-}
+export type ShotRegenerateRequest = Record<string, never>;
 
 export interface ContinuityPlanResponse {
   project: Project;

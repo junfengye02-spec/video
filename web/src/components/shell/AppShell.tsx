@@ -1,61 +1,38 @@
-import { CreditCard, Settings2, X } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { CreditCard, LogOut, ReceiptText, ShieldCheck, UserCircle } from "lucide-react";
+import type { MouseEvent, ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
-import type { Project } from "../../domain/types";
 import { projectRoutes } from "../../app/routes";
-import { ToastRegion } from "../feedback/ToastRegion";
+import type { Project } from "../../domain/types";
 
 export interface AppShellProps {
   children: ReactNode;
   project: Project | null;
-  providerPanel: ReactNode;
-  providerOpen?: boolean;
+  accountEmail?: string | null;
+  isAdmin?: boolean;
+  walletAvailableUnits?: number | null;
+  walletLoading?: boolean;
   onBeforeNavigate?: () => boolean;
-  onProviderOpenChange?: (open: boolean) => void;
+  onLogout?: () => void | Promise<void>;
+}
+
+function walletLabel(value: number | null | undefined, loading: boolean): string {
+  if (loading || value === null || value === undefined) return "钱包";
+  return `钱包 ${value.toLocaleString("zh-CN")}`;
 }
 
 export function AppShell({
   children,
   project,
-  providerPanel,
-  providerOpen,
+  accountEmail,
+  isAdmin = false,
+  walletAvailableUnits,
+  walletLoading = false,
   onBeforeNavigate,
-  onProviderOpenChange,
+  onLogout,
 }: AppShellProps) {
-  const [localProviderOpen, setLocalProviderOpen] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
-  const providerOpenerRef = useRef<HTMLButtonElement>(null);
-  const providerWasOpenRef = useRef(false);
-  const drawerOpen = providerOpen ?? localProviderOpen;
-  const setDrawerOpen = onProviderOpenChange ?? setLocalProviderOpen;
-
   const handleNavigate = (event: MouseEvent<HTMLAnchorElement>) => {
     if (onBeforeNavigate && !onBeforeNavigate()) {
       event.preventDefault();
-    }
-  };
-
-  useEffect(() => {
-    if (!toast) return;
-    const timer = window.setTimeout(() => setToast(null), 2400);
-    return () => window.clearTimeout(timer);
-  }, [toast]);
-
-  useEffect(() => {
-    if (drawerOpen) {
-      providerWasOpenRef.current = true;
-      return;
-    }
-    if (providerWasOpenRef.current) {
-      providerWasOpenRef.current = false;
-      providerOpenerRef.current?.focus();
-    }
-  }, [drawerOpen]);
-
-  const handleDrawerKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setDrawerOpen(false);
     }
   };
 
@@ -71,15 +48,37 @@ export function AppShell({
   return (
     <div className="workbench-shell">
       <header className="workbench-topbar">
-        <Link className="workbench-brand" to={projectRoutes.list} onClick={handleNavigate}>OpenMontage</Link>
+        <Link className="workbench-brand" to={projectRoutes.list} onClick={handleNavigate}>
+          OpenMontage
+        </Link>
         <span className="workbench-project-title">{project?.title ?? "项目工作台"}</span>
         <div className="workbench-topbar-actions">
-          <button ref={providerOpenerRef} type="button" onClick={() => setDrawerOpen(true)}>
-            <Settings2 aria-hidden="true" size={16} />接口配置
-          </button>
-          <button type="button" onClick={() => setToast("功能开发中")}>
-            <CreditCard aria-hidden="true" size={16} />充值
-          </button>
+          <Link to={projectRoutes.wallet} onClick={handleNavigate}>
+            <CreditCard aria-hidden="true" size={16} />
+            {walletLabel(walletAvailableUnits, walletLoading)}
+          </Link>
+          <Link to={projectRoutes.orders} onClick={handleNavigate}>
+            <ReceiptText aria-hidden="true" size={16} />
+            订单
+          </Link>
+          {isAdmin ? (
+            <Link to={projectRoutes.adminBilling} onClick={handleNavigate}>
+              <ShieldCheck aria-hidden="true" size={16} />
+              账单管理
+            </Link>
+          ) : null}
+          {accountEmail ? (
+            <span className="workbench-account">
+              <UserCircle aria-hidden="true" size={16} />
+              {accountEmail}
+            </span>
+          ) : null}
+          {onLogout ? (
+            <button type="button" onClick={() => void onLogout()}>
+              <LogOut aria-hidden="true" size={16} />
+              退出
+            </button>
+          ) : null}
         </div>
       </header>
       <div className="workbench-body">
@@ -92,27 +91,6 @@ export function AppShell({
         ) : null}
         <main className="workbench-content">{children}</main>
       </div>
-      {drawerOpen ? (
-        <div
-          className="drawer-layer"
-          role="dialog"
-          aria-modal="true"
-          aria-label="接口配置"
-          onKeyDown={handleDrawerKeyDown}
-        >
-          <button
-            type="button"
-            autoFocus
-            title="关闭接口配置"
-            aria-label="关闭接口配置"
-            onClick={() => setDrawerOpen(false)}
-          >
-            <X aria-hidden="true" size={18} />
-          </button>
-          {providerPanel}
-        </div>
-      ) : null}
-      <ToastRegion message={toast} />
     </div>
   );
 }

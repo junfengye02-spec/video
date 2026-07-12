@@ -1,4 +1,4 @@
-import { ArrowLeft, Settings2, Sparkles } from "lucide-react";
+import { ArrowLeft, Sparkles } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { projectRoutes } from "../app/routes";
@@ -7,8 +7,6 @@ import type { ProjectType, ShortDramaProjectResponse } from "../domain/types";
 import { getStrings } from "../i18n";
 
 export interface NewProjectPageProps {
-  providerReady: boolean;
-  onOpenProvider?: () => void;
   onCreate: (input: CreateProjectInput) => Promise<ShortDramaProjectResponse>;
   onCreated: (projectId: string, shotCount: number) => void;
 }
@@ -18,8 +16,6 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 export function NewProjectPage({
-  providerReady,
-  onOpenProvider,
   onCreate,
   onCreated,
 }: NewProjectPageProps) {
@@ -101,14 +97,7 @@ export function NewProjectPage({
 
         {error ? <p role="alert">{error}</p> : null}
 
-        {!providerReady ? (
-          <button type="button" onClick={onOpenProvider} disabled={!onOpenProvider || creating}>
-            <Settings2 aria-hidden="true" size={16} />
-            {strings.openProvider}
-          </button>
-        ) : null}
-
-        <button className="async-action" type="submit" disabled={!providerReady || creating}>
+        <button className="async-action" type="submit" disabled={creating}>
           <Sparkles aria-hidden="true" size={16} />
           {creating ? strings.creatingAction : strings.createAction}
         </button>

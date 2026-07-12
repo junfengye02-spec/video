@@ -17,7 +17,6 @@ import {
   regenerateShot,
   renderProject,
   saveContinuityPlan,
-  saveGatewayKey,
   saveShot,
   subscribeProjectEvents,
   uploadReferenceImage,
@@ -27,7 +26,6 @@ import type {
   ConsistencyReport,
   JobEvent,
   PromptOptimizeResponse,
-  ProviderCredentials,
   ReferenceImageUploadRequest,
   RenderProjectResponse,
   RenderReport,
@@ -65,21 +63,6 @@ import type {
   WorkbenchContextValue,
 } from "./types";
 
-const DEFAULT_BASE_URL = "https://api.0000238.xyz";
-const DEFAULT_TEXT_MODEL = "gpt-5.5";
-const DEFAULT_IMAGE_MODEL = "gpt-image-2";
-const DEFAULT_VIDEO_MODEL = "omni_flash-10s";
-
-const INITIAL_CREDENTIALS: ProviderCredentials = {
-  text_key: "",
-  image_key: "",
-  video_key: "",
-  base_url: DEFAULT_BASE_URL,
-  text_model: DEFAULT_TEXT_MODEL,
-  image_model: DEFAULT_IMAGE_MODEL,
-  video_model: DEFAULT_VIDEO_MODEL,
-};
-
 const INITIAL_BUSY: WorkbenchBusyState = {
   creating: false,
   downloading: false,
@@ -87,7 +70,6 @@ const INITIAL_BUSY: WorkbenchBusyState = {
   regeneratingShotId: null,
   rendering: false,
   savingContinuity: false,
-  savingProvider: false,
   savingShotId: null,
   uploadingReference: false,
 };
@@ -160,18 +142,6 @@ function sanitizeDownloadName(value: string | null | undefined): string {
     .replace(/[\\/:*?"<>|]+/g, "-")
     .replace(/\s+/g, " ")
     .slice(0, 80);
-}
-
-function normalizeCredentials(credentials: ProviderCredentials): ProviderCredentials {
-  return {
-    text_key: credentials.text_key.trim(),
-    image_key: credentials.image_key.trim(),
-    video_key: credentials.video_key.trim(),
-    base_url: credentials.base_url.trim(),
-    text_model: credentials.text_model.trim() || DEFAULT_TEXT_MODEL,
-    image_model: credentials.image_model.trim() || DEFAULT_IMAGE_MODEL,
-    video_model: credentials.video_model.trim() || DEFAULT_VIDEO_MODEL,
-  };
 }
 
 function mergeRegeneratedSnapshot(
@@ -274,7 +244,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const projectEpochRef = useRef(0);
   const operationSequencesRef = useRef({ ...INITIAL_OPERATION_SEQUENCES });
   const creationSequenceRef = useRef(0);
-  const providerSaveSequenceRef = useRef(0);
   const projectLoadGenerationRef = useRef(0);
   const pendingProjectLoadRef = useRef<{ generation: number; projectId: string } | null>(null);
   const previousMediaProjectIdRef = useRef<string | null>(null);
@@ -296,8 +265,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
   const [mediaGeneration, setMediaGeneration] = useState(0);
   const [mediaWakeVersion, setMediaWakeVersion] = useState(0);
   const [localBackupStatus, setLocalBackupStatus] = useState<LocalBackupStatus>("idle");
-  const [providerCredentials, setProviderCredentials] = useState(INITIAL_CREDENTIALS);
-  const [maskedKeys, setMaskedKeys] = useState<WorkbenchContextValue["maskedKeys"]>(null);
   const [busy, setBusy] = useState(INITIAL_BUSY);
 
   const updateLocalBackupStatus = useCallback(() => {
@@ -365,10 +332,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     projectLoadGenerationRef.current += 1;
     creationSequenceRef.current += 1;
     resetLocalBackupState();
-    setBusy((current) => ({
-      ...INITIAL_BUSY,
-      savingProvider: current.savingProvider,
-    }));
+    setBusy(INITIAL_BUSY);
   }, [clearScheduledBackgroundTasks, resetLocalBackupState]);
 
   const beginProjectOperation = useCallback(
@@ -564,7 +528,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       });
       projectLoadGenerationRef.current += 1;
       creationSequenceRef.current += 1;
-      providerSaveSequenceRef.current += 1;
       clearScheduledBackgroundTasks();
       backgroundCacheGenerationRef.current += 1;
       backgroundCacheJobsRef.current.clear();
@@ -706,17 +669,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
 
   const createProject = useCallback(
     async (input: CreateProjectInput): Promise<ShortDramaProjectResponse> => {
-      const credentials = normalizeCredentials(providerCredentials);
-      if (
-        !credentials.text_key
-        || !credentials.image_key
-        || !credentials.video_key
-        || maskedKeys === null
-      ) {
-        const message = strings.errors.createStoryboardRequiresKeys;
-        setError(message);
-        throw new Error(message);
-      }
       if (!input.prompt.trim()) {
         const message = strings.errors.createStoryboardRequiresPrompt;
         setError(message);
@@ -734,7 +686,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
           title: input.title,
           prompt: input.prompt,
           project_type: input.project_type,
-          ...credentials,
         });
         if (isCurrent()) {
           await applyAndPersistProjectSnapshot({ ...result, final_path: null }, isCurrent);
@@ -751,70 +702,15 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     [
       applyAndPersistProjectSnapshot,
       invalidateProjectOperations,
-      maskedKeys,
-      providerCredentials,
       setBusyValue,
       strings.errors,
     ],
-  );
-
-  const saveProvider = useCallback(async () => {
-    const credentials = normalizeCredentials(providerCredentials);
-    if (!credentials.text_key || !credentials.image_key || !credentials.video_key) {
-      const message = strings.errors.saveKeysRequiresAll;
-      setError(message);
-      throw new Error(message);
-    }
-
-    const sequence = providerSaveSequenceRef.current + 1;
-    providerSaveSequenceRef.current = sequence;
-    const isCurrent = () => sequence === providerSaveSequenceRef.current;
-    setBusyValue("savingProvider", true);
-    setError(null);
-    try {
-      const session = await saveGatewayKey(credentials);
-      if (!isCurrent()) return;
-      if (!session.valid) {
-        setMaskedKeys(null);
-        throw new Error(strings.errors.saveKeysFallback);
-      }
-      setMaskedKeys(session.masked_keys);
-      setProviderCredentials((current) => ({
-        ...current,
-        base_url: session.base_url,
-        text_model: session.models.text,
-        image_model: session.models.image,
-        video_model: session.models.video,
-      }));
-    } catch (providerError) {
-      const message = errorMessage(providerError, strings.errors.saveKeysFallback);
-      if (isCurrent()) setError(message);
-      throw providerError instanceof Error ? providerError : new Error(message);
-    } finally {
-      if (isCurrent()) setBusyValue("savingProvider", false);
-    }
-  }, [providerCredentials, setBusyValue, strings.errors.saveKeysFallback, strings.errors.saveKeysRequiresAll]);
-
-  const updateProviderField = useCallback(
-    <K extends keyof ProviderCredentials>(key: K, value: ProviderCredentials[K]) => {
-      if (providerCredentials[key] === value) return;
-      providerSaveSequenceRef.current += 1;
-      setMaskedKeys(null);
-      setBusyValue("savingProvider", false);
-      setProviderCredentials((current) => ({ ...current, [key]: value }));
-    },
-    [providerCredentials, setBusyValue],
   );
 
   const optimizeShotPrompt = useCallback(
     async (shot: Shot, sourceText: string): Promise<PromptOptimizeResponse> => {
       const current = snapshotRef.current;
       if (!current) throw new Error(strings.errors.optimizeShotFallback);
-      const credentials = normalizeCredentials(providerCredentials);
-      if (!credentials.text_key) {
-        setError(strings.errors.missingTextKeyForOptimize);
-        throw new Error(strings.errors.missingTextKeyForOptimize);
-      }
 
       const token = beginProjectOperation("optimize", current.project.id);
       setBusyValue("optimizingShotId", shot.id);
@@ -824,9 +720,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
           target: "shot",
           target_id: shot.id,
           source_text: sourceText,
-          text_key: credentials.text_key,
-          base_url: credentials.base_url || DEFAULT_BASE_URL,
-          text_model: credentials.text_model,
           mode: "shot_json",
         });
       } catch (optimizationError) {
@@ -840,9 +733,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     [
       beginProjectOperation,
       isProjectOperationCurrent,
-      providerCredentials,
       setBusyValue,
-      strings.errors.missingTextKeyForOptimize,
       strings.errors.optimizeShotFallback,
     ],
   );
@@ -892,12 +783,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     async (shot: Shot): Promise<void> => {
       const current = snapshotRef.current;
       if (!current) return;
-      const credentials = normalizeCredentials(providerCredentials);
-      if (!credentials.video_key) {
-        const message = strings.errors.missingVideoKeyForRegenerate;
-        setError(message);
-        throw new Error(message);
-      }
 
       const projectId = current.project.id;
       const token = beginProjectOperation("regenerate", projectId);
@@ -907,11 +792,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       setBusyValue("regeneratingShotId", shot.id);
       setError(null);
       try {
-        const result = await regenerateShot(projectId, shot.id, {
-          video_key: credentials.video_key,
-          base_url: credentials.base_url,
-          video_model: credentials.video_model,
-        });
+        const result = await regenerateShot(projectId, shot.id, {});
         if (!isCurrent()) return;
         const latest = snapshotRef.current;
         if (!latest) return;
@@ -999,7 +880,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       isProjectOperationCurrent,
       persistBackgroundIfCurrent,
       persistIfCurrent,
-      providerCredentials,
       scheduleBackgroundTask,
       setBusyValue,
       strings.errors,
@@ -1112,12 +992,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       setError(message);
       throw new Error(message);
     }
-    const credentials = normalizeCredentials(providerCredentials);
-    if (!credentials.video_key) {
-      const message = strings.errors.missingVideoKeyForRender;
-      setError(message);
-      throw new Error(message);
-    }
 
     const projectId = current.project.id;
     const token = beginProjectOperation("render", projectId);
@@ -1127,9 +1001,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     const responseBaseRevision = snapshotRevisionRef.current;
     try {
       const result = await renderProject(projectId, {
-        video_key: credentials.video_key,
-        base_url: credentials.base_url,
-        video_model: credentials.video_model,
         render_runtime: "ffmpeg",
       });
       if (!isCurrent()) return;
@@ -1246,7 +1117,6 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     isProjectOperationCurrent,
     persistBackgroundIfCurrent,
     persistIfCurrent,
-    providerCredentials,
     refreshAuthoritativeProject,
     scheduleBackgroundTask,
     setBusyValue,
@@ -1324,14 +1194,9 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     finalRenderUrl,
     localMediaUrls,
     localBackupStatus,
-    providerCredentials,
-    maskedKeys,
-    providerReady: maskedKeys !== null,
     busy,
     openLocalProject,
     createProject,
-    saveProvider,
-    updateProviderField,
     selectShot: setSelectedShotId,
     optimizeShotPrompt,
     saveShotChanges,

@@ -26,7 +26,6 @@ describe("NewProjectPage", () => {
             path="/projects/new"
             element={(
               <NewProjectPage
-                providerReady
                 onCreate={vi.fn()}
                 onCreated={vi.fn()}
               />
@@ -47,7 +46,7 @@ describe("NewProjectPage", () => {
   it("submits title, project type and master prompt without a shot count", async () => {
     const onCreate = vi.fn().mockResolvedValue(createProjectResponse({ shotCount: 2 }));
     const onCreated = vi.fn();
-    renderPage({ providerReady: true, onCreate, onCreated });
+    renderPage({ onCreate, onCreated });
 
     fireEvent.change(screen.getByLabelText("项目标题"), { target: { value: "雨夜来信" } });
     fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "一封信改变两个人的命运" } });
@@ -65,7 +64,7 @@ describe("NewProjectPage", () => {
 
   it("uses a trimmed prompt and an untitled fallback", async () => {
     const onCreate = vi.fn().mockResolvedValue(createProjectResponse());
-    renderPage({ providerReady: true, onCreate, onCreated: vi.fn() });
+    renderPage({ onCreate, onCreated: vi.fn() });
 
     fireEvent.change(screen.getByLabelText("项目标题"), { target: { value: "   " } });
     fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "  雨夜追踪  " } });
@@ -79,25 +78,18 @@ describe("NewProjectPage", () => {
     }));
   });
 
-  it("gates AI creation on provider readiness", () => {
-    const onOpenProvider = vi.fn();
-    renderPage({
-      providerReady: false,
-      onOpenProvider,
-      onCreate: vi.fn(),
-      onCreated: vi.fn(),
-    });
+  it("does not expose provider configuration before AI creation", () => {
+    renderPage({ onCreate: vi.fn(), onCreated: vi.fn() });
 
-    expect(screen.getByRole("button", { name: "AI 规划分镜" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "打开接口配置" }));
-    expect(onOpenProvider).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "AI 规划分镜" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "打开接口配置" })).not.toBeInTheDocument();
     expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
     expect(document.querySelector('[name="shot_count"]')).not.toBeInTheDocument();
   });
 
   it("rejects an empty trimmed prompt with an accessible error", async () => {
     const onCreate = vi.fn();
-    renderPage({ providerReady: true, onCreate, onCreated: vi.fn() });
+    renderPage({ onCreate, onCreated: vi.fn() });
     fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "   " } });
 
     fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
@@ -113,7 +105,7 @@ describe("NewProjectPage", () => {
     const onCreate = vi.fn().mockReturnValue(new Promise((_, reject) => {
       rejectCreate = reject;
     }));
-    renderPage({ providerReady: true, onCreate, onCreated: vi.fn() });
+    renderPage({ onCreate, onCreated: vi.fn() });
 
     fireEvent.change(screen.getByLabelText("故事与画面要求"), {
       target: { value: "雨夜追踪" },

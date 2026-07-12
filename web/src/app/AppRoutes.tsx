@@ -11,26 +11,33 @@ import {
   useParams,
 } from "react-router-dom";
 import { mediaUrl } from "../api/client";
+import { RequireAdmin } from "../auth/RequireAdmin";
+import { RequireAuth } from "../auth/RequireAuth";
+import { useAuth } from "../auth/AuthProvider";
+import { useBilling } from "../billing/BillingProvider";
 import { AppShell } from "../components/shell/AppShell";
-import { ProviderDrawer } from "../components/shell/ProviderDrawer";
 import type { AssetRecord } from "../domain/types";
 import { getStrings } from "../i18n";
 import type { LocalMediaRef } from "../localdb/types";
+import { ForgotPasswordPage } from "../pages/ForgotPasswordPage";
 import { GlobalSettingsPage } from "../pages/GlobalSettingsPage";
+import { LoginPage } from "../pages/LoginPage";
 import { NewProjectPage } from "../pages/NewProjectPage";
+import { OrdersPage } from "../pages/OrdersPage";
 import { ProductionPage } from "../pages/ProductionPage";
 import { ProjectsPage } from "../pages/ProjectsPage";
+import { RegisterPage } from "../pages/RegisterPage";
+import { ResetPasswordPage } from "../pages/ResetPasswordPage";
 import { ResourceLibraryPage } from "../pages/ResourceLibraryPage";
 import { StoryboardPage } from "../pages/StoryboardPage";
+import { WalletPage } from "../pages/WalletPage";
+import { BillingAdminPage } from "../pages/admin/BillingAdminPage";
 import { projectRoutes } from "./routes";
+import { WorkbenchProvider } from "./workbench/WorkbenchProvider";
 import { emptyContinuityPlan } from "./workbench/snapshot";
 import { useWorkbench } from "./workbench/useWorkbench";
 
 const zh = getStrings("zh");
-
-type RootLayoutContext = {
-  openProvider: () => void;
-};
 
 type ProjectLayoutContext = {
   onDirtyChange: (dirty: boolean) => void;
@@ -41,27 +48,6 @@ type ProjectLoadState = {
   projectId: string | null;
   status: "error" | "loading" | "missing" | "ready";
 };
-
-function ProviderPanel() {
-  const {
-    busy,
-    maskedKeys,
-    providerCredentials,
-    saveProvider,
-    updateProviderField,
-  } = useWorkbench();
-
-  return (
-    <ProviderDrawer
-      credentials={providerCredentials}
-      maskedKeys={maskedKeys}
-      saving={busy.savingProvider}
-      strings={zh.keyGate}
-      onFieldChange={updateProviderField}
-      onSubmit={() => void saveProvider().catch(() => undefined)}
-    />
-  );
-}
 
 function ErrorSurface() {
   const { clearError, error } = useWorkbench();
@@ -86,18 +72,42 @@ function LocalBackupStatusSurface() {
   );
 }
 
+function useShellProps() {
+  const auth = useAuth();
+  const billing = useBilling();
+  return {
+    accountEmail: auth.user?.email ?? null,
+    isAdmin: auth.user?.role === "admin",
+    walletAvailableUnits: billing.wallet?.available_units ?? null,
+    walletLoading: billing.loading,
+    onLogout: auth.logout,
+  };
+}
+
+function WorkbenchProviderLayout() {
+  return (
+    <WorkbenchProvider>
+      <Outlet />
+    </WorkbenchProvider>
+  );
+}
+
+function BillingShellLayout() {
+  const shellProps = useShellProps();
+  return (
+    <AppShell project={null} {...shellProps}>
+      <Outlet />
+    </AppShell>
+  );
+}
+
 function RootLayout() {
-  const [providerOpen, setProviderOpen] = useState(false);
+  const shellProps = useShellProps();
 
   return (
-    <AppShell
-      project={null}
-      providerOpen={providerOpen}
-      providerPanel={<ProviderPanel />}
-      onProviderOpenChange={setProviderOpen}
-    >
+    <AppShell project={null} {...shellProps}>
       <ErrorSurface />
-      <Outlet context={{ openProvider: () => setProviderOpen(true) } satisfies RootLayoutContext} />
+      <Outlet />
     </AppShell>
   );
 }
@@ -107,6 +117,7 @@ function ProjectLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { openLocalProject, snapshot } = useWorkbench();
+  const shellProps = useShellProps();
   const requestGenerationRef = useRef(0);
   const acceptedHistoryIndexRef = useRef<number | null>(
     typeof window.history.state?.idx === "number" ? window.history.state.idx : null,
@@ -223,7 +234,7 @@ function ProjectLayout() {
   return (
     <AppShell
       project={activeSnapshot?.project ?? null}
-      providerPanel={<ProviderPanel />}
+      {...shellProps}
       onBeforeNavigate={confirmNavigation}
     >
       <ErrorSurface />
@@ -235,13 +246,10 @@ function ProjectLayout() {
 
 function NewProjectRoute() {
   const navigate = useNavigate();
-  const { openProvider } = useOutletContext<RootLayoutContext>();
-  const { createProject, providerReady } = useWorkbench();
+  const { createProject } = useWorkbench();
 
   return (
     <NewProjectPage
-      providerReady={providerReady}
-      onOpenProvider={openProvider}
       onCreate={createProject}
       onCreated={(projectId, plannedShotCount) => {
         navigate(projectRoutes.storyboard(projectId), { state: { plannedShotCount } });
@@ -416,16 +424,33 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<Navigate replace to="/projects" />} />
-      <Route path="/projects" element={<RootLayout />}>
-        <Route index element={<ProjectsPage />} />
-        <Route path="new" element={<NewProjectRoute />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
+      <Route element={<RequireAuth />}>
+        <Route element={<BillingShellLayout />}>
+          <Route path="/wallet" element={<WalletPage />} />
+          <Route path="/orders" element={<OrdersPage />} />
+        </Route>
+        <Route element={<WorkbenchProviderLayout />}>
+          <Route path="/projects" element={<RootLayout />}>
+            <Route index element={<ProjectsPage />} />
+            <Route path="new" element={<NewProjectRoute />} />
+          </Route>
+          <Route path="/projects/:projectId" element={<ProjectLayout />}>
+            <Route index element={<Navigate replace to="storyboard" />} />
+            <Route path="storyboard" element={<StoryboardRoute />} />
+            <Route path="settings" element={<GlobalSettingsRoute />} />
+            <Route path="resources" element={<ResourceLibraryRoute />} />
+            <Route path="production" element={<ProductionRoute />} />
+          </Route>
+        </Route>
       </Route>
-      <Route path="/projects/:projectId" element={<ProjectLayout />}>
-        <Route index element={<Navigate replace to="storyboard" />} />
-        <Route path="storyboard" element={<StoryboardRoute />} />
-        <Route path="settings" element={<GlobalSettingsRoute />} />
-        <Route path="resources" element={<ResourceLibraryRoute />} />
-        <Route path="production" element={<ProductionRoute />} />
+      <Route element={<RequireAdmin />}>
+        <Route element={<BillingShellLayout />}>
+          <Route path="/admin/billing" element={<BillingAdminPage />} />
+        </Route>
       </Route>
       <Route path="*" element={<Navigate replace to="/projects" />} />
     </Routes>

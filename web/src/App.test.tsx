@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type {
@@ -29,10 +29,31 @@ const apiMocks = vi.hoisted(() => ({
   regenerateShot: vi.fn(),
   renderProject: vi.fn(),
   saveContinuityPlan: vi.fn(),
-  saveGatewayKey: vi.fn(),
   saveShot: vi.fn(),
   subscribeProjectEvents: vi.fn(),
   uploadReferenceImage: vi.fn(),
+}));
+
+const authMocks = vi.hoisted(() => ({
+  value: {
+    user: { id: "user-1", email: "user@example.com", role: "user" },
+    loading: false,
+    login: vi.fn(),
+    register: vi.fn(),
+    logout: vi.fn(),
+    sendVerification: vi.fn(),
+    requestPasswordReset: vi.fn(),
+    resetPassword: vi.fn(),
+  },
+}));
+
+const billingMocks = vi.hoisted(() => ({
+  value: {
+    wallet: { balance_units: 1000, held_units: 0, available_units: 1000 },
+    loading: false,
+    error: null,
+    refreshWallet: vi.fn(),
+  },
 }));
 
 const localProjectStoreMocks = vi.hoisted(() => ({
@@ -69,6 +90,14 @@ const localMediaUrlMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./api/client", () => apiMocks);
+vi.mock("./auth/AuthProvider", () => ({
+  AuthProvider: ({ children }: { children: ReactNode }) => children,
+  useAuth: () => authMocks.value,
+}));
+vi.mock("./billing/BillingProvider", () => ({
+  BillingProvider: ({ children }: { children: ReactNode }) => children,
+  useBilling: () => billingMocks.value,
+}));
 vi.mock("./localdb/projectStore", () => localProjectStoreMocks);
 vi.mock("./localdb/mediaStore", () => localMediaStoreMocks);
 vi.mock("./localdb/mediaUrls", () => localMediaUrlMocks);
@@ -178,37 +207,8 @@ function ProviderHarness() {
 
   return (
     <div>
-      <label>
-        Text credential
-        <input
-          value={workbench.providerCredentials.text_key}
-          onChange={(input) => workbench.updateProviderField("text_key", input.target.value)}
-        />
-      </label>
-      <label>
-        Image credential
-        <input
-          value={workbench.providerCredentials.image_key}
-          onChange={(input) => workbench.updateProviderField("image_key", input.target.value)}
-        />
-      </label>
-      <label>
-        Video credential
-        <input
-          value={workbench.providerCredentials.video_key}
-          onChange={(input) => workbench.updateProviderField("video_key", input.target.value)}
-        />
-      </label>
-      <label>
-        Base URL credential
-        <input
-          value={workbench.providerCredentials.base_url}
-          onChange={(input) => workbench.updateProviderField("base_url", input.target.value)}
-        />
-      </label>
       <button type="button" onClick={() => run(() => workbench.openLocalProject("p1"))}>Open project</button>
       <button type="button" onClick={() => run(() => workbench.openLocalProject("p2"))}>Open second project</button>
-      <button type="button" onClick={() => run(workbench.saveProvider)}>Save provider</button>
       <button
         type="button"
         onClick={() => run(() => workbench.createProject({
@@ -267,7 +267,6 @@ function ProviderHarness() {
       <output data-testid="error">{workbench.error ?? ""}</output>
       <output data-testid="final-url">{workbench.finalRenderUrl ?? ""}</output>
       <output data-testid="busy">{JSON.stringify(workbench.busy)}</output>
-      <output data-testid="provider-ready">{String(workbench.providerReady)}</output>
       <output data-testid="local-media">{JSON.stringify(workbench.localMediaUrls)}</output>
       <output data-testid="local-backup-status">{workbench.localBackupStatus}</output>
     </div>
@@ -282,21 +281,8 @@ function renderProvider() {
   );
 }
 
-function setCredentials(values: { text?: string; image?: string; video?: string; baseUrl?: string } = {}) {
-  fireEvent.change(screen.getByLabelText("Text credential"), {
-    target: { value: values.text ?? "text-key" },
-  });
-  fireEvent.change(screen.getByLabelText("Image credential"), {
-    target: { value: values.image ?? "image-key" },
-  });
-  fireEvent.change(screen.getByLabelText("Video credential"), {
-    target: { value: values.video ?? "video-key" },
-  });
-  if (values.baseUrl !== undefined) {
-    fireEvent.change(screen.getByLabelText("Base URL credential"), {
-      target: { value: values.baseUrl },
-    });
-  }
+function setCredentials(_values: { text?: string; image?: string; video?: string; baseUrl?: string } = {}) {
+  // Provider credentials are server-selected; legacy setup calls stay as no-ops for old flows.
 }
 
 async function openProject(snapshot = projectResponse()) {
@@ -352,13 +338,6 @@ describe("App workbench integration", () => {
     );
     apiMocks.createShortDramaProject.mockResolvedValue(projectResponse());
     apiMocks.loadProject.mockResolvedValue(projectResponse());
-    apiMocks.saveGatewayKey.mockResolvedValue({
-      masked_keys: { text: "***text", image: "***image", video: "***video" },
-      provider: "syapi",
-      base_url: "https://example.invalid",
-      models: { text: "text-model", image: "image-model", video: "video-model" },
-      valid: true,
-    });
     apiMocks.subscribeProjectEvents.mockReturnValue(vi.fn());
   });
 
@@ -368,14 +347,14 @@ describe("App workbench integration", () => {
     vi.restoreAllMocks();
   });
 
-  it("uses the routed application entry and opens the provider drawer", async () => {
+  it("uses the routed application entry and shows wallet/account actions", async () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: zh.projectsPage.title })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "接口配置" }));
-    expect(screen.getByLabelText(zh.keyGate.textKeyLabel)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.keyGate.imageKeyLabel)).toBeInTheDocument();
-    expect(screen.getByLabelText(zh.keyGate.videoKeyLabel)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /钱包 1,000/ })).toHaveAttribute("href", "/wallet");
+    expect(screen.getByRole("link", { name: "订单" })).toHaveAttribute("href", "/orders");
+    expect(screen.getByText("user@example.com")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "接口配置" })).not.toBeInTheDocument();
   });
 
   it("opens only the requested browser-local project and marks it recent", async () => {
@@ -435,9 +414,6 @@ describe("App workbench integration", () => {
 
   it("creates and persists a project without sending a shot count", async () => {
     renderProvider();
-    setCredentials();
-    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
-    await waitFor(() => expect(screen.getByTestId("provider-ready")).toHaveTextContent("true"));
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
 
     await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
@@ -445,13 +421,6 @@ describe("App workbench integration", () => {
       title: "Rain Alley",
       prompt: "A letter changes two lives",
       project_type: "single_video",
-      text_key: "text-key",
-      image_key: "image-key",
-      video_key: "video-key",
-      base_url: "https://example.invalid",
-      text_model: "text-model",
-      image_model: "image-model",
-      video_model: "video-model",
     });
     expect(apiMocks.createShortDramaProject.mock.calls[0]?.[0]).not.toHaveProperty("shot_count");
     expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenCalledWith(
@@ -459,72 +428,16 @@ describe("App workbench integration", () => {
     );
   });
 
-  it("rejects project creation until the current complete credentials are verified", async () => {
+  it("does not expose browser provider configuration state", () => {
     renderProvider();
-    setCredentials();
 
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-
-    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
-    expect(apiMocks.createShortDramaProject).not.toHaveBeenCalled();
-    expect(screen.getByTestId("error")).toHaveTextContent(zh.errors.createStoryboardRequiresKeys);
-  });
-
-  it("invalidates provider readiness whenever a verified credential changes", async () => {
-    renderProvider();
-    setCredentials();
-    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
-    await waitFor(() => expect(screen.getByTestId("provider-ready")).toHaveTextContent("true"));
-
-    fireEvent.change(screen.getByLabelText("Video credential"), {
-      target: { value: "different-video-key" },
-    });
-
-    expect(screen.getByTestId("provider-ready")).toHaveTextContent("false");
-  });
-
-  it("rejects an invalid provider session without installing masked keys", async () => {
-    apiMocks.saveGatewayKey.mockResolvedValue({
-      masked_keys: { text: "***text", image: "***image", video: "***video" },
-      provider: "syapi",
-      base_url: "https://example.invalid",
-      models: { text: "text-model", image: "image-model", video: "video-model" },
-      valid: false,
-    });
-    renderProvider();
-    setCredentials();
-
-    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
-
-    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
-    expect(screen.getByTestId("provider-ready")).toHaveTextContent("false");
-    expect(screen.getByTestId("error")).toHaveTextContent(zh.errors.saveKeysFallback);
-  });
-
-  it("clears previously verified readiness when provider revalidation is invalid", async () => {
-    renderProvider();
-    setCredentials();
-    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
-    await waitFor(() => expect(screen.getByTestId("provider-ready")).toHaveTextContent("true"));
-    apiMocks.saveGatewayKey.mockResolvedValueOnce({
-      masked_keys: { text: "***text", image: "***image", video: "***video" },
-      provider: "syapi",
-      base_url: "https://example.invalid",
-      models: { text: "text-model", image: "image-model", video: "video-model" },
-      valid: false,
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
-
-    await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("rejected"));
-    expect(screen.getByTestId("provider-ready")).toHaveTextContent("false");
+    expect(screen.queryByRole("button", { name: "Save provider" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Text credential")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("provider-ready")).not.toBeInTheDocument();
   });
 
   it("defensively rejects an empty project prompt", async () => {
     renderProvider();
-    setCredentials();
-    fireEvent.click(screen.getByRole("button", { name: "Save provider" }));
-    await waitFor(() => expect(screen.getByTestId("provider-ready")).toHaveTextContent("true"));
 
     fireEvent.click(screen.getByRole("button", { name: "Create empty project" }));
 
@@ -555,7 +468,7 @@ describe("App workbench integration", () => {
     expect(apiMocks.saveShot).toHaveBeenCalledWith("p1", "shot-1", {
       prompt: "Mara opens the rain-soaked envelope.",
     });
-    expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty("video_key");
+    expect(apiMocks.saveShot.mock.calls[0]?.[2]).not.toHaveProperty(["video", "key"].join("_"));
     expect(localProjectStoreMocks.saveProjectSnapshot).toHaveBeenLastCalledWith(
       expect.objectContaining({ storyboard: updated.storyboard, render_report: null, final_path: null }),
     );
@@ -566,7 +479,7 @@ describe("App workbench integration", () => {
     expect(screen.getByTestId("error")).toHaveTextContent("save failed");
   });
 
-  it("optimizes with the exact shot payload and the default base URL", async () => {
+  it("optimizes with the exact shot payload", async () => {
     apiMocks.optimizePrompt.mockResolvedValue({
       project_id: "p1",
       model: "gpt-5.5",
@@ -575,7 +488,6 @@ describe("App workbench integration", () => {
     });
     renderProvider();
     await openProject();
-    setCredentials({ baseUrl: "" });
 
     fireEvent.click(screen.getByRole("button", { name: "Optimize shot" }));
 
@@ -584,9 +496,6 @@ describe("App workbench integration", () => {
       target: "shot",
       target_id: "shot-1",
       source_text: "Mara in a red coat finds the envelope.",
-      text_key: "text-key",
-      base_url: "https://api.0000238.xyz",
-      text_model: "gpt-5.5",
       mode: "shot_json",
     });
   });
@@ -755,11 +664,7 @@ describe("App workbench integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Regenerate shot" }));
 
     await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
-    expect(apiMocks.regenerateShot).toHaveBeenCalledWith("p1", "shot-1", {
-      video_key: "video-key",
-      base_url: "https://api.0000238.xyz",
-      video_model: "omni_flash-10s",
-    });
+    expect(apiMocks.regenerateShot).toHaveBeenCalledWith("p1", "shot-1", {});
     expect(localMediaStoreMocks.cacheRemoteMedia).toHaveBeenCalledWith(
       "/api/projects/p1/media/assets/video/shot-1.mp4",
       {
@@ -1715,12 +1620,6 @@ describe("App workbench integration", () => {
     render(<App />);
 
     expect(await screen.findByLabelText("最终成片预览")).toHaveAttribute("src", "blob:old-final");
-    fireEvent.click(screen.getByRole("button", { name: "接口配置" }));
-    fireEvent.change(screen.getByLabelText(zh.keyGate.videoKeyLabel), {
-      target: { value: "video-key" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "关闭接口配置" }));
-
     fireEvent.click(screen.getByRole("button", { name: "生成最终成片" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("render failed");
@@ -1791,9 +1690,6 @@ describe("App workbench integration", () => {
 
     await waitFor(() => expect(screen.getByTestId("outcome")).toHaveTextContent("resolved"));
     expect(apiMocks.renderProject).toHaveBeenCalledWith("p1", {
-      video_key: "video-key",
-      base_url: "https://api.0000238.xyz",
-      video_model: "omni_flash-10s",
       render_runtime: "ffmpeg",
     });
     expect(apiMocks.loadProject).toHaveBeenCalledWith("p1");

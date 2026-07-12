@@ -1,10 +1,8 @@
 import type {
   ContinuityPlan,
-  GatewayKeySession,
   JobEvent,
   ProjectType,
   PromptOptimizeResponse,
-  ProviderCredentials,
   ReferenceImageUploadRequest,
   ShortDramaProjectRequest,
   ShortDramaProjectResponse,
@@ -25,7 +23,6 @@ export interface WorkbenchBusyState {
   regeneratingShotId: string | null;
   rendering: boolean;
   savingContinuity: boolean;
-  savingProvider: boolean;
   savingShotId: string | null;
   uploadingReference: boolean;
 }
@@ -40,17 +37,9 @@ export interface WorkbenchContextValue {
   finalRenderUrl: string | null;
   localMediaUrls: Partial<Record<LocalMediaRef, string>>;
   localBackupStatus: LocalBackupStatus;
-  providerCredentials: ProviderCredentials;
-  maskedKeys: GatewayKeySession["masked_keys"] | null;
-  providerReady: boolean;
   busy: WorkbenchBusyState;
   openLocalProject: (projectId: string) => Promise<boolean>;
   createProject: (input: CreateProjectInput) => Promise<ShortDramaProjectResponse>;
-  saveProvider: () => Promise<void>;
-  updateProviderField: <K extends keyof ProviderCredentials>(
-    key: K,
-    value: ProviderCredentials[K],
-  ) => void;
   selectShot: (shotId: string) => void;
   optimizeShotPrompt: (shot: Shot, sourceText: string) => Promise<PromptOptimizeResponse>;
   saveShotChanges: (shotId: string, payload: ShotSaveRequest) => Promise<Shot>;

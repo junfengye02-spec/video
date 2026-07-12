@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
@@ -7,6 +8,7 @@ import { getStrings } from "../i18n";
 import { createProjectResponse } from "../test/fixtures";
 
 const apiMocks = vi.hoisted(() => ({
+  authRequest: vi.fn(),
   createDraftProject: vi.fn(),
   createShortDramaProject: vi.fn(),
   loadLatestProject: vi.fn(),
@@ -21,10 +23,35 @@ const apiMocks = vi.hoisted(() => ({
   regenerateShot: vi.fn(),
   renderProject: vi.fn(),
   saveContinuityPlan: vi.fn(),
-  saveGatewayKey: vi.fn(),
   saveShot: vi.fn(),
   subscribeProjectEvents: vi.fn(),
   uploadReferenceImage: vi.fn(),
+}));
+
+const authMocks = vi.hoisted(() => ({
+  value: {
+    user: { id: "user-1", email: "user@example.com", role: "user" } as null | {
+      id: string;
+      email: string;
+      role: "user" | "admin";
+    },
+    loading: false,
+    login: vi.fn(),
+    register: vi.fn(),
+    logout: vi.fn(),
+    sendVerification: vi.fn(),
+    requestPasswordReset: vi.fn(),
+    resetPassword: vi.fn(),
+  },
+}));
+
+const billingMocks = vi.hoisted(() => ({
+  value: {
+    wallet: { balance_units: 1000, held_units: 0, available_units: 1000 },
+    loading: false,
+    error: null,
+    refreshWallet: vi.fn(),
+  },
 }));
 
 const localProjectStoreMocks = vi.hoisted(() => ({
@@ -61,6 +88,14 @@ const localMediaUrlMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../api/client", () => apiMocks);
+vi.mock("../auth/AuthProvider", () => ({
+  AuthProvider: ({ children }: { children: ReactNode }) => children,
+  useAuth: () => authMocks.value,
+}));
+vi.mock("../billing/BillingProvider", () => ({
+  BillingProvider: ({ children }: { children: ReactNode }) => children,
+  useBilling: () => billingMocks.value,
+}));
 vi.mock("../localdb/projectStore", () => localProjectStoreMocks);
 vi.mock("../localdb/mediaStore", () => localMediaStoreMocks);
 vi.mock("../localdb/mediaUrls", () => localMediaUrlMocks);
@@ -100,12 +135,7 @@ function commitTextEdit(element: HTMLTextAreaElement, value: string) {
 }
 
 async function enterProviderCredentials() {
-  fireEvent.click(screen.getByRole("button", { name: "\u63a5\u53e3\u914d\u7f6e" }));
-  fireEvent.change(screen.getByLabelText(zh.keyGate.textKeyLabel), { target: { value: "text-test-key" } });
-  fireEvent.change(screen.getByLabelText(zh.keyGate.imageKeyLabel), { target: { value: "image-test-key" } });
-  fireEvent.change(screen.getByLabelText(zh.keyGate.videoKeyLabel), { target: { value: "video-test-key" } });
-  fireEvent.click(screen.getByRole("button", { name: zh.keyGate.useKeysAction }));
-  await waitFor(() => expect(apiMocks.saveGatewayKey).toHaveBeenCalledTimes(1));
+  await Promise.resolve();
 }
 
 function submitNewProject() {
@@ -123,13 +153,23 @@ describe("App routes", () => {
       configurable: true,
       value: "zh-CN",
     });
-    apiMocks.saveGatewayKey.mockResolvedValue({
-      masked_keys: { text: "***text", image: "***image", video: "***video" },
-      provider: "syapi",
-      base_url: "https://example.invalid",
-      models: { text: "text-model", image: "image-model", video: "video-model" },
-      valid: true,
-    });
+    authMocks.value = {
+      user: { id: "user-1", email: "user@example.com", role: "user" },
+      loading: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+      sendVerification: vi.fn(),
+      requestPasswordReset: vi.fn(),
+      resetPassword: vi.fn(),
+    };
+    billingMocks.value = {
+      wallet: { balance_units: 1000, held_units: 0, available_units: 1000 },
+      loading: false,
+      error: null,
+      refreshWallet: vi.fn(),
+    };
+    apiMocks.authRequest.mockResolvedValue(undefined);
     apiMocks.createShortDramaProject.mockResolvedValue(cloneProjectResponse(projectWithEightShots));
     apiMocks.subscribeProjectEvents.mockReturnValue(vi.fn());
     localProjectStoreMocks.listProjectSummaries.mockResolvedValue([]);
@@ -179,6 +219,54 @@ describe("App routes", () => {
     cleanup();
     vi.restoreAllMocks();
     window.history.pushState({}, "", "/");
+  });
+
+  it.each([
+    "/wallet",
+    "/orders",
+    "/admin/billing?tab=orders#latest",
+  ])("redirects anonymous deep links from %s to login with return state", async (path) => {
+    authMocks.value = { ...authMocks.value, user: null };
+
+    renderAppAt(path);
+
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+    const from = window.history.state?.usr?.from as {
+      hash?: string;
+      pathname?: string;
+      search?: string;
+    } | undefined;
+    expect(`${from?.pathname ?? ""}${from?.search ?? ""}${from?.hash ?? ""}`).toBe(path);
+  });
+
+  it.each([
+    ["/wallet", zh.billing.walletTitle],
+    ["/orders", zh.billing.ordersTitle],
+  ])("allows authenticated users to access %s", async (path, heading) => {
+    renderAppAt(path);
+
+    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "账单管理" })).not.toBeInTheDocument();
+  });
+
+  it("blocks authenticated non-admin users from billing administration", async () => {
+    renderAppAt("/admin/billing");
+
+    expect(await screen.findByRole("heading", { name: "Not authorized" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /计费管理|璁¤垂绠＄悊/ })).not.toBeInTheDocument();
+  });
+
+  it("allows administrators to access billing administration", async () => {
+    authMocks.value = {
+      ...authMocks.value,
+      user: { id: "admin-1", email: "admin@example.com", role: "admin" },
+    };
+
+    renderAppAt("/admin/billing");
+
+    expect(await screen.findByRole("heading", { name: /计费管理|璁¤垂绠＄悊/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "账单管理" })).toHaveAttribute("href", "/admin/billing");
   });
 
   it("restores the project named by a deep link from browser-local storage", async () => {
@@ -233,7 +321,6 @@ describe("App routes", () => {
     const rendered = renderAppAt("/projects/p1/storyboard");
     await screen.findByLabelText(zh.shotEditor.promptLabel);
     await enterProviderCredentials();
-    fireEvent.click(screen.getByRole("button", { name: /关闭接口配置/ }));
 
     fireEvent.click(screen.getByRole("button", { name: zh.shotEditor.regenerateAction }));
 
@@ -679,13 +766,6 @@ describe("App routes", () => {
       title: "\u96e8\u591c\u6765\u4fe1",
       prompt: "\u4e00\u5c01\u4fe1\u6539\u53d8\u4e24\u4e2a\u4eba\u7684\u547d\u8fd0",
       project_type: "single_video",
-      text_key: "text-test-key",
-      image_key: "image-test-key",
-      video_key: "video-test-key",
-      base_url: "https://example.invalid",
-      text_model: "text-model",
-      image_model: "image-model",
-      video_model: "video-model",
     });
     expect(apiMocks.createShortDramaProject.mock.calls[0]?.[0]).not.toHaveProperty("shot_count");
     expect(window.location.pathname).toBe("/projects/p1/storyboard");
