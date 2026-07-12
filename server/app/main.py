@@ -17,6 +17,7 @@ from redis import Redis
 from sqlalchemy.orm import Session
 from starlette.datastructures import FormData, UploadFile
 
+from server.app.admin.billing_router import router as admin_billing_router
 from server.app.artifact_sync import read_workflow_settings, rewrite_workflow_artifacts, sync_asset_shot_ids
 from server.app.auth.dependencies import CurrentUser, require_csrf, require_user
 from server.app.auth.router import get_provisioner, router as auth_router
@@ -654,6 +655,7 @@ def create_app(
     app.dependency_overrides[get_provisioner] = WalletProvisioner
     app.include_router(wallet_router)
     app.include_router(payment_router)
+    app.include_router(admin_billing_router)
     store = WorkbenchStore(projects_root=Path(projects_root), db_path=Path(db_path))
     events = EventBus()
     app.state.store = store
