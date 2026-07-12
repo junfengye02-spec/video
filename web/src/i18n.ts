@@ -339,6 +339,31 @@ export interface UIStrings {
     renderAction: string;
     renderingAction: string;
   };
+  billing: {
+    walletTitle: string;
+    walletNote: string;
+    ordersTitle: string;
+    ordersNote: string;
+    balanceLabel: string;
+    heldLabel: string;
+    availableLabel: string;
+    productsTitle: string;
+    walletEntriesTitle: string;
+    ordersLink: string;
+    loading: string;
+    noProducts: string;
+    noWalletEntries: string;
+    emptyOrders: string;
+    rechargeButton: (title: string) => string;
+    creatingOrder: string;
+    createOrderError: string;
+    loadError: string;
+    paymentReturnTrusted: string;
+    amountLabel: string;
+    maskedOrderLabel: string;
+    createdLabel: string;
+    orderStatusLabels: Record<"pending" | "paid" | "expired" | "failed", string>;
+  };
 }
 
 const STRINGS: Record<Locale, UIStrings> = {
@@ -749,6 +774,36 @@ const STRINGS: Record<Locale, UIStrings> = {
       },
       renderAction: "Generate final render",
       renderingAction: "Generating final render",
+    },
+    billing: {
+      walletTitle: "Wallet",
+      walletNote: "Balances are refreshed from the server.",
+      ordersTitle: "Top-up orders",
+      ordersNote: "Payment history uses server-verified order status.",
+      balanceLabel: "Balance",
+      heldLabel: "Estimated maximum hold",
+      availableLabel: "Available balance",
+      productsTitle: "Top-up products",
+      walletEntriesTitle: "Wallet entries",
+      ordersLink: "Orders",
+      loading: "Loading...",
+      noProducts: "No active top-up products.",
+      noWalletEntries: "No wallet entries yet.",
+      emptyOrders: "No top-up orders yet.",
+      rechargeButton: (title) => `Alipay top up ${title}`,
+      creatingOrder: "Creating order",
+      createOrderError: "Unable to create the payment order.",
+      loadError: "Unable to load billing data.",
+      paymentReturnTrusted: "Balance follows the server order status.",
+      amountLabel: "Amount",
+      maskedOrderLabel: "Order",
+      createdLabel: "Created",
+      orderStatusLabels: {
+        pending: "Pending",
+        paid: "Paid",
+        expired: "Expired",
+        failed: "Failed",
+      },
     },
   },
   zh: {
@@ -1166,6 +1221,36 @@ const STRINGS: Record<Locale, UIStrings> = {
       },
       renderAction: "\u751f\u6210\u6700\u7ec8\u6210\u7247",
       renderingAction: "\u6b63\u5728\u751f\u6210\u6700\u7ec8\u6210\u7247",
+    },
+    billing: {
+      walletTitle: "\u94b1\u5305",
+      walletNote: "\u4f59\u989d\u548c\u5360\u7528\u4ee5\u670d\u52a1\u5668\u72b6\u6001\u4e3a\u51c6\u3002",
+      ordersTitle: "\u5145\u503c\u8ba2\u5355",
+      ordersNote: "\u652f\u4ed8\u8bb0\u5f55\u4ee5\u670d\u52a1\u5668\u9a8c\u8bc1\u540e\u7684\u8ba2\u5355\u72b6\u6001\u4e3a\u51c6\u3002",
+      balanceLabel: "\u4f59\u989d",
+      heldLabel: "\u9884\u8ba1\u6700\u591a\u6d88\u8017",
+      availableLabel: "\u53ef\u7528\u4f59\u989d",
+      productsTitle: "\u5145\u503c\u5957\u9910",
+      walletEntriesTitle: "\u94b1\u5305\u660e\u7ec6",
+      ordersLink: "\u5145\u503c\u8ba2\u5355",
+      loading: "\u6b63\u5728\u52a0\u8f7d...",
+      noProducts: "\u6682\u65e0\u53ef\u7528\u5145\u503c\u5957\u9910\u3002",
+      noWalletEntries: "\u6682\u65e0\u94b1\u5305\u660e\u7ec6\u3002",
+      emptyOrders: "\u6682\u65e0\u5145\u503c\u8ba2\u5355\u3002",
+      rechargeButton: (title) => `\u652f\u4ed8\u5b9d\u5145\u503c${title}`,
+      creatingOrder: "\u6b63\u5728\u521b\u5efa\u8ba2\u5355",
+      createOrderError: "\u65e0\u6cd5\u521b\u5efa\u652f\u4ed8\u8ba2\u5355\u3002",
+      loadError: "\u65e0\u6cd5\u52a0\u8f7d\u8ba1\u8d39\u6570\u636e\u3002",
+      paymentReturnTrusted: "\u4f59\u989d\u4ee5\u670d\u52a1\u5668\u8ba2\u5355\u72b6\u6001\u4e3a\u51c6",
+      amountLabel: "\u91d1\u989d",
+      maskedOrderLabel: "\u8ba2\u5355",
+      createdLabel: "\u521b\u5efa\u65f6\u95f4",
+      orderStatusLabels: {
+        pending: "\u5f85\u652f\u4ed8",
+        paid: "\u5df2\u652f\u4ed8",
+        expired: "\u5df2\u8fc7\u671f",
+        failed: "\u5931\u8d25",
+      },
     },
   },
 };
