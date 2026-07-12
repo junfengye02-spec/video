@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+// @ts-expect-error The Vitest runtime provides Node built-ins, but the browser tsconfig omits them.
 import { readFileSync } from "node:fs";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ComponentProps } from "react";
