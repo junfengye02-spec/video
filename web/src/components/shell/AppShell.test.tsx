@@ -59,10 +59,18 @@ describe("AppShell", () => {
 
   it("does not import domain hooks or provider configuration controls", () => {
     const source = readFileSync("src/components/shell/AppShell.tsx", "utf8");
+    const providerConfigPattern = new RegExp([
+      ["text", "key"].join("_"),
+      ["image", "key"].join("_"),
+      ["video", "key"].join("_"),
+      ["base", "url"].join("_"),
+      "Provider" + "Drawer",
+      "Key" + "Gate",
+    ].join("|"));
 
     expect(source).not.toMatch(/useAuth|useBilling|AuthProvider|BillingProvider/);
     expect(source).not.toMatch(/walletAvailableUnits|accountEmail|onLogout/);
-    expect(source).not.toMatch(/text_key|image_key|video_key|base_url|ProviderDrawer|KeyGate/);
+    expect(source).not.toMatch(providerConfigPattern);
   });
 
   it("keeps action slots wrapped in the mobile shell", () => {

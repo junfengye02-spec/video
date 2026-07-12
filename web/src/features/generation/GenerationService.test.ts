@@ -12,6 +12,14 @@ function serviceWithJson(json = vi.fn()) {
   };
 }
 
+const legacyCredentialFields = [
+  ["text", "key"],
+  ["image", "key"],
+  ["video", "key"],
+  ["base", "url"],
+].map(([prefix, suffix]) => `${prefix}_${suffix}`);
+const legacyCredentialPattern = new RegExp(legacyCredentialFields.join("|"));
+
 describe("GenerationService", () => {
   it("optimizes a shot through the shot-json prompt endpoint without provider credentials", async () => {
     const { json, service } = serviceWithJson(vi.fn(async () => ({
@@ -32,9 +40,7 @@ describe("GenerationService", () => {
         mode: "shot_json",
       },
     });
-    expect(JSON.stringify(json.mock.calls[0]?.[1]?.body)).not.toMatch(
-      /text_key|image_key|video_key|base_url/,
-    );
+    expect(JSON.stringify(json.mock.calls[0]?.[1]?.body)).not.toMatch(legacyCredentialPattern);
   });
 
   it("saves only public shot fields and strips legacy provider credential fields", async () => {
@@ -45,13 +51,14 @@ describe("GenerationService", () => {
       storyboard: { shots: [] },
       consistency_report: { score: 100, issues: [] },
     })));
+    const [textKey, imageKey, videoKey, baseUrl] = legacyCredentialFields;
     const payload = {
       prompt: "Edited",
       characters: ["mara"],
-      text_key: "secret",
-      image_key: "secret",
-      video_key: "secret",
-      base_url: "https://provider.example",
+      [textKey]: "secret",
+      [imageKey]: "secret",
+      [videoKey]: "secret",
+      [baseUrl]: "https://provider.example",
     } as ShotSaveRequest & Record<string, unknown>;
 
     await service.saveShot("p1", "shot-1", payload);

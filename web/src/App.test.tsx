@@ -10,8 +10,8 @@ import type {
 } from "./domain/types";
 import { getStrings } from "./i18n";
 import type { LocalMediaRecord, LocalProjectSnapshot } from "./localdb/types";
-import { WorkbenchProvider } from "./app/workbench/WorkbenchProvider";
 import { useWorkbench } from "./app/workbench/useWorkbench";
+import { WorkbenchSessionProvider } from "./features/workbench/WorkbenchSessionProvider";
 import { createProjectResponse } from "./test/fixtures";
 
 const apiMocks = vi.hoisted(() => ({
@@ -372,9 +372,9 @@ function ProviderHarness() {
 
 function renderProvider() {
   return render(
-    <WorkbenchProvider>
+    <WorkbenchSessionProvider>
       <ProviderHarness />
-    </WorkbenchProvider>,
+    </WorkbenchSessionProvider>,
   );
 }
 

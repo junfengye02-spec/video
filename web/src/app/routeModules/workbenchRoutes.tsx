@@ -18,6 +18,7 @@ import { AppShell } from "../../components/shell/AppShell";
 import type { AssetRecord, Shot, ShotSaveRequest } from "../../domain/types";
 import { AccountShellAction } from "../../features/account/AccountShellAction";
 import { BillingShellAction } from "../../features/billing/BillingShellAction";
+import { WorkbenchSessionProvider } from "../../features/workbench/WorkbenchSessionProvider";
 import { getStrings } from "../../i18n";
 import type { LocalMediaRef } from "../../localdb/types";
 import { mediaUrl } from "../../api/client";
@@ -28,7 +29,6 @@ import { ProjectsPage } from "../../pages/ProjectsPage";
 import { ResourceLibraryPage } from "../../pages/ResourceLibraryPage";
 import { StoryboardPage } from "../../pages/StoryboardPage";
 import { projectRoutes } from "../routes";
-import { WorkbenchProvider } from "../workbench/WorkbenchProvider";
 import { emptyContinuityPlan } from "../workbench/snapshot";
 import { useWorkbench } from "../workbench/useWorkbench";
 
@@ -169,11 +169,11 @@ function ProjectBreadcrumb({
   );
 }
 
-function WorkbenchProviderLayout() {
+function WorkbenchSessionLayout() {
   return (
-    <WorkbenchProvider>
+    <WorkbenchSessionProvider>
       <Outlet />
-    </WorkbenchProvider>
+    </WorkbenchSessionProvider>
   );
 }
 
@@ -571,7 +571,7 @@ function ProductionRoute() {
 export function workbenchRoutes() {
   return (
     <Route element={<RequireAuth />}>
-      <Route element={<WorkbenchProviderLayout />}>
+      <Route element={<WorkbenchSessionLayout />}>
         <Route path="/projects" element={<RootLayout />}>
           <Route index element={<ProjectsPage />} />
           <Route path="new" element={<NewProjectRoute />} />
