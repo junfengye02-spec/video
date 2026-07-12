@@ -63,6 +63,18 @@ class ProjectRepository:
             .with_for_update()
         )
 
+    def delete_owned(
+        self,
+        project_id: str,
+        owner_user_id: str,
+    ) -> ProjectRecord | None:
+        project = self.get_owned_for_update(project_id, owner_user_id)
+        if project is None:
+            return None
+        self.db.delete(project)
+        self.db.flush()
+        return project
+
     def get_owned_for_read(
         self,
         project_id: str,

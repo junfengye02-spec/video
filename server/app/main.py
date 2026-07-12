@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from contextlib import asynccontextmanager, contextmanager
@@ -10,7 +11,7 @@ from typing import Annotated, Any, AsyncIterator, Iterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from python_multipart.exceptions import MultipartParseError
 from redis import Redis
@@ -99,6 +100,7 @@ STORYBOARD_GENERATION_FAILED = "Text model storyboard generation failed"
 PROMPT_OPTIMIZATION_FAILED = "Text model prompt optimization failed"
 SHOT_GENERATION_FAILED = "Shot generation failed"
 PROJECT_RENDER_FAILED = "Project render failed"
+project_delete_logger = logging.getLogger("server.app.project_delete")
 MAX_MULTIPART_FIELD_BYTES = 64 * 1024
 MAX_MULTIPART_FIELDS = 4
 MAX_MULTIPART_FILES = 1
@@ -938,6 +940,34 @@ def create_app(
         workbench: WorkbenchStore = Depends(get_store),
     ) -> dict[str, Any]:
         return _project_snapshot(workbench, project)
+
+    @app.delete("/api/projects/{project_id}", status_code=204)
+    def delete_project(
+        project_id: str,
+        current: CurrentUser = Depends(require_csrf),
+        workbench: WorkbenchStore = Depends(get_store),
+        db: Session = Depends(get_db),
+    ) -> Response:
+        project = ProjectRepository(db).delete_owned(project_id, current.id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        deleted_project_id = project.id
+        try:
+            db.commit()
+        except Exception:
+            _rollback_quietly(db)
+            raise HTTPException(
+                status_code=500,
+                detail="Project deletion failed",
+            ) from None
+        try:
+            workbench.delete_project_workspace(deleted_project_id)
+        except Exception:
+            project_delete_logger.error(
+                "project workspace cleanup failed project_id=%s",
+                deleted_project_id,
+            )
+        return Response(status_code=204)
 
     @app.patch(
         "/api/projects/{project_id}/continuity",

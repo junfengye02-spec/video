@@ -26,6 +26,7 @@ from sqlalchemy.pool import StaticPool
 from server.app.auth.models import AdminAuditLog, User
 from server.app.auth.security import hash_password
 from server.app.auth.sessions import SessionStore
+from server.app.billing.models import GenerationJob
 from server.app.core.config import AppSettings, get_settings
 from server.app.db.base import Base
 from server.app.db.session import get_db
@@ -469,6 +470,7 @@ def _assert_project_recovery_quarantine(
 
 SURFACE_CASES = [
     ("GET", "", {}),
+    ("DELETE", "", {}),
     ("PATCH", "/continuity", {"json": {}}),
     (
         "POST",
@@ -607,6 +609,7 @@ def test_other_users_project_is_hidden_before_malformed_multipart_parsing(
         ("POST", "/api/projects"),
         ("POST", "/api/projects/import"),
         ("POST", "/api/projects/short-drama"),
+        ("DELETE", "/api/projects/not-owned"),
         ("PATCH", "/api/projects/not-owned/continuity"),
         ("PATCH", "/api/projects/not-owned/shots/s1"),
         ("POST", "/api/projects/not-owned/prompt-optimize"),
@@ -1226,6 +1229,31 @@ def test_repository_create_list_and_owned_lookup_are_owner_scoped(ownership_cont
     assert getattr(exc_info.value, "status_code", None) == 404
 
 
+def test_repository_delete_owned_uses_lock_and_owner_scope(ownership_context):
+    db = ownership_context["db"]
+    repository = ProjectRepository(db)
+    alice = repository.create(
+        owner_user_id=ALICE_ID,
+        title="Deletable",
+        mode="short_drama",
+        project_type="single_video",
+    )
+    bob = repository.create(
+        owner_user_id=BOB_ID,
+        title="Not Alice's",
+        mode="short_drama",
+        project_type="single_video",
+    )
+    db.flush()
+
+    assert repository.delete_owned(bob.id, ALICE_ID) is None
+    deleted = repository.delete_owned(alice.id, ALICE_ID)
+
+    assert deleted is alice
+    assert db.get(type(alice), alice.id) is None
+    assert db.get(type(bob), bob.id) is bob
+
+
 def test_project_creation_uses_current_owner_and_server_uuid(ownership_context):
     from server.app.projects.models import ProjectRecord
 
@@ -1286,7 +1314,7 @@ def test_short_drama_creation_uses_current_owner(ownership_context, monkeypatch)
     assert ownership_context["db"].get(ProjectRecord, project_id).owner_user_id == ALICE_ID
 
 
-def test_project_route_inventory_has_exactly_fifteen_surfaces(ownership_context):
+def test_project_route_inventory_has_exactly_sixteen_surfaces(ownership_context):
     routes = {
         (method, route.path)
         for route in ownership_context["app"].routes
@@ -1301,6 +1329,7 @@ def test_project_route_inventory_has_exactly_fifteen_surfaces(ownership_context)
         ("POST", "/api/projects/import"),
         ("GET", "/api/projects/latest"),
         ("GET", "/api/projects/{project_id}"),
+        ("DELETE", "/api/projects/{project_id}"),
         ("PATCH", "/api/projects/{project_id}/continuity"),
         ("POST", "/api/projects/{project_id}/assets/upload"),
         ("POST", "/api/projects/{project_id}/images/generate"),
@@ -1354,6 +1383,135 @@ def test_owner_filtered_project_list_hides_other_users_and_unowned(ownership_con
     assert [project["id"] for project in response.json()["projects"]] == [alice_project["id"]]
     assert ProjectRepository(ownership_context["db"]).get_owned(legacy.id, ALICE_ID) is None
     assert _alice(ownership_context).get(f"/api/projects/{legacy.id}").status_code == 404
+
+
+def test_owner_can_delete_project_record_and_workspace(ownership_context):
+    from server.app.projects.models import ProjectRecord
+
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Delete me")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    workspace = store.project_dir(project_id)
+
+    assert workspace.is_dir()
+
+    response = client.delete(f"/api/projects/{project_id}")
+
+    assert response.status_code == 204, response.text
+    assert response.content == b""
+    assert ownership_context["db"].get(ProjectRecord, project_id) is None
+    assert not workspace.exists()
+    assert client.get(f"/api/projects/{project_id}").status_code == 404
+    assert (
+        client.get(f"/api/projects/{project_id}/media/assets/images/missing.png").status_code
+        == 404
+    )
+    assert client.delete(f"/api/projects/{project_id}").status_code == 404
+
+
+def test_delete_missing_or_other_users_project_returns_404(ownership_context):
+    bob_project = _create_project(_bob(ownership_context), title="Bob's")
+
+    cross_user = _alice(ownership_context).delete(f"/api/projects/{bob_project['id']}")
+    missing = _alice(ownership_context).delete(
+        "/api/projects/11111111111141118111111111111111"
+    )
+
+    assert cross_user.status_code == 404
+    assert cross_user.json() == {"detail": "Project not found"}
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "Project not found"}
+
+
+def test_delete_retains_billing_and_audit_history(ownership_context):
+    from server.app.projects.models import ProjectRecord
+
+    db = ownership_context["db"]
+    project = _create_project(_alice(ownership_context), title="Historical")
+    project_id = project["id"]
+    job = GenerationJob.parent(
+        id="deletehistoryparent000000000001",
+        user_id=ALICE_ID,
+        project_id=project_id,
+        operation="render",
+    )
+    audit = AdminAuditLog(
+        id="deletehistoryaudit000000000001",
+        admin_user_id=ADMIN_ID,
+        action="admin.assign_project",
+        object_type="project",
+        object_id=project_id,
+        before_json=None,
+        after_json=json.dumps({"owner_user_id": ALICE_ID}),
+        ip_address="127.0.0.1",
+    )
+    db.add_all([job, audit])
+    db.commit()
+
+    response = _alice(ownership_context).delete(f"/api/projects/{project_id}")
+
+    assert response.status_code == 204, response.text
+    assert db.get(ProjectRecord, project_id) is None
+    assert db.get(GenerationJob, job.id) is job
+    assert job.project_id == project_id
+    assert db.get(AdminAuditLog, audit.id) is audit
+    assert audit.object_id == project_id
+
+
+def test_delete_commit_failure_leaves_record_and_workspace(
+    ownership_context, monkeypatch
+):
+    from server.app.projects.models import ProjectRecord
+
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Commit survives")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    before_workspace = _workspace_bytes(store, project_id)
+
+    def fail_commit():
+        raise RuntimeError("commit failed with password=delete-secret")
+
+    monkeypatch.setattr(ownership_context["db"], "commit", fail_commit)
+
+    response = client.delete(f"/api/projects/{project_id}")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Project deletion failed"}
+    assert ownership_context["db"].get(ProjectRecord, project_id) is not None
+    assert _workspace_bytes(store, project_id) == before_workspace
+    assert client.get(f"/api/projects/{project_id}").status_code == 200
+
+
+def test_delete_workspace_cleanup_failure_still_removes_server_project(
+    ownership_context, monkeypatch, caplog
+):
+    from server.app.projects.models import ProjectRecord
+
+    client = _alice(ownership_context)
+    project = _create_project(client, title="Cleanup later")
+    project_id = project["id"]
+    store = ownership_context["app"].state.store
+    injected_secret = "delete-cleanup-secret"
+    caplog.set_level(logging.ERROR, logger="server.app.project_delete")
+
+    def fail_cleanup(deleted_project_id):
+        assert deleted_project_id == project_id
+        raise OSError(f"C:\\private\\workspace token={injected_secret}")
+
+    monkeypatch.setattr(store, "delete_project_workspace", fail_cleanup)
+
+    response = client.delete(f"/api/projects/{project_id}")
+
+    public_output = response.text + caplog.text
+    assert response.status_code == 204, response.text
+    assert ownership_context["db"].get(ProjectRecord, project_id) is None
+    assert store.project_dir(project_id).exists()
+    assert client.get(f"/api/projects/{project_id}").status_code == 404
+    assert injected_secret not in public_output
+    assert "C:\\private" not in public_output
+    assert project_id in caplog.text
 
 
 def _valid_import_payload() -> dict:
@@ -2787,6 +2945,7 @@ def test_anonymous_project_routes_require_authentication(
         ("POST", "/api/projects", {"json": {"title": "Mine"}}),
         ("POST", "/api/projects/import", {"json": _valid_import_payload()}),
         ("POST", "/api/projects/short-drama", {"json": {}}),
+        ("DELETE", "/api/projects/p1", {}),
         ("PATCH", "/api/projects/p1/continuity", {"json": {}}),
         ("POST", "/api/projects/p1/assets/upload", {}),
         ("PATCH", "/api/projects/p1/shots/s1", {"json": {}}),
