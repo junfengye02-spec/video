@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 import {
   Link,
   Navigate,
+  NavLink,
   Outlet,
   Route,
   useLocation,
@@ -9,11 +11,11 @@ import {
   useOutletContext,
   useParams,
 } from "react-router-dom";
-import { useAuth } from "../../auth/AuthProvider";
 import { RequireAuth } from "../../auth/RequireAuth";
-import { useBilling } from "../../billing/BillingProvider";
 import { AppShell } from "../../components/shell/AppShell";
 import type { AssetRecord } from "../../domain/types";
+import { AccountShellAction } from "../../features/account/AccountShellAction";
+import { BillingShellAction } from "../../features/billing/BillingShellAction";
 import { getStrings } from "../../i18n";
 import type { LocalMediaRef } from "../../localdb/types";
 import { mediaUrl } from "../../api/client";
@@ -34,6 +36,11 @@ const closeErrorText = "\u5173\u95ed";
 const missingProjectTitle = "\u6b64\u9879\u76ee\u4e0d\u5728\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d";
 const backToProjectsText = "\u8fd4\u56de\u9879\u76ee\u5217\u8868";
 const loadingProjectText = "\u6b63\u5728\u52a0\u8f7d\u5f53\u524d\u6d4f\u89c8\u5668\u4e2d\u7684\u9879\u76ee...";
+const projectListText = "\u9879\u76ee\u5217\u8868";
+const storyboardText = "\u5206\u955c\u7f16\u8f91";
+const settingsText = "\u5168\u5c40\u8bbe\u5b9a";
+const resourcesText = "\u8d44\u6e90\u5e93";
+const productionText = "\u5236\u4f5c\u4e0e\u6210\u7247";
 
 type ProjectLayoutContext = {
   onDirtyChange: (dirty: boolean) => void;
@@ -70,16 +77,64 @@ function LocalBackupStatusSurface() {
   );
 }
 
-function useShellProps() {
-  const auth = useAuth();
-  const billing = useBilling();
-  return {
-    accountEmail: auth.user?.email ?? null,
-    isAdmin: auth.user?.role === "admin",
-    walletAvailableUnits: billing.wallet?.available_units ?? null,
-    walletLoading: billing.loading,
-    onLogout: auth.logout,
+function guardedNavigate(onBeforeNavigate?: () => boolean) {
+  return (event: MouseEvent<HTMLAnchorElement>) => {
+    if (onBeforeNavigate && !onBeforeNavigate()) {
+      event.preventDefault();
+    }
   };
+}
+
+function projectSectionLabel(projectId: string, pathname: string): string {
+  if (pathname === projectRoutes.settings(projectId)) return settingsText;
+  if (pathname === projectRoutes.resources(projectId)) return resourcesText;
+  if (pathname === projectRoutes.production(projectId)) return productionText;
+  return storyboardText;
+}
+
+function ProjectNavigation({
+  onBeforeNavigate,
+  projectId,
+}: {
+  onBeforeNavigate?: () => boolean;
+  projectId: string;
+}) {
+  const handleNavigate = guardedNavigate(onBeforeNavigate);
+  return (
+    <>
+      <NavLink to={projectRoutes.storyboard(projectId)} onClick={handleNavigate}>
+        {storyboardText}
+      </NavLink>
+      <NavLink to={projectRoutes.settings(projectId)} onClick={handleNavigate}>
+        {settingsText}
+      </NavLink>
+      <NavLink to={projectRoutes.resources(projectId)} onClick={handleNavigate}>
+        {resourcesText}
+      </NavLink>
+      <NavLink to={projectRoutes.production(projectId)} onClick={handleNavigate}>
+        {productionText}
+      </NavLink>
+    </>
+  );
+}
+
+function ProjectBreadcrumb({
+  onBeforeNavigate,
+  pathname,
+  project,
+}: {
+  onBeforeNavigate?: () => boolean;
+  pathname: string;
+  project: { id: string; title: string };
+}) {
+  const handleNavigate = guardedNavigate(onBeforeNavigate);
+  return (
+    <>
+      <Link to={projectRoutes.list} onClick={handleNavigate}>{projectListText}</Link>
+      <span>{project.title}</span>
+      <span>{projectSectionLabel(project.id, pathname)}</span>
+    </>
+  );
 }
 
 function WorkbenchProviderLayout() {
@@ -91,10 +146,13 @@ function WorkbenchProviderLayout() {
 }
 
 function RootLayout() {
-  const shellProps = useShellProps();
-
   return (
-    <AppShell project={null} {...shellProps}>
+    <AppShell
+      project={null}
+      breadcrumb={null}
+      accountAction={<AccountShellAction />}
+      billingAction={<BillingShellAction />}
+    >
       <ErrorSurface />
       <Outlet />
     </AppShell>
@@ -106,7 +164,6 @@ function ProjectLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { openLocalProject, snapshot } = useWorkbench();
-  const shellProps = useShellProps();
   const requestGenerationRef = useRef(0);
   const acceptedHistoryIndexRef = useRef<number | null>(
     typeof window.history.state?.idx === "number" ? window.history.state.idx : null,
@@ -223,7 +280,21 @@ function ProjectLayout() {
   return (
     <AppShell
       project={activeSnapshot?.project ?? null}
-      {...shellProps}
+      breadcrumb={activeSnapshot ? (
+        <ProjectBreadcrumb
+          project={activeSnapshot.project}
+          pathname={location.pathname}
+          onBeforeNavigate={confirmNavigation}
+        />
+      ) : null}
+      projectNavigation={activeSnapshot ? (
+        <ProjectNavigation
+          projectId={activeSnapshot.project.id}
+          onBeforeNavigate={confirmNavigation}
+        />
+      ) : null}
+      accountAction={<AccountShellAction onBeforeNavigate={confirmNavigation} />}
+      billingAction={<BillingShellAction onBeforeNavigate={confirmNavigation} />}
       onBeforeNavigate={confirmNavigation}
     >
       <ErrorSurface />

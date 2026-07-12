@@ -1,29 +1,21 @@
 import { Outlet, Route } from "react-router-dom";
-import { useAuth } from "../../auth/AuthProvider";
 import { RequireAdmin } from "../../auth/RequireAdmin";
 import { RequireAuth } from "../../auth/RequireAuth";
-import { useBilling } from "../../billing/BillingProvider";
 import { AppShell } from "../../components/shell/AppShell";
+import { AccountShellAction } from "../../features/account/AccountShellAction";
+import { BillingShellAction } from "../../features/billing/BillingShellAction";
 import { OrdersPage } from "../../pages/OrdersPage";
 import { WalletPage } from "../../pages/WalletPage";
 import { BillingAdminPage } from "../../pages/admin/BillingAdminPage";
 
-function useShellProps() {
-  const auth = useAuth();
-  const billing = useBilling();
-  return {
-    accountEmail: auth.user?.email ?? null,
-    isAdmin: auth.user?.role === "admin",
-    walletAvailableUnits: billing.wallet?.available_units ?? null,
-    walletLoading: billing.loading,
-    onLogout: auth.logout,
-  };
-}
-
 function BillingShellLayout() {
-  const shellProps = useShellProps();
   return (
-    <AppShell project={null} {...shellProps}>
+    <AppShell
+      project={null}
+      breadcrumb={null}
+      accountAction={<AccountShellAction />}
+      billingAction={<BillingShellAction />}
+    >
       <Outlet />
     </AppShell>
   );
@@ -46,4 +38,3 @@ export function billingRoutes() {
     </>
   );
 }
-
