@@ -550,6 +550,7 @@ def test_billed_image_service_returns_only_owned_media_urls_after_receipt(
         count=2,
         size="1024x1024",
         quality="standard",
+        now=NOW,
     )
 
     assert result.images == (
@@ -559,6 +560,32 @@ def test_billed_image_service_returns_only_owned_media_urls_after_receipt(
     assert db.get(GenerationJob, result.job_id).result_visible is True
     assert "uq_" not in repr(result)
     assert REQUEST_ID not in repr(result)
+
+
+def test_billed_image_service_accepts_deterministic_clock(
+    billing_context, tmp_path
+):
+    db, settings = billing_context
+    client = FakeNewApi()
+    store = WorkbenchStore(tmp_path / "projects")
+    store._ensure_project_dirs(PROJECT_ID)
+
+    result = generate_billed_project_image(
+        db=db,
+        newapi=client,
+        settings=settings,
+        media_store=store,
+        user_id=USER_ID,
+        project_id=PROJECT_ID,
+        prompt="frame",
+        model="gpt-image-2",
+        count=2,
+        size="1024x1024",
+        quality="standard",
+        now=NOW,
+    )
+
+    assert result.job_id
 
 
 def test_insufficient_stale_resize_keeps_same_child_hold_alias_and_multiplier_for_retry(

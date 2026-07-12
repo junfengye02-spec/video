@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass
+from datetime import datetime
 from io import BytesIO
 
 from PIL import Image
@@ -87,6 +88,7 @@ def generate_billed_project_image(
     size: str,
     quality: str,
     billing_job_id: str | None = None,
+    now: datetime | None = None,
 ) -> ImageGenerationResult:
     request = prepare_image_generation_request(model, prompt, count, size, quality)
     call = {
@@ -101,9 +103,9 @@ def generate_billed_project_image(
         "request": request,
     }
     if billing_job_id is None:
-        context = execute_billed_provider_call(parent_job_id=None, **call)
+        context = execute_billed_provider_call(parent_job_id=None, now=now, **call)
     else:
-        context = retry_payment_required_quote(job_id=billing_job_id, **call)
+        context = retry_payment_required_quote(job_id=billing_job_id, now=now, **call)
 
     def persist_hidden(job_id, response):
         images = _parse_image_payload(response, count)
@@ -138,6 +140,7 @@ def generate_billed_project_image(
         artifact_inspector=media_store.inspect_staged_artifact,
         context=context,
         persist_hidden=persist_hidden,
+        now=now,
     )
     return ImageGenerationResult(
         job_id=context.job_id,
