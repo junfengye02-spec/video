@@ -1,20 +1,48 @@
 import json
 import logging
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from pydantic import ValidationError
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from server.app.artifact_sync import rewrite_workflow_artifacts
 from server.app.auth.dependencies import CurrentUser, require_csrf, require_user
+from server.app.auth.models import User
+from server.app.billing.models import (
+    BillingReconciliation,
+    BillingSetting,
+    GenerationJob,
+)
+from server.app.billing.reconciliation import reconcile_due_jobs
+from server.app.billing.execution import PaymentRequiredQuote
+from server.app.core.config import get_settings
 from server.app.db.base import Base
 from server.app.db.session import get_db
 from server.app.main import (
+    RenderProjectRequest,
+    ShortDramaRequest,
     _require_function_user,
     create_app as create_production_app,
+    get_newapi_client,
 )
+from server.app.models import ImageGenerationRequest, PromptOptimizeRequest
+from server.app.provider.newapi import (
+    NewApiCallError,
+    QuotedExecutionResult,
+    TokenScopedQuote,
+    UsageQuote,
+    UsageReceipt,
+    VideoTaskStatus,
+)
+from server.app.projects.models import ProjectRecord
+from server.app.storage import ProjectMutationJournal, WorkbenchStore
+from server.app.wallet.models import WalletAccount
 
 
 TEST_USER = CurrentUser(
@@ -32,14 +60,162 @@ def create_app(*, db_path, projects_root):
     )
     Base.metadata.create_all(engine)
     db = Session(engine, expire_on_commit=False)
+    db.add(
+        User(
+            id=TEST_USER.id,
+            email=TEST_USER.email,
+            password_hash="hash",
+            role="user",
+            status="active",
+        )
+    )
+    db.add(
+        WalletAccount(
+            id="a" * 32,
+            user_id=TEST_USER.id,
+            balance_units=1_000_000_000,
+            held_units=0,
+        )
+    )
+    db.add(BillingSetting(id=1, multiplier_bps=15_000, version=0))
+    db.commit()
     app = create_production_app(db_path=db_path, projects_root=projects_root)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[require_user] = lambda: TEST_USER
     app.dependency_overrides[require_csrf] = lambda: TEST_USER
     app.dependency_overrides[_require_function_user] = lambda: TEST_USER
+    app.state.fake_newapi = FakeNewApi()
+    app.dependency_overrides[get_newapi_client] = lambda: app.state.fake_newapi
     app.state.test_db = db
     app.state.test_db_engine = engine
     return app
+
+
+class FakeNewApi:
+    def __init__(self):
+        self.counter = 0
+        self.references = {}
+        self.invalid_prompt = False
+        self.quote_failure = False
+        self.video_status = "completed"
+        self.execute_calls = []
+
+    def close(self):
+        return None
+
+    def quote(self, kind, request, token_alias=None):
+        if self.quote_failure:
+            raise NewApiCallError("provider unavailable")
+        self.counter += 1
+        relay_format = {
+            "text": "openai",
+            "image": "openai_image",
+            "video": "task",
+        }[kind]
+        alias = token_alias or f"{kind}-v1"
+        return TokenScopedQuote(
+            token_alias=alias,
+            quote=UsageQuote(
+                quote_id="uq_" + f"{self.counter:032x}",
+                status="quoted",
+                model=request.model,
+                fixed_group=f"openmontage-{kind}",
+                relay_format=relay_format,
+                estimated_quota=500_000,
+                quota_per_unit=Decimal("500000"),
+                cost_currency="USD",
+                estimated_cost_amount_micro=1_000_000,
+                pricing_version="sha256:test-pricing",
+                billing_fingerprint=f"sha256:test-{self.counter}",
+                other_ratios={},
+                expires_at=int((datetime.now(timezone.utc) + timedelta(seconds=120)).timestamp()),
+            ),
+        )
+
+    def execute_quoted(self, kind, token_alias, request, quote_id):
+        self.execute_calls.append((kind, quote_id))
+        self.counter += 1
+        if kind == "video":
+            reference = "task_" + f"{self.counter:032x}"
+            response = httpx.Response(200, json={"id": reference})
+            reference_type = "task"
+        else:
+            reference = f"{self.counter:023d}" + "deadbeefABC12345"
+            body = json.loads(request.content)
+            if kind == "image":
+                content = {
+                    "data": [
+                        {
+                            "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                        }
+                        for _ in range(body["n"])
+                    ]
+                }
+            elif str(body["messages"][0]["content"]).startswith("Create short-drama"):
+                content = {
+                    "choices": [{"message": {"content": json.dumps(_fake_storyboard_result())}}]
+                }
+            elif "Return exactly one JSON object" in body["messages"][1]["content"]:
+                content = {
+                    "choices": [{"message": {"content": json.dumps({
+                        "prompt": "optimized shot prompt",
+                        "shot_intent": "Reveal the clue.",
+                        "shot_language": {
+                            "shot_size": "medium_close",
+                            "camera_movement": (
+                                "teleport_sideways" if self.invalid_prompt else "dolly_in"
+                            ),
+                        },
+                    })}}]
+                }
+            else:
+                content = {"choices": [{"message": {"content": "optimized prompt"}}]}
+            response = httpx.Response(
+                200,
+                headers={"X-Oneapi-Request-Id": reference},
+                json=content,
+            )
+            reference_type = "request"
+        self.references[reference] = (kind, request.model)
+        return QuotedExecutionResult(reference_type, reference, response)
+
+    def get_request_receipt(self, kind, token_alias, request_id):
+        return self._receipt("request", request_id)
+
+    def get_task_receipt(self, kind, token_alias, task_id):
+        return self._receipt("task", task_id)
+
+    def _receipt(self, reference_type, reference_id):
+        _kind, model = self.references[reference_id]
+        return UsageReceipt(
+            reference_type=reference_type,
+            reference_id=reference_id,
+            status="settled",
+            model=model,
+            quota=500_000,
+            refunded_quota=0,
+            quota_per_unit=Decimal("500000"),
+            pricing_version="sha256:test-pricing",
+            cost_currency="USD",
+            cost_amount_micro=800_000,
+            settled_at=int(datetime.now(timezone.utc).timestamp()),
+        )
+
+    def get_video_task(self, token_alias, task_id):
+        return VideoTaskStatus(id=task_id, status=self.video_status)
+
+    def download_video_content(
+        self,
+        token_alias,
+        task_id,
+        destination,
+        *,
+        progress_callback=None,
+    ):
+        destination.write_bytes(b"fake video")
+        if progress_callback is not None:
+            progress_callback()
+        return 10
 
 
 TEXT_TEST_KEY = "txt-test-key-1234567890abcdef"
@@ -173,22 +349,21 @@ def _fake_storyboard_result() -> dict:
     }
 
 
-def _fake_valid_gateway(**kwargs):
-    return {"valid": True, "errors": []}
-
-
 @pytest.fixture(autouse=True)
 def stub_storyboard_generator(monkeypatch):
     monkeypatch.setattr(
-        "server.app.main.generate_short_drama_storyboard",
-        lambda **kwargs: _fake_storyboard_result(),
+        "server.app.provider.video_recovery.probe_output",
+        lambda path: {
+            "file_size_bytes": path.stat().st_size,
+            "video_width": 720,
+            "video_height": 1280,
+        },
     )
 
 
-def test_key_session_returns_masked_key(tmp_path, monkeypatch):
+def test_browser_provider_key_session_is_removed(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
-    monkeypatch.setattr("server.app.main.validate_gateway_models", _fake_valid_gateway)
 
     response = client.post(
         "/api/session/key",
@@ -203,27 +378,15 @@ def test_key_session_returns_masked_key(tmp_path, monkeypatch):
         },
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["valid"] is True
-    assert body["masked_keys"]["text"] == "txt-...cdef"
-    assert body["masked_keys"]["image"] == "img-...cdef"
-    assert body["masked_keys"]["video"] == "vid-...cdef"
-    assert body["models"] == {
-        "text": "gpt-5.5",
-        "image": "gpt-image-2",
-        "video": "veo_3_1-lite",
-    }
+    assert response.status_code == 404
+    assert TEXT_TEST_KEY not in response.text
+    assert IMAGE_TEST_KEY not in response.text
+    assert VIDEO_TEST_KEY not in response.text
 
 
-def test_key_session_returns_validation_failure(tmp_path, monkeypatch):
+def test_browser_provider_key_session_never_calls_validation(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
-
-    monkeypatch.setattr(
-        "server.app.main.validate_gateway_models",
-        lambda **kwargs: {"valid": False, "errors": ["video model 'omni_flash-10s' was not returned"]},
-    )
 
     response = client.post(
         "/api/session/key",
@@ -238,8 +401,7 @@ def test_key_session_returns_validation_failure(tmp_path, monkeypatch):
         },
     )
 
-    assert response.status_code == 400
-    assert "video model" in response.json()["detail"]
+    assert response.status_code == 404
 
 
 def test_create_short_drama_project_returns_storyboard(tmp_path):
@@ -268,6 +430,21 @@ def test_create_short_drama_project_returns_storyboard(tmp_path):
     assert len(body["storyboard"]["shots"]) >= 4
 
 
+def test_billed_storyboard_request_supports_default_shot_count():
+    from server.app.storyboard_generator import prepare_storyboard_request
+
+    request = prepare_storyboard_request(
+        title="Rain Alley",
+        prompt="rain-night urban reversal short drama",
+        model="gpt-5.5",
+    )
+
+    payload = json.loads(request.content)
+    user_content = payload["messages"][1]["content"]
+    assert user_content.startswith("Title: Rain Alley\nBrief: rain-night")
+    assert "Shots:" in user_content
+
+
 def test_create_draft_project_returns_continuity_and_workflow_shell(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
@@ -281,6 +458,746 @@ def test_create_draft_project_returns_continuity_and_workflow_shell(tmp_path):
     assert body["continuity_plan"]["project_type"] == "mini_series"
     assert body["storyboard"]["shots"] == []
     assert body["workflow_artifacts"]
+
+
+def test_paid_project_contract_ignores_browser_provider_credentials(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/projects",
+        json={
+            "title": "No browser keys",
+            "project_type": "single_video",
+            "text_key": "attacker-text",
+            "image_key": "attacker-image",
+            "video_key": "attacker-video",
+            "base_url": "https://attacker.invalid",
+        },
+    )
+
+    assert response.status_code == 200
+    rendered = json.dumps(response.json()).lower()
+    assert "attacker" not in rendered
+    assert "quote_id" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("request_model", "payload"),
+    [
+        (
+            ShortDramaRequest,
+            {"title": "Drama", "prompt": "A reversal", "owner_user_id": "attacker"},
+        ),
+        (
+            PromptOptimizeRequest,
+            {
+                "target": "shot",
+                "target_id": "s1",
+                "source_text": "Improve this",
+                "shot_intent": "attacker metadata",
+            },
+        ),
+        (
+            ImageGenerationRequest,
+            {"prompt": "A frame", "cost_usd": 0},
+        ),
+        (
+            RenderProjectRequest,
+            {"video_key": "legacy", "base_url": "https://legacy.invalid", "cost_usd": 0},
+        ),
+    ],
+)
+def test_paid_request_models_reject_noncredential_extra_fields(request_model, payload):
+    with pytest.raises(ValidationError):
+        request_model.model_validate(payload)
+
+
+def test_paid_request_openapi_has_no_provider_credentials(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    schema = app.openapi()
+    rendered = json.dumps(
+        {
+            path: value
+            for path, value in schema["paths"].items()
+            if path.endswith("/prompt-optimize")
+            or path.endswith("/images/generate")
+            or path.endswith("/render")
+        }
+    )
+
+    assert "text_key" not in rendered
+    assert "image_key" not in rendered
+    assert "video_key" not in rendered
+    assert "base_url" not in rendered
+    assert "/api/projects/{project_id}/images/generate" in schema["paths"]
+
+
+def test_wallet_payment_and_owned_billing_job_routes_are_mounted(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    paths = app.openapi()["paths"]
+
+    assert "/api/wallet" in paths
+    assert "/api/payment-orders" in paths
+    assert "/api/billing/jobs/{job_id}" in paths
+
+
+def test_cross_user_billing_job_and_generated_media_are_not_found(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    db = app.state.test_db
+    other_user_id = "b" * 32
+    other_project_id = "20000000000040008000000000000002"
+    other_job_id = "c" * 32
+    db.add(User(id=other_user_id, email="other@example.com", password_hash="hash", role="user", status="active"))
+    db.add(ProjectRecord(id=other_project_id, owner_user_id=other_user_id, title="Other", mode="short_drama", project_type="single_video"))
+    db.add(GenerationJob.parent(id=other_job_id, user_id=other_user_id, project_id=other_project_id, operation="render"))
+    db.commit()
+    image_path = tmp_path / "projects" / other_project_id / "assets" / "images" / "generated" / f"{other_job_id}-0.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"private")
+
+    assert client.get(f"/api/billing/jobs/{other_job_id}").status_code == 404
+    assert client.get(
+        f"/api/projects/{other_project_id}/media/assets/images/generated/{other_job_id}-0.png"
+    ).status_code == 404
+    assert client.get(
+        f"/api/projects/{other_project_id}/media/assets/images/generated//{other_job_id}-0.png"
+    ).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "assets/images/generated//{job_id}-0.png",
+        "assets/images/generated/%2E%2E/generated/{job_id}-0.png",
+    ],
+)
+def test_noncanonical_generated_media_cannot_bypass_result_visibility(tmp_path, relative_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = client.post("/api/projects", json={"title": "Hidden image"}).json()
+    project_id = created["project"]["id"]
+    job_id = "d" * 32
+    now = datetime.now(timezone.utc)
+    app.state.test_db.add(
+        GenerationJob(
+            id=job_id,
+            parent_job_id=None,
+            chargeable=True,
+            user_id=TEST_USER.id,
+            project_id=project_id,
+            operation="image_generation",
+            capability="image",
+            token_kind="image",
+            token_alias="image-v1",
+            model="gpt-image-2",
+            multiplier_bps=15_000,
+            provider_method="POST",
+            provider_route="/v1/images/generations",
+            reference_deadline=now + timedelta(days=1),
+            receipt_deadline=now + timedelta(days=1),
+            status="receipt_pending",
+            result_staged=False,
+            result_visible=False,
+            quote_id="uq_" + "d" * 32,
+            quote_expires_at=now + timedelta(minutes=2),
+            quote_estimated_quota=500_000,
+            quote_estimated_provider_cost_micro=1_000_000,
+            quote_quota_per_unit=Decimal("500000"),
+            quote_pricing_version="sha256:test-pricing",
+            quote_other_ratios_json="{}",
+            quote_billing_fingerprint="sha256:hidden-image",
+        )
+    )
+    app.state.test_db.commit()
+    image_path = tmp_path / "projects" / project_id / "assets" / "images" / "generated" / f"{job_id}-0.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"private")
+
+    response = client.get(
+        f"/api/projects/{project_id}/media/{relative_path.format(job_id=job_id)}"
+    )
+
+    assert response.status_code == 404
+
+
+def test_image_generation_endpoint_bills_then_serves_owned_media_without_provider_metadata(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    created = client.post("/api/projects", json={"title": "Images"}).json()
+    project_id = created["project"]["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/images/generate",
+        json={
+            "prompt": "rainy alley frame",
+            "model": "gpt-image-2",
+            "count": 1,
+            "size": "1024x1024",
+            "quality": "standard",
+            "image_key": "ignored-browser-key",
+            "base_url": "https://attacker.invalid",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"job_id", "images"}
+    assert "quote" not in response.text.lower()
+    assert "request" not in response.text.lower()
+    assert "attacker" not in response.text.lower()
+    assert client.get(body["images"][0]).status_code == 200
+    job = app.state.test_db.get(GenerationJob, body["job_id"])
+    assert job.status == "billed" and job.result_visible is True
+
+
+def test_initial_insufficient_balance_returns_sanitized_402_before_upstream(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app, raise_server_exceptions=False)
+    created = client.post("/api/projects", json={"title": "No funds"}).json()
+    project_id = created["project"]["id"]
+    wallet = app.state.test_db.query(WalletAccount).filter_by(user_id=TEST_USER.id).one()
+    wallet.balance_units = 0
+    app.state.test_db.commit()
+
+    response = client.post(
+        f"/api/projects/{project_id}/images/generate",
+        json={"prompt": "unaffordable frame"},
+    )
+
+    assert response.status_code == 402
+    assert response.json() == {"code": "payment_required"}
+    assert app.state.fake_newapi.execute_calls == []
+
+
+def test_pending_render_resumes_same_children_and_worker_publishes_results(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_count = len(created["storyboard"]["shots"])
+    app.state.fake_newapi.video_status = "queued"
+
+    first = client.post(f"/api/projects/{project_id}/render", json={})
+
+    assert first.status_code == 409
+    assert first.json() == {"code": "provider_result_pending"}
+    video_calls = [call for call in app.state.fake_newapi.execute_calls if call[0] == "video"]
+    assert len(video_calls) == shot_count
+    children = app.state.test_db.query(GenerationJob).filter(
+        GenerationJob.project_id == project_id,
+        GenerationJob.capability == "video",
+    ).all()
+    assert len(children) == shot_count
+    assert len({child.parent_job_id for child in children}) == 1
+
+    in_flight_retry = client.post(f"/api/projects/{project_id}/render", json={})
+    assert in_flight_retry.status_code == 409
+    assert in_flight_retry.json() == {"code": "provider_result_pending"}
+    assert len([call for call in app.state.fake_newapi.execute_calls if call[0] == "video"]) == shot_count
+
+    app.state.fake_newapi.video_status = "completed"
+    processed = reconcile_due_jobs(
+        app.state.test_db,
+        app.state.fake_newapi,
+        datetime.now(timezone.utc),
+        100,
+        settings=get_settings(),
+        media_store=app.state.store,
+    )
+    rows = app.state.test_db.scalars(
+        select(BillingReconciliation).join(
+            GenerationJob, GenerationJob.id == BillingReconciliation.job_id
+        ).where(GenerationJob.project_id == project_id)
+    ).all()
+    assert processed == shot_count, [
+        (row.reason, row.status, row.attempts, row.next_retry_at, row.last_error)
+        for row in rows
+    ]
+    storyboard = app.state.store.read_artifact(project_id, "episode_storyboard.json")
+    assert storyboard is not None
+    assert all(shot["status"] == "complete" for shot in storyboard["shots"])
+    assert all(shot["output_path"] for shot in storyboard["shots"])
+
+    def fake_compose(project_dir, _storyboard, *, output_path=None):
+        output = output_path or project_dir / "renders" / "final.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"composed")
+        return output
+
+    monkeypatch.setattr("server.app.openmontage_runner.compose_final_video", fake_compose)
+    second = client.post(f"/api/projects/{project_id}/render", json={})
+
+    assert second.status_code == 200, second.text
+    assert len([call for call in app.state.fake_newapi.execute_calls if call[0] == "video"]) == shot_count
+    parents = app.state.test_db.query(GenerationJob).filter(
+        GenerationJob.project_id == project_id,
+        GenerationJob.chargeable.is_(False),
+    ).all()
+    assert len(parents) == 1
+    assert parents[0].status == "complete"
+
+
+def test_render_does_not_hold_project_mutation_across_provider_io(
+    tmp_path, monkeypatch
+):
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=tmp_path / "projects",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    active = {"journals": 0}
+    observed_depths: list[int] = []
+    original_begin = app.state.store.begin_project_mutation
+    original_execute = app.state.fake_newapi.execute_quoted
+
+    class TrackedJournal:
+        def __init__(self, journal):
+            self.journal = journal
+            self.closed = False
+
+        def _close(self, method):
+            try:
+                return method()
+            finally:
+                if not self.closed:
+                    active["journals"] -= 1
+                    self.closed = True
+
+        def complete(self):
+            return self._close(self.journal.complete)
+
+        def restore(self):
+            return self._close(self.journal.restore)
+
+    def begin_mutation(*args, **kwargs):
+        journal = original_begin(*args, **kwargs)
+        active["journals"] += 1
+        return TrackedJournal(journal)
+
+    def execute_quoted(kind, *args, **kwargs):
+        if kind == "video":
+            observed_depths.append(active["journals"])
+        return original_execute(kind, *args, **kwargs)
+
+    monkeypatch.setattr(app.state.store, "begin_project_mutation", begin_mutation)
+    monkeypatch.setattr(app.state.fake_newapi, "execute_quoted", execute_quoted)
+    app.state.fake_newapi.video_status = "queued"
+
+    response = client.post(f"/api/projects/{project_id}/render", json={})
+
+    assert response.status_code == 409
+    assert observed_depths
+    assert observed_depths == [0] * len(observed_depths)
+    assert active["journals"] == 0
+
+
+def test_stale_public_video_bytes_are_not_served_after_shot_version_edit(
+    tmp_path,
+):
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=tmp_path / "projects",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    stale_shot = created["storyboard"]["shots"][0]
+    app.state.fake_newapi.video_status = "queued"
+    assert client.post(f"/api/projects/{project_id}/render", json={}).status_code == 409
+    app.state.fake_newapi.video_status = "completed"
+    assert reconcile_due_jobs(
+        app.state.test_db,
+        app.state.fake_newapi,
+        datetime.now(timezone.utc),
+        100,
+        settings=get_settings(),
+        media_store=app.state.store,
+    ) == len(created["storyboard"]["shots"])
+    media_url = f"/api/projects/{project_id}/media/assets/video/{stale_shot['id']}.mp4"
+    assert client.get(media_url).status_code == 200
+
+    edited = client.patch(
+        f"/api/projects/{project_id}/shots/{stale_shot['id']}",
+        json={"prompt": "The new version revokes the old public bytes."},
+    )
+
+    assert edited.status_code == 200
+    public_path = (
+        app.state.store.project_dir(project_id)
+        / "assets"
+        / "video"
+        / f"{stale_shot['id']}.mp4"
+    )
+    assert public_path.is_file()
+    assert client.get(media_url).status_code == 404
+
+
+def test_unclaimed_project_video_remains_owned_media(tmp_path):
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=tmp_path / "projects",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    media_path = (
+        app.state.store.project_dir(project_id)
+        / "assets"
+        / "video"
+        / "manual.mp4"
+    )
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"manual-owned-video")
+
+    response = client.get(
+        f"/api/projects/{project_id}/media/assets/video/manual.mp4"
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"manual-owned-video"
+
+
+@pytest.mark.parametrize("intent_state", ["missing", "corrupt"])
+def test_billed_video_requires_valid_current_intent(tmp_path, intent_state):
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=tmp_path / "projects",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    target = created["storyboard"]["shots"][0]
+    app.state.fake_newapi.video_status = "queued"
+    assert client.post(f"/api/projects/{project_id}/render", json={}).status_code == 409
+    app.state.fake_newapi.video_status = "completed"
+    assert reconcile_due_jobs(
+        app.state.test_db,
+        app.state.fake_newapi,
+        datetime.now(timezone.utc),
+        100,
+        settings=get_settings(),
+        media_store=app.state.store,
+    ) == len(created["storyboard"]["shots"])
+    job = app.state.test_db.scalar(
+        select(GenerationJob).where(
+            GenerationJob.project_id == project_id,
+            GenerationJob.operation == f"shot:{target['id']}",
+        )
+    )
+    intent_path = (
+        app.state.store.project_dir(project_id)
+        / ".billing-results"
+        / "video-intents"
+        / f"{job.id}.json"
+    )
+    if intent_state == "missing":
+        intent_path.unlink()
+    else:
+        intent_path.write_text('{"prompt":"must-not-authorize"}', encoding="utf-8")
+
+    response = client.get(
+        f"/api/projects/{project_id}/media/assets/video/{target['id']}.mp4"
+    )
+
+    assert response.status_code == 404
+
+
+def test_public_video_is_denied_before_storyboard_commit_and_restored_on_crash(
+    tmp_path, monkeypatch
+):
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=tmp_path / "projects",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    app.state.fake_newapi.video_status = "queued"
+    assert client.post(f"/api/projects/{project_id}/render", json={}).status_code == 409
+
+    original_write = app.state.store.write_artifact
+    observed_statuses = []
+    crashed_publication = {}
+
+    def crash_before_storyboard_commit(target_project_id, name, data):
+        if name == "episode_storyboard.json" and not crashed_publication:
+            shot = next(
+                shot
+                for shot in data["shots"]
+                if shot.get("status") == "complete" and shot.get("output_path")
+            )
+            public_path = (
+                app.state.store.project_dir(project_id) / shot["output_path"]
+            )
+            assert public_path.is_file()
+            crashed_publication.update(shot_id=shot["id"], path=public_path)
+            observed_statuses.append(
+                client.get(
+                    f"/api/projects/{project_id}/media/{shot['output_path']}"
+                ).status_code
+            )
+            raise RuntimeError("crash before storyboard commit")
+        return original_write(target_project_id, name, data)
+
+    monkeypatch.setattr(app.state.store, "write_artifact", crash_before_storyboard_commit)
+    app.state.fake_newapi.video_status = "completed"
+
+    reconcile_due_jobs(
+        app.state.test_db,
+        app.state.fake_newapi,
+        datetime.now(timezone.utc),
+        100,
+        settings=get_settings(),
+        media_store=app.state.store,
+    )
+
+    assert observed_statuses == [503]
+    assert not crashed_publication["path"].exists()
+    assert (
+        client.get(
+            f"/api/projects/{project_id}/media/assets/video/"
+            f"{crashed_publication['shot_id']}.mp4"
+        ).status_code
+        == 404
+    )
+    storyboard = app.state.store.read_artifact(project_id, "episode_storyboard.json")
+    current = next(
+        shot
+        for shot in storyboard["shots"]
+        if shot["id"] == crashed_publication["shot_id"]
+    )
+    assert current["output_path"] is None
+    job = app.state.test_db.scalar(
+        select(GenerationJob).where(
+            GenerationJob.project_id == project_id,
+            GenerationJob.operation == f"shot:{crashed_publication['shot_id']}",
+        )
+    )
+    reconciliation = app.state.test_db.scalar(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == job.id,
+            BillingReconciliation.reason == "provider_completion",
+        )
+    )
+    assert reconciliation.status == "open"
+    assert reconciliation.last_error == "RuntimeError: crash before storyboard commit"
+
+
+def test_restart_restores_public_video_after_process_death_before_storyboard_commit(
+    tmp_path, monkeypatch
+):
+    projects_root = tmp_path / "projects"
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=projects_root,
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    app.state.fake_newapi.video_status = "queued"
+    assert client.post(f"/api/projects/{project_id}/render", json={}).status_code == 409
+    original_write = app.state.store.write_artifact
+    original_restore = ProjectMutationJournal.restore
+    crashed_publication = {}
+
+    def crash_before_storyboard_commit(target_project_id, name, data):
+        if name == "episode_storyboard.json" and not crashed_publication:
+            shot = next(
+                shot
+                for shot in data["shots"]
+                if shot.get("status") == "complete" and shot.get("output_path")
+            )
+            public_path = app.state.store.project_dir(project_id) / shot["output_path"]
+            assert public_path.is_file()
+            crashed_publication.update(shot_id=shot["id"], path=public_path)
+            raise RuntimeError("crash before storyboard commit")
+        return original_write(target_project_id, name, data)
+
+    def process_dies_before_restore(journal):
+        if journal.operation == "publish-billed-video":
+            raise SystemExit("simulated process death")
+        return original_restore(journal)
+
+    monkeypatch.setattr(app.state.store, "write_artifact", crash_before_storyboard_commit)
+    monkeypatch.setattr(ProjectMutationJournal, "restore", process_dies_before_restore)
+    app.state.fake_newapi.video_status = "completed"
+
+    with pytest.raises(SystemExit, match="simulated process death"):
+        reconcile_due_jobs(
+            app.state.test_db,
+            app.state.fake_newapi,
+            datetime.now(timezone.utc),
+            100,
+            settings=get_settings(),
+            media_store=app.state.store,
+        )
+
+    assert crashed_publication["path"].is_file()
+    assert (projects_root / ".recovery" / project_id).is_dir()
+    app.state.test_db.rollback()
+    monkeypatch.setattr(ProjectMutationJournal, "restore", original_restore)
+    app.state.store = WorkbenchStore(projects_root=projects_root)
+
+    assert not crashed_publication["path"].exists()
+    assert not (projects_root / ".recovery").exists()
+    assert (
+        client.get(
+            f"/api/projects/{project_id}/media/assets/video/"
+            f"{crashed_publication['shot_id']}.mp4"
+        ).status_code
+        == 404
+    )
+
+
+def test_edit_during_composition_cannot_overwrite_storyboard_or_publish_final(
+    tmp_path, monkeypatch
+):
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=tmp_path / "projects",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    editor = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    target = created["storyboard"]["shots"][0]
+    edited_responses = []
+
+    def edit_then_compose(project_dir, _storyboard, *, output_path=None):
+        edited_responses.append(
+            editor.patch(
+                f"/api/projects/{project_id}/shots/{target['id']}",
+                json={"prompt": "Committed while composition was running."},
+            )
+        )
+        output = output_path or project_dir / "renders" / "final.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"stale-composition")
+        return output
+
+    monkeypatch.setattr(
+        "server.app.openmontage_runner.compose_final_video",
+        edit_then_compose,
+    )
+    app.state.fake_newapi.video_status = "completed"
+
+    response = client.post(f"/api/projects/{project_id}/render", json={})
+
+    assert response.status_code == 409
+    assert response.json() == {"code": "provider_result_pending"}
+    assert edited_responses and edited_responses[0].status_code == 200
+    storyboard = app.state.store.read_artifact(
+        project_id, "episode_storyboard.json"
+    )
+    current = next(
+        shot for shot in storyboard["shots"] if shot["id"] == target["id"]
+    )
+    assert current["prompt"] == "Committed while composition was running."
+    assert current["version"] == target["version"] + 1
+    assert not (
+        app.state.store.project_dir(project_id) / "renders" / "final.mp4"
+    ).exists()
+    parent = app.state.test_db.query(GenerationJob).filter(
+        GenerationJob.project_id == project_id,
+        GenerationJob.chargeable.is_(False),
+    ).one()
+    assert parent.status == "partial_failure"
+
+
+def test_restart_restores_final_composition_after_db_commit(tmp_path, monkeypatch):
+    projects_root = tmp_path / "projects"
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=projects_root,
+    )
+    client = TestClient(app)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    original_complete = ProjectMutationJournal.complete
+    crashed = {"value": False}
+
+    def compose(project_dir, _storyboard, *, output_path=None):
+        output = output_path or project_dir / "renders" / "final.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"composed")
+        return output
+
+    def process_dies_after_db_commit(journal):
+        if journal.operation == "render" and not crashed["value"]:
+            crashed["value"] = True
+            raise SystemExit("simulated process death after db commit")
+        return original_complete(journal)
+
+    monkeypatch.setattr("server.app.openmontage_runner.compose_final_video", compose)
+    monkeypatch.setattr(ProjectMutationJournal, "complete", process_dies_after_db_commit)
+    app.state.fake_newapi.video_status = "completed"
+
+    with pytest.raises(SystemExit, match="after db commit"):
+        client.post(f"/api/projects/{project_id}/render", json={})
+
+    final_path = app.state.store.project_dir(project_id) / "renders" / "final.mp4"
+    assert final_path.is_file()
+    assert (projects_root / ".recovery" / project_id).is_dir()
+    execute_count = len(app.state.fake_newapi.execute_calls)
+    app.state.test_db.rollback()
+    monkeypatch.setattr(ProjectMutationJournal, "complete", original_complete)
+    app.state.store = WorkbenchStore(projects_root=projects_root)
+
+    assert not final_path.exists()
+    assert not (projects_root / ".recovery").exists()
+    loaded = client.get(f"/api/projects/{project_id}")
+    assert loaded.status_code == 200
+    assert loaded.json()["final_path"] is None
+
+    rerendered = client.post(f"/api/projects/{project_id}/render", json={})
+
+    assert rerendered.status_code == 200
+    assert final_path.is_file()
+    assert len(app.state.fake_newapi.execute_calls) == execute_count
+
+
+def test_worker_keeps_older_billed_video_detached_after_shot_edit(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    stale_shot = created["storyboard"]["shots"][0]
+    app.state.fake_newapi.video_status = "queued"
+    assert client.post(f"/api/projects/{project_id}/render", json={}).status_code == 409
+
+    edited = client.patch(
+        f"/api/projects/{project_id}/shots/{stale_shot['id']}",
+        json={"prompt": "A newer shot version must win."},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["shot"]["version"] == stale_shot["version"] + 1
+
+    app.state.fake_newapi.video_status = "completed"
+    assert reconcile_due_jobs(
+        app.state.test_db,
+        app.state.fake_newapi,
+        datetime.now(timezone.utc),
+        100,
+        settings=get_settings(),
+        media_store=app.state.store,
+    ) == len(created["storyboard"]["shots"])
+
+    storyboard = app.state.store.read_artifact(project_id, "episode_storyboard.json")
+    current = next(shot for shot in storyboard["shots"] if shot["id"] == stale_shot["id"])
+    assert current["version"] == stale_shot["version"] + 1
+    assert current["prompt"] == "A newer shot version must win."
+    assert current["status"] != "complete"
+    assert current["output_path"] is None
+    assert not (
+        app.state.store.project_dir(project_id)
+        / "assets"
+        / "video"
+        / f"{stale_shot['id']}.mp4"
+    ).exists()
 
 
 def test_reference_image_upload_persists_asset_library_and_project_snapshot(tmp_path):
@@ -339,17 +1256,9 @@ def test_save_continuity_plan_updates_project_snapshot_and_handoff(tmp_path):
     assert loaded["continuity_plan"]["series_bible"]["worldview"] == "Rain city relay network"
 
 
-def test_create_short_drama_project_uses_text_model_storyboard_generator(tmp_path, monkeypatch):
+def test_create_short_drama_project_uses_server_text_model_billing(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
-    calls = []
-
-    def fake_generate_short_drama_storyboard(**kwargs):
-        calls.append(kwargs)
-        return _fake_storyboard_result()
-
-    monkeypatch.setattr("server.app.main.generate_short_drama_storyboard", fake_generate_short_drama_storyboard)
-
     response = client.post(
         "/api/projects/short-drama",
         json={
@@ -366,19 +1275,20 @@ def test_create_short_drama_project_uses_text_model_storyboard_generator(tmp_pat
     )
 
     assert response.status_code == 200
-    assert calls[0]["model"] == "gpt-5.5"
-    assert calls[0]["api_key"] == TEXT_TEST_KEY
+    job = app.state.test_db.query(GenerationJob).filter(
+        GenerationJob.operation == "storyboard_generation"
+    ).one()
+    assert job.model == "gpt-5.5"
+    assert job.capability == "text"
+    assert job.status == "billed"
     assert response.json()["storyboard"]["shots"][0]["shot_language"]["shot_size"] == "medium_close"
 
 
-def test_create_short_drama_project_returns_502_without_persisting_partial_project(tmp_path, monkeypatch):
+def test_create_short_drama_quote_failure_returns_sanitized_error_without_child(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
 
-    def failing_generate_short_drama_storyboard(**kwargs):
-        raise RuntimeError("upstream timeout")
-
-    monkeypatch.setattr("server.app.main.generate_short_drama_storyboard", failing_generate_short_drama_storyboard)
+    app.state.fake_newapi.quote_failure = True
 
     response = client.post(
         "/api/projects/short-drama",
@@ -396,8 +1306,9 @@ def test_create_short_drama_project_returns_502_without_persisting_partial_proje
     )
 
     assert response.status_code == 502
-    assert response.json()["detail"] == "Text model storyboard generation failed"
+    assert response.json() == {"code": "provider_call_failed"}
     assert list((tmp_path / "projects").iterdir()) == []
+    assert app.state.test_db.query(GenerationJob).count() == 0
 
 
 def test_load_project_returns_written_artifacts(tmp_path):
@@ -747,7 +1658,7 @@ def test_regenerate_shot_returns_sanitized_generation_summary(tmp_path, monkeypa
     assert body["generation"]["output_path"] == f"assets/video/{shot_id}.mp4"
 
 
-def test_regenerate_shot_requires_video_key(tmp_path):
+def test_regenerate_shot_uses_server_video_credentials(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
     created = _create_project_with_fake_generator(client)
@@ -759,10 +1670,10 @@ def test_regenerate_shot_requires_video_key(tmp_path):
         json={"base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 200
 
 
-def test_regenerate_shot_rejects_whitespace_only_video_key(tmp_path, monkeypatch):
+def test_regenerate_shot_ignores_whitespace_legacy_video_key(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
     created = _create_project_with_fake_generator(client)
@@ -772,7 +1683,12 @@ def test_regenerate_shot_rejects_whitespace_only_video_key(tmp_path, monkeypatch
 
     def fake_run_single_shot_generation(**kwargs):
         calls.append(kwargs)
-        raise AssertionError("validation should reject whitespace-only video keys before generation")
+        return {
+            "shot_id": shot_id,
+            "output_path": str(kwargs["project_dir"] / "assets" / "video" / f"{shot_id}.mp4"),
+            "tool_result": {},
+            "cost_usd": 0.0,
+        }
 
     monkeypatch.setattr("server.app.main.run_single_shot_generation", fake_run_single_shot_generation)
 
@@ -781,8 +1697,32 @@ def test_regenerate_shot_rejects_whitespace_only_video_key(tmp_path, monkeypatch
         json={"video_key": "   ", "base_url": "https://api.0000238.xyz", "video_model": "omni_flash-10s"},
     )
 
-    assert response.status_code == 422
-    assert calls == []
+    assert response.status_code == 200
+    assert len(calls) == 1
+
+
+def test_regenerate_payment_required_quote_keeps_sanitized_billing_response(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    job_id = "e" * 32
+
+    def payment_required(**_kwargs):
+        raise PaymentRequiredQuote(job_id)
+
+    monkeypatch.setattr("server.app.main.run_single_shot_generation", payment_required)
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_model": "omni_flash-10s"},
+    )
+
+    assert response.status_code == 402
+    assert response.json() == {
+        "code": "payment_required_quote",
+        "billing_job_id": job_id,
+    }
 
 
 def test_save_shot_accepts_prompt_edits_and_tracks_history(tmp_path):
@@ -1057,29 +1997,11 @@ def test_regenerate_shot_failure_persists_failed_status_and_clears_outputs(tmp_p
     assert reloaded_shot["output_url"] is None
 
 
-def test_optimize_prompt_route_returns_structured_shot_fields(tmp_path, monkeypatch):
+def test_optimize_prompt_route_returns_structured_shot_fields(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
     created = _create_project_with_fake_generator(client)
     project_id = created["project"]["id"]
-    optimize_calls = []
-
-    def fake_optimize_text_prompt(**kwargs):
-        optimize_calls.append(kwargs)
-        return {
-            "optimized_text": "Lin in red coat opens the soaked envelope under neon rain.",
-            "shot_intent": "Push into the clue as Lin realizes the betrayal.",
-            "shot_language": {
-                "shot_size": "close_up",
-                "camera_movement": "dolly_in",
-                "lens_mm": 85,
-                "depth_of_field": "shallow",
-            },
-            "notes": ["rewritten by text model as structured shot JSON"],
-        }
-
-    monkeypatch.setattr("server.app.main.optimize_text_prompt", fake_optimize_text_prompt)
-
     response = client.post(
         f"/api/projects/{project_id}/prompt-optimize",
         json={
@@ -1095,28 +2017,16 @@ def test_optimize_prompt_route_returns_structured_shot_fields(tmp_path, monkeypa
 
     assert response.status_code == 200
     body = response.json()
-    assert body["optimized_text"].startswith("Lin in red coat")
-    assert body["shot_intent"].startswith("Push into")
+    assert body["optimized_text"] == "optimized shot prompt"
+    assert body["shot_intent"] == "Reveal the clue."
     assert body["shot_language"]["camera_movement"] == "dolly_in"
-    assert optimize_calls[0]["context"] == {"target": "shot", "target_id": "s1", "mode": "shot_json"}
 
 
-def test_optimize_prompt_route_defaults_blank_base_url_and_text_mode(tmp_path, monkeypatch):
+def test_optimize_prompt_route_ignores_browser_base_url_and_defaults_text_mode(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
     created = _create_project_with_fake_generator(client)
     project_id = created["project"]["id"]
-    optimize_calls = []
-
-    def fake_optimize_text_prompt(**kwargs):
-        optimize_calls.append(kwargs)
-        return {
-            "optimized_text": "Tighten the alley prompt around Lin's discovery and the rain-soaked envelope.",
-            "notes": ["rewritten by text model"],
-        }
-
-    monkeypatch.setattr("server.app.main.optimize_text_prompt", fake_optimize_text_prompt)
-
     response = client.post(
         f"/api/projects/{project_id}/prompt-optimize",
         json={
@@ -1131,29 +2041,17 @@ def test_optimize_prompt_route_defaults_blank_base_url_and_text_mode(tmp_path, m
 
     assert response.status_code == 200
     body = response.json()
-    assert body["optimized_text"].startswith("Tighten the alley prompt")
+    assert body["optimized_text"] == "optimized prompt"
     assert body["notes"] == ["rewritten by text model"]
-    assert optimize_calls[0]["base_url"] == "https://api.0000238.xyz"
-    assert optimize_calls[0]["context"] == {"target": "shot", "target_id": "s1", "mode": "text"}
 
 
-def test_optimize_prompt_route_returns_502_for_invalid_structured_response(tmp_path, monkeypatch):
+def test_optimize_prompt_route_normalizes_invalid_optional_structured_fields(tmp_path, monkeypatch):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app, raise_server_exceptions=False)
     created = _create_project_with_fake_generator(client)
     project_id = created["project"]["id"]
 
-    def fake_optimize_text_prompt(**kwargs):
-        return {
-            "optimized_text": "Lin in red coat opens the soaked envelope under neon rain.",
-            "shot_intent": "Push into the clue as Lin realizes the betrayal.",
-            "shot_language": {
-                "camera_movement": "teleport_sideways",
-            },
-            "notes": ["rewritten by text model as structured shot JSON"],
-        }
-
-    monkeypatch.setattr("server.app.main.optimize_text_prompt", fake_optimize_text_prompt)
+    app.state.fake_newapi.invalid_prompt = True
 
     response = client.post(
         f"/api/projects/{project_id}/prompt-optimize",
@@ -1168,11 +2066,11 @@ def test_optimize_prompt_route_returns_502_for_invalid_structured_response(tmp_p
         },
     )
 
-    assert response.status_code == 502
-    assert response.json()["detail"] == "Text model prompt optimization failed"
+    assert response.status_code == 200
+    assert response.json()["shot_language"]["camera_movement"] is None
 
 
-def test_optimize_prompt_route_rejects_whitespace_only_text_key(tmp_path):
+def test_optimize_prompt_route_ignores_legacy_whitespace_text_key(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     client = TestClient(app)
     created = _create_project_with_fake_generator(client)
@@ -1190,7 +2088,7 @@ def test_optimize_prompt_route_rejects_whitespace_only_text_key(tmp_path):
         },
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 200
 
 
 def test_render_project_generates_final_video_and_updates_storyboard(tmp_path, monkeypatch):
@@ -1220,9 +2118,10 @@ def test_render_project_generates_final_video_and_updates_storyboard(tmp_path, m
         project_dir = kwargs["project_dir"]
         storyboard = kwargs["storyboard"]
         for shot in storyboard["shots"]:
+            output = kwargs["generate_missing_shot"](shot)
             shot["status"] = "complete"
-            shot["output_path"] = str(project_dir / "assets" / "video" / f"{shot['id']}.mp4")
-        final_path = project_dir / "renders" / "final.mp4"
+            shot["output_path"] = output["output_path"]
+        final_path = kwargs["composition_output_path"]
         final_path.parent.mkdir(parents=True, exist_ok=True)
         final_path.write_bytes(b"fake video")
         return {
@@ -1266,8 +2165,8 @@ def test_render_project_generates_final_video_and_updates_storyboard(tmp_path, m
     assert body["render_report"]["outputs"][0]["path"].endswith("final.mp4")
     assert body["storyboard"]["shots"][0]["status"] == "complete"
     assert body["storyboard"]["shots"][0]["output_path"].endswith("s1.mp4")
-    assert captured_render_kwargs["video_key"] == VIDEO_TEST_KEY
     assert captured_render_kwargs["video_model"] == "veo_3_1-lite"
+    assert "video_key" not in captured_render_kwargs
 
     loaded = client.get(f"/api/projects/{project_id}").json()
     assert loaded["storyboard"]["shots"][0]["status"] == "complete"
@@ -1303,10 +2202,11 @@ def test_render_project_sanitizes_response_absolute_paths(tmp_path, monkeypatch)
         reference_image.write_bytes(b"fake reference image")
 
         for shot in storyboard["shots"]:
+            kwargs["generate_missing_shot"](shot)
             shot["status"] = "complete"
             shot["output_path"] = str(project_dir / "assets" / "video" / f"{shot['id']}.mp4")
 
-        final_path = project_dir / "renders" / "final.mp4"
+        final_path = kwargs["composition_output_path"]
         final_path.parent.mkdir(parents=True, exist_ok=True)
         final_path.write_bytes(b"fake video")
         generation_output = {
@@ -1378,7 +2278,7 @@ def test_load_project_returns_render_report_and_final_path_after_render(tmp_path
     project_id = created["project"]["id"]
 
     def fake_render_short_drama_project(**kwargs):
-        final_path = kwargs["project_dir"] / "renders" / "final.mp4"
+        final_path = kwargs["composition_output_path"]
         final_path.parent.mkdir(parents=True, exist_ok=True)
         final_path.write_bytes(b"fake video")
         return {

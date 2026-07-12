@@ -7,13 +7,20 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from server.app.billing.models import (
     BillingReconciliation,
     CostReceipt,
     GenerationJob,
+)
+from server.app.billing.lease import (
+    FencedReconciliationClaim,
+    ReconciliationClaimLost,
+    claim_reconciliation,
+    reschedule_claim,
+    resolve_claim,
 )
 from server.app.billing.service import BillingService, InvalidBillingState
 from server.app.core.config import get_settings
@@ -27,6 +34,7 @@ from server.app.provider.newapi import (
 )
 from server.app.provider.video_recovery import (
     InvalidVideoArtifact,
+    publish_billed_video_result,
     resume_billed_video_job,
 )
 from server.app.settings import DEFAULT_PROJECTS_ROOT
@@ -113,12 +121,17 @@ def recover_provider_reference(
     now: datetime,
     *,
     settings=None,
-) -> Literal["recovered", "undeliverable", "terminal"]:
+    claim: FencedReconciliationClaim | None = None,
+) -> Literal["pending", "recovered", "undeliverable", "terminal"]:
     settings = settings or get_settings()
     snapshot = _snapshot_job(db, job_id)
     if snapshot.provider_reference_id is not None:
         return "recovered"
-    if snapshot.status not in {"submitted_ambiguous", "reference_recovery_pending"}:
+    if snapshot.status not in {
+        "reserved",
+        "submitted_ambiguous",
+        "reference_recovery_pending",
+    }:
         raise InvalidBillingState("job is not awaiting reference recovery")
     try:
         quote_status = client.get_quote_status(
@@ -132,13 +145,16 @@ def recover_provider_reference(
                 snapshot.id,
                 "provider_reference_missing_no_charge",
                 operator_error=_sanitize_error(exc),
+                claim=claim,
             )
             return "terminal"
         raise
     except NewApiError:
         if _aware(now) > snapshot.reference_deadline:
             BillingService(db, settings, _unavailable_artifact).fail_unsubmitted(
-                snapshot.id, "provider_reference_missing_no_charge"
+                snapshot.id,
+                "provider_reference_missing_no_charge",
+                claim=claim,
             )
             return "terminal"
         raise
@@ -148,17 +164,28 @@ def recover_provider_reference(
     if quote_status.status in {"quoted", "expired"}:
         if reference != (None, None):
             raise InvalidBillingState("unconsumed quote exposed a reference")
-        service.fail_unsubmitted(snapshot.id, "provider_not_submitted_no_charge")
+        if (
+            quote_status.status == "quoted"
+            and _aware(now).timestamp() < quote_status.expires_at
+        ):
+            return "pending"
+        service.fail_unsubmitted(
+            snapshot.id, "provider_not_submitted_no_charge", claim=claim
+        )
         return "terminal"
     if quote_status.status == "failed":
         if reference != (None, None):
             if _aware(now) > snapshot.reference_deadline:
                 service.fail_unsubmitted(
-                    snapshot.id, "provider_reference_missing_no_charge"
+                    snapshot.id,
+                    "provider_reference_missing_no_charge",
+                    claim=claim,
                 )
                 return "terminal"
             raise InvalidBillingState("failed quote exposed a reference")
-        service.fail_unsubmitted(snapshot.id, "provider_rejected_no_charge")
+        service.fail_unsubmitted(
+            snapshot.id, "provider_rejected_no_charge", claim=claim
+        )
         return "terminal"
     expected_type = "task" if snapshot.capability == "video" else "request"
     if (
@@ -168,18 +195,26 @@ def recover_provider_reference(
     ):
         if _aware(now) > snapshot.reference_deadline:
             service.fail_unsubmitted(
-                snapshot.id, "provider_reference_missing_no_charge"
+                snapshot.id,
+                "provider_reference_missing_no_charge",
+                claim=claim,
             )
             return "terminal"
         raise InvalidBillingState("provider quote status is inconsistent")
     if snapshot.capability == "video":
         service.bind_provider_reference(
-            snapshot.id, quote_status.reference_type, quote_status.reference_id
+            snapshot.id,
+            quote_status.reference_type,
+            quote_status.reference_id,
+            claim=claim,
         )
-        service.mark_receipt_pending(snapshot.id)
+        service.mark_receipt_pending(snapshot.id, claim=claim)
         return "recovered"
     service.fail_undeliverable_sync_call(
-        snapshot.id, quote_status.reference_type, quote_status.reference_id
+        snapshot.id,
+        quote_status.reference_type,
+        quote_status.reference_id,
+        claim=claim,
     )
     return "undeliverable"
 
@@ -226,6 +261,7 @@ def reconcile_job_now(
     *,
     settings=None,
     media_store: WorkbenchStore | None = None,
+    claim: FencedReconciliationClaim | None = None,
 ) -> Literal["pending", "completed"]:
     settings = settings or get_settings()
     media_store = media_store or WorkbenchStore(projects_root=DEFAULT_PROJECTS_ROOT)
@@ -233,8 +269,10 @@ def reconcile_job_now(
     recovered_sync = False
     if snapshot.provider_reference_id is None:
         outcome = recover_provider_reference(
-            db, client, job_id, now, settings=settings
+            db, client, job_id, now, settings=settings, claim=claim
         )
+        if outcome == "pending":
+            return "pending"
         if outcome == "terminal":
             return "completed"
         recovered_sync = outcome == "undeliverable"
@@ -258,6 +296,10 @@ def reconcile_job_now(
         "provider_not_submitted_no_charge",
         "provider_rejected_no_charge",
     }:
+        if snapshot.status == "billed" and snapshot.capability == "video":
+            publish_billed_video_result(
+                db, snapshot.id, media_store, claim=claim
+            )
         return "completed"
     if (
         snapshot.status.endswith("_no_charge")
@@ -280,13 +322,16 @@ def reconcile_job_now(
                 snapshot.id,
                 media_store,
                 settings=settings,
+                claim=claim,
             )
         except CapabilityAliasUnavailable as exc:
             if _aware(now) > snapshot.receipt_deadline:
                 BillingService(
                     db, settings, media_store.inspect_staged_artifact
                 ).fail_missing_result(
-                    snapshot.id, operator_error=_sanitize_error(exc)
+                    snapshot.id,
+                    operator_error=_sanitize_error(exc),
+                    claim=claim,
                 )
                 return "completed"
             raise
@@ -294,7 +339,7 @@ def reconcile_job_now(
             if _aware(now) > snapshot.receipt_deadline:
                 BillingService(
                     db, settings, media_store.inspect_staged_artifact
-                ).fail_missing_result(snapshot.id)
+                ).fail_missing_result(snapshot.id, claim=claim)
                 return "completed"
             raise
         if task_outcome == "pending":
@@ -314,7 +359,9 @@ def reconcile_job_now(
                 )
             else:
                 service.fail_missing_receipt(
-                    snapshot.id, operator_error=_sanitize_error(exc)
+                    snapshot.id,
+                    operator_error=_sanitize_error(exc),
+                    claim=claim,
                 )
             return "completed"
         raise
@@ -324,7 +371,7 @@ def reconcile_job_now(
         if _aware(now) > snapshot.receipt_deadline:
             BillingService(
                 db, settings, media_store.inspect_staged_artifact
-            ).fail_missing_receipt(snapshot.id)
+            ).fail_missing_receipt(snapshot.id, claim=claim)
             return "completed"
         raise
 
@@ -338,36 +385,40 @@ def reconcile_job_now(
             return "pending"
         BillingService(
             db, settings, media_store.inspect_staged_artifact
-        ).settle_job(snapshot.id, final_receipt)
+        ).settle_job(snapshot.id, final_receipt, claim=claim)
         if _aware(now) > snapshot.receipt_deadline:
             BillingService(
                 db, settings, media_store.inspect_staged_artifact
-            ).fail_missing_receipt(snapshot.id)
+            ).fail_missing_receipt(snapshot.id, claim=claim)
             return "completed"
         return "pending"
 
     try:
         BillingService(
             db, settings, media_store.inspect_staged_artifact
-        ).settle_job(snapshot.id, final_receipt)
+        ).settle_job(snapshot.id, final_receipt, claim=claim)
     except InvalidBillingState:
         if _aware(now) > snapshot.receipt_deadline:
             BillingService(
                 db, settings, media_store.inspect_staged_artifact
-            ).fail_missing_receipt(snapshot.id)
+            ).fail_missing_receipt(snapshot.id, claim=claim)
             return "completed"
         raise
     if task_outcome == "failed" and final_receipt.status == "settled":
         if _aware(now) > snapshot.receipt_deadline:
             BillingService(
                 db, settings, media_store.inspect_staged_artifact
-            ).fail_missing_result(snapshot.id)
+            ).fail_missing_result(snapshot.id, claim=claim)
             return "completed"
         return "pending"
+    if final_receipt.status == "settled" and snapshot.capability == "video":
+        publish_billed_video_result(db, snapshot.id, media_store, claim=claim)
     return "pending" if final_receipt.status == "refund_pending" else "completed"
 
 
 def _reason_for(job: GenerationJob) -> str | None:
+    if job.provider_reference_id is None and job.status == "reserved":
+        return "provider_completion"
     if job.provider_reference_id is None and job.status in {
         "submitted_ambiguous",
         "reference_recovery_pending",
@@ -490,6 +541,67 @@ def _retry_delay(attempts: int) -> int:
     return _RETRY_SECONDS[attempts - 1] if attempts <= len(_RETRY_SECONDS) else 300
 
 
+def resume_reconcile_publish_job(
+    db: Session,
+    client: NewApiClient,
+    job_id: str,
+    now: datetime,
+    *,
+    settings=None,
+    media_store: WorkbenchStore | None = None,
+    claim: FencedReconciliationClaim | None = None,
+    pending_delay_seconds: int | None = None,
+) -> Literal["pending", "completed"]:
+    settings = settings or get_settings()
+    media_store = media_store or WorkbenchStore(
+        projects_root=DEFAULT_PROJECTS_ROOT
+    )
+    claim = claim or claim_reconciliation(
+        db,
+        job_id=job_id,
+        reason="provider_completion",
+        lease_seconds=_CLAIM_LEASE_SECONDS,
+    )
+    if claim is None:
+        return "pending"
+    try:
+        outcome = reconcile_job_now(
+            db,
+            client,
+            job_id,
+            now,
+            settings=settings,
+            media_store=media_store,
+            claim=claim,
+        )
+    except Exception as exc:
+        reschedule_claim(
+            db,
+            claim,
+            delay_seconds=_retry_delay(claim.generation),
+            last_error=_sanitize_error(exc),
+        )
+        raise
+    updated = (
+        resolve_claim(db, claim)
+        if outcome == "completed"
+        else reschedule_claim(
+            db,
+            claim,
+            delay_seconds=(
+                _retry_delay(claim.generation)
+                if pending_delay_seconds is None
+                else pending_delay_seconds
+            ),
+        )
+    )
+    if not updated:
+        raise ReconciliationClaimLost(
+            "provider reconciliation ownership was lost"
+        )
+    return outcome
+
+
 def reconcile_due_jobs(
     db: Session,
     client: NewApiClient,
@@ -508,58 +620,47 @@ def reconcile_due_jobs(
 
     processed = 0
     for _index in range(limit):
-        row = db.scalar(
-            select(BillingReconciliation)
+        candidate = db.execute(
+            select(
+                BillingReconciliation.job_id,
+                BillingReconciliation.reason,
+            )
             .where(
                 BillingReconciliation.status == "open",
                 BillingReconciliation.reason.in_(_MACHINE_REASONS),
                 or_(
                     BillingReconciliation.next_retry_at.is_(None),
-                    BillingReconciliation.next_retry_at <= now,
+                    BillingReconciliation.next_retry_at
+                    <= func.current_timestamp(),
                 ),
             )
             .order_by(BillingReconciliation.next_retry_at, BillingReconciliation.id)
             .limit(1)
-            .with_for_update(skip_locked=True)
-        )
-        if row is None:
-            db.rollback()
-            break
-        row.attempts += 1
-        row.next_retry_at = now + timedelta(seconds=_CLAIM_LEASE_SECONDS)
-        row_id = row.id
-        job_id = row.job_id
-        attempts = row.attempts
+        ).first()
         db.commit()
+        if candidate is None:
+            break
+        claim = claim_reconciliation(
+            db,
+            job_id=candidate.job_id,
+            reason=candidate.reason,
+            lease_seconds=_CLAIM_LEASE_SECONDS,
+        )
+        if claim is None:
+            db.rollback()
+            continue
 
         try:
-            outcome = reconcile_job_now(
+            resume_reconcile_publish_job(
                 db,
                 client,
-                job_id,
+                claim.job_id,
                 now,
                 settings=settings,
                 media_store=media_store,
+                claim=claim,
             )
-            last_error = None
-        except Exception as exc:
+        except Exception:
             db.rollback()
-            outcome = "pending"
-            last_error = _sanitize_error(exc)
-
-        claimed = db.scalar(
-            select(BillingReconciliation)
-            .where(BillingReconciliation.id == row_id)
-            .with_for_update()
-        )
-        if claimed is not None and claimed.status == "open":
-            if outcome == "completed":
-                claimed.status = "resolved"
-                claimed.next_retry_at = None
-                claimed.last_error = None
-            else:
-                claimed.next_retry_at = now + timedelta(seconds=_retry_delay(attempts))
-                claimed.last_error = last_error
-        db.commit()
         processed += 1
     return processed

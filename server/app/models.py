@@ -1,12 +1,26 @@
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-from server.app.settings import DEFAULT_SYAPI_BASE_URL
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ProjectType = Literal["single_video", "mini_series", "long_series"]
+
+
+class CredentialFreeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_provider_credentials(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in {"text_key", "image_key", "video_key", "base_url"}
+        }
 
 
 class Project(BaseModel):
@@ -16,13 +30,6 @@ class Project(BaseModel):
     project_type: ProjectType = "single_video"
     created_at: str
     updated_at: str
-
-
-class GatewayKey(BaseModel):
-    masked: str
-    provider: Literal["syapi"] = "syapi"
-    base_url: str
-    valid: bool = True
 
 
 ShotSize = Literal[
@@ -106,20 +113,9 @@ class ShotSaveRequest(BaseModel):
     shot_language: ShotLanguage | None = None
 
 
-class ShotRegenerateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    video_key: str = Field(min_length=1)
-    base_url: str = "https://api.0000238.xyz"
+class ShotRegenerateRequest(CredentialFreeRequest):
     video_model: str = "omni_flash-10s"
-
-    @field_validator("video_key")
-    @classmethod
-    def reject_blank_video_key(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("video_key must not be blank")
-        return stripped
+    billing_job_id: str | None = Field(default=None, min_length=32, max_length=32)
 
 
 class ContinuitySeriesBible(BaseModel):
@@ -162,32 +158,27 @@ class ContinuityPlan(BaseModel):
     story_state: StoryState = Field(default_factory=StoryState)
 
 
-class PromptOptimizeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class PromptOptimizeRequest(CredentialFreeRequest):
     target: Literal["project", "shot", "asset"]
     target_id: str
     source_text: str = Field(min_length=1)
-    text_key: str = Field(min_length=1)
-    base_url: str = DEFAULT_SYAPI_BASE_URL
     text_model: str = "gpt-5.5"
     mode: Literal["text", "shot_json"] = "text"
+    billing_job_id: str | None = Field(default=None, min_length=32, max_length=32)
 
-    @field_validator("base_url")
-    @classmethod
-    def default_blank_base_url(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            return DEFAULT_SYAPI_BASE_URL
-        return stripped
 
-    @field_validator("text_key")
-    @classmethod
-    def reject_blank_text_key(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("text_key must not be blank")
-        return stripped
+class ImageGenerationRequest(CredentialFreeRequest):
+    prompt: str = Field(min_length=1, max_length=10000)
+    model: str = Field(default="gpt-image-2", min_length=1, max_length=200)
+    count: int = Field(default=1, ge=1, le=10)
+    size: Literal["1024x1024", "1536x1024", "1024x1536"] = "1024x1024"
+    quality: Literal["standard", "high"] = "standard"
+    billing_job_id: str | None = Field(default=None, min_length=32, max_length=32)
+
+
+class ImageGenerationResponse(BaseModel):
+    job_id: str
+    images: list[str]
 
 
 class PromptOptimizeResponse(BaseModel):

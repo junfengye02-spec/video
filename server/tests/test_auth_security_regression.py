@@ -139,8 +139,7 @@ def test_gateway_malformed_json_checks_origin_before_body_parsing(
         content=b'{"video_key":',
     )
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Invalid request origin"}
+    assert response.status_code == 404
 
 
 @pytest.mark.parametrize(
@@ -172,9 +171,10 @@ def test_validation_errors_redact_gateway_and_project_inputs(
     with caplog.at_level(logging.DEBUG):
         response = alice.post(path, json=payload)
 
-    assert response.status_code == 422
+    assert response.status_code == (404 if path.endswith("/key") else 422)
     assert secret not in response.text
     assert secret not in caplog.text
-    for error in response.json()["detail"]:
-        assert "input" not in error
-        assert "ctx" not in error
+    if response.status_code == 422:
+        for error in response.json()["detail"]:
+            assert "input" not in error
+            assert "ctx" not in error

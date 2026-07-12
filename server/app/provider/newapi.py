@@ -6,7 +6,7 @@ import tempfile
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 from urllib.parse import quote as url_quote
 
 import httpx
@@ -622,6 +622,8 @@ class NewApiClient:
         token_alias: str,
         task_id: str,
         destination: Path,
+        *,
+        progress_callback: Callable[[], None] | None = None,
     ) -> None:
         expected_task_id = _validate_task_id(task_id)
         token = self._keyrings["video"].get(token_alias)
@@ -671,10 +673,14 @@ class NewApiClient:
                             raise InvalidNewApiResponse("invalid NewAPI response")
                         temporary.write(chunk)
                         written += len(chunk)
+                        if progress_callback is not None:
+                            progress_callback()
                     temporary.flush()
                     os.fsync(temporary.fileno())
                 os.replace(temporary_path, destination)
                 temporary_path = None
+                if progress_callback is not None:
+                    progress_callback()
             except NewApiError:
                 raise
             except httpx.TransportError:

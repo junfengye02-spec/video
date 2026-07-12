@@ -1,14 +1,113 @@
 import json
 import os
 
+from server.app.billing.service import ProviderPricingUnavailable
 from server.app.openmontage_runner import (
     build_pipeline_inputs,
     compile_shot_prompt,
     compose_final_video,
+    prepare_video_generation_request,
     render_short_drama_project,
     run_single_shot_generation,
     write_pipeline_artifacts,
 )
+
+
+def test_prepare_video_generation_request_freezes_exact_server_payload():
+    request = prepare_video_generation_request(
+        model="omni_flash-10s",
+        prompt="Lin runs",
+        size="720x1280",
+        images=["data:image/png;base64,aW1hZ2U="],
+    )
+
+    assert request.path == "/v1/videos"
+    assert request.content == (
+        b'{"images":["data:image/png;base64,aW1hZ2U="],"model":"omni_flash-10s",'
+        b'"prompt":"Lin runs","size":"720x1280"}'
+    )
+    assert b"key" not in request.content.lower()
+    assert b"base_url" not in request.content.lower()
+
+
+def test_render_uses_one_billed_callback_per_missing_shot_and_reuses_existing(tmp_path, monkeypatch):
+    existing = tmp_path / "assets" / "video" / "s1.mp4"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"existing")
+    generated = []
+    storyboard = {
+        "shots": [
+            {"id": "s1", "index": 1, "output_path": str(existing), "output_url": None},
+            {"id": "s2", "index": 2, "prompt": "two", "characters": []},
+            {"id": "s3", "index": 3, "prompt": "three", "characters": []},
+        ]
+    }
+
+    def generate_missing_shot(shot):
+        generated.append(shot["id"])
+        path = tmp_path / "assets" / "video" / f"{shot['id']}.mp4"
+        path.write_bytes(shot["id"].encode())
+        return {
+            "shot_id": shot["id"],
+            "output_path": str(path),
+            "tool_result": {"billing_job_id": f"job-{shot['id']}"},
+            "cost_usd": 0.0,
+        }
+
+    monkeypatch.setattr(
+        "server.app.openmontage_runner.compose_final_video",
+        lambda project_dir, storyboard: existing,
+    )
+    result = render_short_drama_project(
+        project_dir=tmp_path,
+        series_bible={"characters": []},
+        storyboard=storyboard,
+        generate_missing_shot=generate_missing_shot,
+    )
+
+    assert generated == ["s2", "s3"]
+    assert [item["shot_id"] for item in result["outputs"]] == ["s1", "s2", "s3"]
+
+
+def test_render_preserves_successful_children_when_another_child_fails_no_charge(
+    tmp_path, monkeypatch
+):
+    storyboard = {
+        "shots": [
+            {"id": "s1", "index": 1, "prompt": "one", "characters": []},
+            {"id": "s2", "index": 2, "prompt": "two", "characters": []},
+        ]
+    }
+
+    def generate_missing_shot(shot):
+        if shot["id"] == "s2":
+            raise ProviderPricingUnavailable("no price")
+        path = tmp_path / "assets" / "video" / "s1.mp4"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"success")
+        return {
+            "shot_id": "s1",
+            "output_path": str(path),
+            "tool_result": {"billing_job_id": "a" * 32},
+            "cost_usd": 0.0,
+        }
+
+    monkeypatch.setattr(
+        "server.app.openmontage_runner.compose_final_video",
+        lambda project_dir, storyboard: tmp_path / "assets" / "video" / "s1.mp4",
+    )
+    result = render_short_drama_project(
+        project_dir=tmp_path,
+        series_bible={"characters": []},
+        storyboard=storyboard,
+        generate_missing_shot=generate_missing_shot,
+    )
+
+    assert storyboard["shots"][0]["status"] == "complete"
+    assert storyboard["shots"][1]["status"] == "failed"
+    assert result["partial_failure"] is True
+    assert [item["shot_id"] for item in result["outputs"]] == ["s1"]
+
 
 
 def test_build_pipeline_inputs_maps_storyboard_to_openmontage_artifacts():

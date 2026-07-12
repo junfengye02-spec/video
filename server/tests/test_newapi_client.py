@@ -272,6 +272,7 @@ def test_billing_provider_safety_defaults_are_exact():
     assert settings.billing_hold_timeout_seconds == 86_400
     assert settings.billing_quote_stale_retries == 2
     assert settings.billing_max_video_bytes == 536_870_912
+    assert settings.billing_default_multiplier_bps is None
 
 
 def test_billing_provider_safety_settings_parse_documented_environment_strings(
@@ -283,6 +284,7 @@ def test_billing_provider_safety_settings_parse_documented_environment_strings(
         "billing_hold_timeout_seconds": 86_400,
         "billing_quote_stale_retries": 2,
         "billing_max_video_bytes": 536_870_912,
+        "billing_default_multiplier_bps": 15_000,
     }
     for field, value in expected.items():
         monkeypatch.setenv(field.upper(), str(value))
@@ -351,6 +353,7 @@ def test_env_example_documents_nonsecret_newapi_keyrings_and_billing_defaults():
     assert "BILLING_HOLD_TIMEOUT_SECONDS=86400" in env_example
     assert "BILLING_QUOTE_STALE_RETRIES=2" in env_example
     assert "BILLING_MAX_VIDEO_BYTES=536870912" in env_example
+    assert "BILLING_DEFAULT_MULTIPLIER_BPS=15000" in env_example
     assert re.search(r"NEWAPI_.*TOKEN_KEYS_JSON=.*sk-", env_example) is None
 
 

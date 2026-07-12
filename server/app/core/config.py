@@ -71,6 +71,7 @@ class AppSettings(BaseSettings):
     billing_max_video_bytes: int = Field(
         default=536_870_912, gt=0, strict=True
     )
+    billing_default_multiplier_bps: int | None = Field(default=None, gt=0, strict=True)
 
     def __init__(self, **values):
         try:
@@ -102,10 +103,13 @@ class AppSettings(BaseSettings):
         "billing_hold_timeout_seconds",
         "billing_quote_stale_retries",
         "billing_max_video_bytes",
+        "billing_default_multiplier_bps",
         mode="before",
     )
     @classmethod
     def parse_positive_integer_settings(cls, value):
+        if value is None:
+            return None
         if type(value) is int:
             return value
         if type(value) is str and re.fullmatch(r"[1-9][0-9]*", value):

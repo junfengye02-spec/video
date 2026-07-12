@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 from server.app.billing.service import StagedArtifact
 from server.app.models import Project
@@ -40,7 +40,11 @@ _WINDOWS_RESERVED_PATH_NAMES = {
 _HIDDEN_VIDEO_LOCATOR = re.compile(
     r"^workbench-hidden-video:([0-9a-f]{32}):([0-9a-f]{32})$"
 )
+_HIDDEN_SYNC_LOCATOR = re.compile(
+    r"^workbench-hidden-sync:([0-9a-f]{32}):([0-9a-f]{32})$"
+)
 _PROVIDER_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,190}$")
+_SHOT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,8 +59,23 @@ class HiddenVideoArtifact:
     path: Path
 
 
+@dataclass(frozen=True, slots=True)
+class VideoGenerationIntent:
+    project_id: str
+    job_id: str
+    shot_id: str
+    shot_version: int
+
+
 class HiddenVideoDestination:
-    def __init__(self, store: "WorkbenchStore", project_id: str, operation: str):
+    def __init__(
+        self,
+        store: "WorkbenchStore",
+        project_id: str,
+        operation: str,
+        *,
+        artifact_id: str | None = None,
+    ):
         if (
             type(operation) is not str
             or not operation
@@ -68,7 +87,9 @@ class HiddenVideoDestination:
         self.project_id = canonical_project_id(project_id)
         self.operation = operation
         self._directory = store._hidden_video_dir(self.project_id)
-        self._artifact_id = uuid.uuid4().hex
+        self._artifact_id = artifact_id or uuid.uuid4().hex
+        if _OPERATION_ID_PATTERN.fullmatch(self._artifact_id) is None:
+            raise ValueError("Hidden video artifact identifier is invalid")
         self._staging_directory = self._directory / f".{self._artifact_id}.partial"
         self._artifact_directory = self._directory / self._artifact_id
         if self._artifact_directory.exists() or _is_link_or_junction(
@@ -165,6 +186,7 @@ class WorkbenchStore:
     def __init__(self, projects_root: Path, db_path: Path | None = None):
         self.projects_root = Path(projects_root)
         self.projects_root.mkdir(parents=True, exist_ok=True)
+        self._recover_interrupted_mutations()
 
     def create_project(self, title: str, mode: str, project_type: str = "single_video") -> Project:
         now = _utc_now()
@@ -202,6 +224,56 @@ class WorkbenchStore:
             changed_paths=changed_paths,
             new_workspace=new_workspace,
         )
+
+    def _recover_interrupted_mutations(self) -> None:
+        root = self.projects_root.resolve()
+        recovery_root = root / ".recovery"
+        if not recovery_root.exists():
+            return
+        if _is_link_or_junction(recovery_root) or not recovery_root.is_dir():
+            logger.error("project recovery root is invalid")
+            return
+        for project_recovery in list(recovery_root.iterdir()):
+            try:
+                project_id = canonical_project_id(project_recovery.name)
+            except ValueError:
+                logger.error("project recovery directory is invalid")
+                continue
+            if (
+                project_id != project_recovery.name
+                or _is_link_or_junction(project_recovery)
+                or not project_recovery.is_dir()
+            ):
+                logger.error("project recovery directory is invalid project_id=%s", project_id)
+                continue
+            operation_dirs = [
+                path
+                for path in project_recovery.iterdir()
+                if path.is_dir() and not _is_link_or_junction(path)
+            ]
+            for operation_dir in operation_dirs:
+                try:
+                    journal, state = ProjectMutationJournal._load_recovery(
+                        self, project_id, operation_dir
+                    )
+                    if state in {"active", "restoring"}:
+                        journal.restore()
+                    elif state in _HEALTHY_RECOVERY_STATES:
+                        journal._cleanup()
+                except Exception:
+                    logger.error(
+                        "project startup recovery failed project_id=%s operation_id=%s",
+                        project_id,
+                        operation_dir.name,
+                    )
+            try:
+                project_recovery.rmdir()
+            except OSError:
+                pass
+        try:
+            recovery_root.rmdir()
+        except OSError:
+            pass
 
     def assert_project_available(self, project_id: str) -> None:
         canonical_id = canonical_project_id(project_id)
@@ -247,11 +319,36 @@ class WorkbenchStore:
         return self.project_dir(project_id) / "artifacts"
 
     def hidden_video_destination(
-        self, project_id: str, operation: str
+        self,
+        project_id: str,
+        operation: str,
+        *,
+        artifact_id: str | None = None,
     ) -> HiddenVideoDestination:
-        return HiddenVideoDestination(self, project_id, operation)
+        return HiddenVideoDestination(
+            self, project_id, operation, artifact_id=artifact_id
+        )
+
+    def deterministic_video_artifact(
+        self, project_id: str, job_id: str
+    ) -> StagedArtifact | None:
+        canonical_id = canonical_project_id(project_id)
+        if _OPERATION_ID_PATTERN.fullmatch(job_id) is None:
+            raise ValueError("Video billing job identifier is invalid")
+        locator = f"workbench-hidden-video:{canonical_id}:{job_id}"
+        try:
+            root = self._hidden_video_dir(canonical_id, create=False)
+        except ValueError:
+            return None
+        directory = root / job_id
+        if not directory.exists():
+            return None
+        return self.inspect_staged_artifact(locator)
 
     def inspect_staged_artifact(self, locator: str) -> StagedArtifact:
+        sync_match = _HIDDEN_SYNC_LOCATOR.fullmatch(locator) if type(locator) is str else None
+        if sync_match is not None:
+            return self._inspect_hidden_sync_artifact(locator, *sync_match.groups())
         match = _HIDDEN_VIDEO_LOCATOR.fullmatch(locator) if type(locator) is str else None
         if match is None:
             raise ValueError("Hidden video locator is invalid")
@@ -312,6 +409,263 @@ class WorkbenchStore:
             sha256=digest,
             source_reference=source_reference,
             capability="video",
+        )
+
+    def stage_sync_result(
+        self,
+        *,
+        project_id: str,
+        job_id: str,
+        operation: str,
+        capability: str,
+        source_reference: str,
+        content: bytes,
+    ) -> StagedArtifact:
+        canonical_id = canonical_project_id(project_id)
+        if _OPERATION_ID_PATTERN.fullmatch(job_id) is None:
+            raise ValueError("Billing job identifier is invalid")
+        if capability not in {"text", "image"}:
+            raise ValueError("Synchronous capability is invalid")
+        if _PROVIDER_REFERENCE.fullmatch(source_reference) is None:
+            raise ValueError("Provider reference is invalid")
+        if type(content) is not bytes or not content:
+            raise ValueError("Synchronous result is empty")
+        if type(operation) is not str or not operation or len(operation) > 191:
+            raise ValueError("Synchronous operation is invalid")
+
+        root = self._hidden_sync_dir(canonical_id)
+        directory = root / job_id
+        locator = f"workbench-hidden-sync:{canonical_id}:{job_id}"
+        digest = hashlib.sha256(content).hexdigest()
+        if directory.exists():
+            artifact = self._inspect_hidden_sync_artifact(
+                locator, canonical_id, job_id
+            )
+            if (
+                artifact.source_reference != source_reference
+                or artifact.capability != capability
+                or artifact.sha256 != digest
+            ):
+                raise ValueError("Synchronous result conflicts with staged artifact")
+            return artifact
+        directory.mkdir()
+        if _is_link_or_junction(directory):
+            raise ValueError("Synchronous result directory is invalid")
+        try:
+            _atomic_write_bytes(directory / "response.bin", content)
+            _write_json_durable(
+                directory / "metadata.json",
+                {
+                    "version": 1,
+                    "locator": locator,
+                    "project_id": canonical_id,
+                    "job_id": job_id,
+                    "operation": operation,
+                    "source_reference": source_reference,
+                    "capability": capability,
+                    "hidden": True,
+                    "sha256": digest,
+                    "filename": "response.bin",
+                },
+            )
+            _fsync_directory(directory)
+            _fsync_directory(root)
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        return StagedArtifact(locator, digest, source_reference, capability)
+
+    def write_generated_image(
+        self,
+        *,
+        project_id: str,
+        job_id: str,
+        index: int,
+        suffix: str,
+        content: bytes,
+    ) -> str:
+        canonical_id = canonical_project_id(project_id)
+        if _OPERATION_ID_PATTERN.fullmatch(job_id) is None or type(index) is not int or index < 0:
+            raise ValueError("Generated image identity is invalid")
+        if suffix not in {".png", ".jpg", ".webp"} or not content:
+            raise ValueError("Generated image is invalid")
+        relative = f"assets/images/generated/{job_id}-{index}{suffix}"
+        _atomic_write_bytes(self.project_dir(canonical_id) / relative, content)
+        return relative
+
+    def publish_staged_video(
+        self,
+        locator: str,
+        destination: Path,
+        *,
+        progress_callback: Callable[[], None] | None = None,
+        commit_guard: Callable[[], None] | None = None,
+    ) -> None:
+        artifact = self.inspect_staged_artifact(locator)
+        match = _HIDDEN_VIDEO_LOCATOR.fullmatch(locator)
+        if match is None or artifact.capability != "video":
+            raise ValueError("Staged video locator is invalid")
+        project_id, artifact_id = match.groups()
+        source = self._hidden_video_dir(project_id, create=False) / artifact_id / "video.mp4"
+        _require_regular_unlinked_file(source, "staged video")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(
+            f".{destination.name}.{uuid.uuid4().hex}.publish"
+        )
+        try:
+            with source.open("rb") as reader, temporary.open("xb") as writer:
+                while chunk := reader.read(1024 * 1024):
+                    writer.write(chunk)
+                    if progress_callback is not None:
+                        progress_callback()
+                writer.flush()
+                os.fsync(writer.fileno())
+            if progress_callback is not None:
+                progress_callback()
+            if commit_guard is not None:
+                commit_guard()
+            os.replace(temporary, destination)
+            _fsync_directory(destination.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def record_video_generation_intent(
+        self,
+        *,
+        project_id: str,
+        job_id: str,
+        shot_id: str,
+        shot_version: int,
+    ) -> VideoGenerationIntent:
+        canonical_id = canonical_project_id(project_id)
+        if _OPERATION_ID_PATTERN.fullmatch(job_id) is None:
+            raise ValueError("Video billing job identifier is invalid")
+        if _SHOT_ID_PATTERN.fullmatch(shot_id) is None:
+            raise ValueError("Video shot identifier is invalid")
+        if type(shot_version) is not int or shot_version < 1:
+            raise ValueError("Video shot version is invalid")
+        root = self._video_intent_dir(canonical_id)
+        path = root / f"{job_id}.json"
+        payload = {
+            "project_id": canonical_id,
+            "job_id": job_id,
+            "shot_id": shot_id,
+            "shot_version": shot_version,
+        }
+        if path.exists():
+            existing = self.read_video_generation_intent(canonical_id, job_id)
+            if existing != VideoGenerationIntent(
+                canonical_id, job_id, shot_id, shot_version
+            ):
+                raise ValueError("Video generation intent conflicts with existing binding")
+            return existing
+        _write_json_durable(path, payload)
+        _fsync_directory(root)
+        return VideoGenerationIntent(canonical_id, job_id, shot_id, shot_version)
+
+    def read_video_generation_intent(
+        self, project_id: str, job_id: str
+    ) -> VideoGenerationIntent:
+        canonical_id = canonical_project_id(project_id)
+        if _OPERATION_ID_PATTERN.fullmatch(job_id) is None:
+            raise ValueError("Video billing job identifier is invalid")
+        path = self._video_intent_dir(canonical_id, create=False) / f"{job_id}.json"
+        _require_regular_unlinked_file(path, "video generation intent")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise ValueError("Video generation intent is invalid") from None
+        expected = {
+            "project_id": canonical_id,
+            "job_id": job_id,
+            "shot_id": payload.get("shot_id"),
+            "shot_version": payload.get("shot_version"),
+        }
+        if (
+            payload != expected
+            or _SHOT_ID_PATTERN.fullmatch(payload.get("shot_id") or "") is None
+            or type(payload.get("shot_version")) is not int
+            or payload["shot_version"] < 1
+        ):
+            raise ValueError("Video generation intent is invalid")
+        return VideoGenerationIntent(
+            canonical_id,
+            job_id,
+            payload["shot_id"],
+            payload["shot_version"],
+        )
+
+    def delete_video_generation_intent(self, project_id: str, job_id: str) -> None:
+        canonical_id = canonical_project_id(project_id)
+        if _OPERATION_ID_PATTERN.fullmatch(job_id) is None:
+            raise ValueError("Video billing job identifier is invalid")
+        try:
+            root = self._video_intent_dir(canonical_id, create=False)
+        except ValueError:
+            return
+        path = root / f"{job_id}.json"
+        if path.exists():
+            _require_regular_unlinked_file(path, "video generation intent")
+            path.unlink()
+            _fsync_directory(root)
+
+    def _video_intent_dir(self, project_id: str, *, create: bool = True) -> Path:
+        root = self._hidden_sync_dir(project_id, create=create) / "video-intents"
+        if create:
+            root.mkdir(exist_ok=True)
+        if _is_link_or_junction(root) or not root.is_dir():
+            raise ValueError("Video generation intent directory is invalid")
+        return root
+
+    def _hidden_sync_dir(self, project_id: str, *, create: bool = True) -> Path:
+        workspace = self.project_dir(project_id)
+        root = workspace / ".billing-results"
+        if create:
+            workspace.mkdir(parents=True, exist_ok=True)
+            root.mkdir(exist_ok=True)
+        elif not workspace.is_dir() or not root.is_dir():
+            raise ValueError("Synchronous result directory is unavailable")
+        if _is_link_or_junction(workspace) or _is_link_or_junction(root):
+            raise ValueError("Synchronous result directory is invalid")
+        return root
+
+    def _inspect_hidden_sync_artifact(
+        self, locator: str, project_id: str, job_id: str
+    ) -> StagedArtifact:
+        directory = self._hidden_sync_dir(project_id, create=False) / job_id
+        if _is_link_or_junction(directory) or not directory.is_dir():
+            raise ValueError("Synchronous result directory is invalid")
+        metadata_path = directory / "metadata.json"
+        result_path = directory / "response.bin"
+        _require_regular_unlinked_file(metadata_path, "synchronous result metadata")
+        _require_regular_unlinked_file(result_path, "synchronous result")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise ValueError("Synchronous result metadata is invalid") from None
+        expected = {
+            "version": 1,
+            "locator": locator,
+            "project_id": project_id,
+            "job_id": job_id,
+            "operation": metadata.get("operation"),
+            "source_reference": metadata.get("source_reference"),
+            "capability": metadata.get("capability"),
+            "hidden": True,
+            "sha256": metadata.get("sha256"),
+            "filename": "response.bin",
+        }
+        if metadata != expected:
+            raise ValueError("Synchronous result metadata is invalid")
+        digest = hashlib.sha256(result_path.read_bytes()).hexdigest()
+        if (
+            metadata["capability"] not in {"text", "image"}
+            or _PROVIDER_REFERENCE.fullmatch(metadata["source_reference"] or "") is None
+            or metadata["sha256"] != digest
+        ):
+            raise ValueError("Synchronous result is invalid")
+        return StagedArtifact(
+            locator, digest, metadata["source_reference"], metadata["capability"]
         )
 
     def exists(self, locator: str, *, sha256: str | None = None) -> bool:
@@ -437,6 +791,55 @@ class ProjectMutationJournal:
                     self.operation_id,
                 )
             raise
+
+    @classmethod
+    def _load_recovery(
+        cls,
+        store: WorkbenchStore,
+        project_id: str,
+        operation_dir: Path,
+    ) -> tuple["ProjectMutationJournal", str]:
+        canonical_id = canonical_project_id(project_id)
+        if (
+            operation_dir.parent
+            != store.projects_root.resolve() / ".recovery" / canonical_id
+            or _is_link_or_junction(operation_dir)
+            or not operation_dir.is_dir()
+            or not _valid_recovery_operation_tree(operation_dir)
+        ):
+            raise ValueError("Project recovery path is invalid")
+        marker = _read_marker(operation_dir / "marker.json")
+        if (
+            not _valid_marker(marker, canonical_id, operation_dir.name)
+            or not _valid_terminal_manifest(operation_dir, marker)
+        ):
+            raise ValueError("Project recovery state is invalid")
+        guard_path = operation_dir.parent / f"{operation_dir.name}.cleanup.json"
+        guard = _read_marker(guard_path)
+        if not _valid_cleanup_guard(guard, canonical_id, operation_dir.name):
+            raise ValueError("Project recovery cleanup state is invalid")
+        try:
+            manifest = json.loads(
+                (operation_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise ValueError("Project recovery state is invalid") from None
+
+        journal = cls.__new__(cls)
+        journal._store = store
+        journal._project_id = canonical_id
+        journal.operation_id = operation_dir.name
+        journal.operation = marker["operation"]
+        journal._root, journal._workspace = store._validated_workspace_path(
+            canonical_id
+        )
+        journal._new_workspace = manifest["new_workspace"]
+        journal._closed = False
+        journal._operation_dir = operation_dir
+        journal._guard_path = guard_path
+        journal._entries = manifest["entries"]
+        journal._created_dirs = set(manifest["created_dirs"])
+        return journal, marker["state"]
 
     def restore(self) -> None:
         if self._closed:
@@ -782,6 +1185,20 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import re
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, AsyncIterator
+from typing import Annotated, Any, AsyncIterator, Iterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from python_multipart.exceptions import MultipartParseError
 from redis import Redis
@@ -18,17 +19,24 @@ from starlette.datastructures import FormData, UploadFile
 
 from server.app.artifact_sync import read_workflow_settings, rewrite_workflow_artifacts, sync_asset_shot_ids
 from server.app.auth.dependencies import CurrentUser, require_csrf, require_user
-from server.app.auth.router import router as auth_router
+from server.app.auth.router import get_provisioner, router as auth_router
+from server.app.billing.models import GenerationJob
+from server.app.billing.execution import (
+    PaymentRequiredQuote,
+    ProviderPricingUnstable,
+    ProviderResultPending,
+    ProviderResultUnavailable,
+)
+from server.app.billing.service import BillingService, ProviderPricingUnavailable
 from server.app.core.config import AppSettings, get_settings
 from server.app.consistency import apply_consistency_scores, evaluate_storyboard_consistency
 from server.app.events import EventBus
-from server.app.key_validation import validate_gateway_models
-from server.app.keyring import key_environment, mask_key
 from server.app.media_files import (
     IMAGE_EXTENSIONS,
     MAX_IMAGE_BYTES,
     media_content_type,
     media_download_url,
+    replace_atomic_output,
     relative_project_path,
     safe_project_media_destination,
     safe_project_media_file,
@@ -38,6 +46,9 @@ from server.app.media_files import (
 from server.app.mock_runner import build_mock_short_drama, regenerate_mock_shot, update_mock_shot
 from server.app.models import (
     ContinuityPlan,
+    CredentialFreeRequest,
+    ImageGenerationRequest,
+    ImageGenerationResponse,
     ProjectType,
     PromptOptimizeRequest,
     PromptOptimizeResponse,
@@ -46,10 +57,10 @@ from server.app.models import (
 )
 from server.app.openmontage_runner import (
     REFERENCE_IMAGE_EXTENSIONS,
+    generate_billed_shot as run_single_shot_generation,
     render_short_drama_project,
-    run_single_shot_generation,
 )
-from server.app.prompt_optimizer import optimize_text_prompt
+from server.app.prompt_optimizer import optimize_text_prompt_billed as optimize_text_prompt
 from server.app.projects.models import ProjectRecord
 from server.app.projects.repository import ProjectRepository
 from server.app.projects.schemas import (
@@ -59,15 +70,26 @@ from server.app.projects.schemas import (
     ProjectListResponse,
     ProjectResponse,
 )
+from server.app.provider.image_generation import generate_billed_project_image
+from server.app.provider.newapi import NewApiCallError, NewApiClient, NewApiRateLimited
+from server.app.payments.router import router as payment_router
 from server.app.db.session import get_db
 from server.app.redis import get_redis
 from server.app.request_validation import (
     parse_json_request,
     redacted_validation_exception_handler,
 )
-from server.app.settings import DEFAULT_DB_PATH, DEFAULT_PROJECTS_ROOT, DEFAULT_SYAPI_BASE_URL
-from server.app.storyboard_generator import generate_short_drama_storyboard
+from server.app.settings import (
+    DEFAULT_DB_PATH,
+    DEFAULT_PROJECTS_ROOT,
+)
+from server.app.storyboard_generator import (
+    generate_short_drama_storyboard_billed as generate_short_drama_storyboard,
+)
 from server.app.storage import ProjectRecoveryRequired, WorkbenchStore
+from server.app.wallet.provisioning import WalletProvisioner
+from server.app.wallet.router import router as wallet_router
+from server.app.wallet.service import InsufficientBalance
 
 DEFAULT_TEXT_MODEL = "gpt-5.5"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
@@ -93,6 +115,33 @@ STORYBOARD_ARTIFACT_PATHS = [
     "artifacts/asset_library.json",
     "artifacts/consistency_report.json",
 ]
+_GENERATED_IMAGE_PATH = re.compile(
+    r"^assets/images/generated/([0-9a-f]{32})-[0-9]+\.(?:png|jpg|webp)$"
+)
+_GENERATED_VIDEO_PATH = re.compile(
+    r"^assets/video/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.mp4$"
+)
+_BILLING_CONTROL_ERRORS = (
+    PaymentRequiredQuote,
+    ProviderResultPending,
+    ProviderResultUnavailable,
+    ProviderPricingUnavailable,
+    ProviderPricingUnstable,
+    NewApiCallError,
+    NewApiRateLimited,
+    InsufficientBalance,
+)
+
+
+def get_newapi_client(
+    settings: AppSettings = Depends(get_settings),
+) -> Iterator[NewApiClient]:
+    client = NewApiClient(settings)
+    try:
+        yield client
+    finally:
+        client.close()
+
 
 def sanitize_project_path(project_dir: Path, path_value: Any) -> str | None:
     if not isinstance(path_value, str) or not path_value.strip():
@@ -341,6 +390,15 @@ def _project_mutation(
         else:
             _restore_then_rollback(journal, db, failure_detail)
         raise
+    except _BILLING_CONTROL_ERRORS:
+        if preserve_http_error_writes:
+            try:
+                journal.complete()
+            finally:
+                _rollback_quietly(db)
+        else:
+            _restore_then_rollback(journal, db, failure_detail)
+        raise
     except Exception:
         _restore_then_rollback(journal, db, failure_detail)
         raise HTTPException(status_code=500, detail=failure_detail) from None
@@ -505,39 +563,23 @@ async def _bounded_upload_form(request: Request) -> AsyncIterator[FormData]:
         raise HTTPException(status_code=400, detail="Malformed multipart body") from exc
 
 
-class KeySessionRequest(BaseModel):
-    text_key: str = Field(min_length=1)
-    image_key: str = Field(min_length=1)
-    video_key: str = Field(min_length=1)
-    base_url: str = DEFAULT_SYAPI_BASE_URL
-    text_model: str = DEFAULT_TEXT_MODEL
-    image_model: str = DEFAULT_IMAGE_MODEL
-    video_model: str = DEFAULT_VIDEO_MODEL
-
-
-class ShortDramaRequest(BaseModel):
+class ShortDramaRequest(CredentialFreeRequest):
     title: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
     project_type: ProjectType = "single_video"
     shot_count: int | None = Field(default=None, ge=1, le=60)
-    text_key: str = Field(min_length=1)
-    image_key: str = Field(min_length=1)
-    video_key: str = Field(min_length=1)
-    base_url: str = DEFAULT_SYAPI_BASE_URL
     text_model: str = DEFAULT_TEXT_MODEL
     image_model: str = DEFAULT_IMAGE_MODEL
     video_model: str = DEFAULT_VIDEO_MODEL
+    billing_job_id: str | None = Field(default=None, min_length=32, max_length=32)
 
 
-class RenderProjectRequest(BaseModel):
-    text_key: str | None = None
-    image_key: str | None = None
-    video_key: str = Field(min_length=1)
-    base_url: str = DEFAULT_SYAPI_BASE_URL
+class RenderProjectRequest(CredentialFreeRequest):
     text_model: str = DEFAULT_TEXT_MODEL
     image_model: str = DEFAULT_IMAGE_MODEL
     video_model: str = DEFAULT_VIDEO_MODEL
     render_runtime: str = "ffmpeg"
+    billing_job_id: str | None = Field(default=None, min_length=32, max_length=32)
 
 
 def create_app(
@@ -549,7 +591,69 @@ def create_app(
         RequestValidationError,
         redacted_validation_exception_handler,
     )
+
+    @app.exception_handler(PaymentRequiredQuote)
+    async def payment_required_quote_handler(_request, exc):
+        return JSONResponse(
+            status_code=402,
+            content={
+                "code": "payment_required_quote",
+                "billing_job_id": exc.job_id,
+            },
+        )
+
+    @app.exception_handler(InsufficientBalance)
+    async def insufficient_balance_handler(_request, _exc):
+        return JSONResponse(
+            status_code=402,
+            content={"code": "payment_required"},
+        )
+
+    @app.exception_handler(ProviderResultUnavailable)
+    async def provider_result_unavailable_handler(_request, _exc):
+        return JSONResponse(
+            status_code=502,
+            content={"code": "provider_result_unavailable"},
+        )
+
+    @app.exception_handler(ProviderResultPending)
+    async def provider_result_pending_handler(_request, _exc):
+        return JSONResponse(
+            status_code=409,
+            content={"code": "provider_result_pending"},
+        )
+
+    @app.exception_handler(ProviderPricingUnstable)
+    async def provider_pricing_unstable_handler(_request, _exc):
+        return JSONResponse(
+            status_code=503,
+            content={"code": "provider_pricing_unstable"},
+        )
+
+    @app.exception_handler(ProviderPricingUnavailable)
+    async def provider_pricing_unavailable_handler(_request, _exc):
+        return JSONResponse(
+            status_code=503,
+            content={"code": "provider_pricing_unavailable"},
+        )
+
+    @app.exception_handler(NewApiRateLimited)
+    async def provider_rate_limited_handler(_request, _exc):
+        return JSONResponse(
+            status_code=429,
+            content={"code": "provider_quote_rate_limited"},
+        )
+
+    @app.exception_handler(NewApiCallError)
+    async def provider_call_error_handler(_request, _exc):
+        return JSONResponse(
+            status_code=502,
+            content={"code": "provider_call_failed"},
+        )
     app.include_router(auth_router)
+    app.dependency_overrides[get_provisioner] = WalletProvisioner
+    app.include_router(wallet_router)
+    app.include_router(payment_router)
     store = WorkbenchStore(projects_root=Path(projects_root), db_path=Path(db_path))
     events = EventBus()
     app.state.store = store
@@ -561,43 +665,62 @@ def create_app(
     def get_events() -> EventBus:
         return app.state.events
 
-    @app.post(
-        "/api/session/key",
-        openapi_extra=_json_request_openapi(KeySessionRequest),
-    )
-    async def save_gateway_key(
-        request: Request,
-        current: CurrentUser = Depends(require_csrf),
+    @app.get("/api/billing/jobs/{job_id}")
+    def get_billing_job(
+        job_id: str,
+        current: CurrentUser = Depends(require_user),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        del current
-        payload = await parse_json_request(request, KeySessionRequest)
-        env = key_environment(payload.video_key, payload.base_url)
-        validation = validate_gateway_models(
-            base_url=payload.base_url,
-            text_key=payload.text_key,
-            image_key=payload.image_key,
-            video_key=payload.video_key,
-            text_model=payload.text_model,
-            image_model=payload.image_model,
-            video_model=payload.video_model,
-        )
-        if not validation["valid"]:
-            raise HTTPException(status_code=400, detail="; ".join(validation["errors"]))
+        job = db.query(GenerationJob).filter(
+            GenerationJob.id == job_id,
+            GenerationJob.user_id == current.id,
+        ).one_or_none()
+        if job is None:
+            raise HTTPException(status_code=404, detail="Billing job not found")
         return {
-            "masked_keys": {
-                "text": mask_key(payload.text_key),
-                "image": mask_key(payload.image_key),
-                "video": mask_key(payload.video_key),
-            },
-            "provider": "syapi",
-            "base_url": env["SYAPI_BASE_URL"],
-            "models": {
-                "text": payload.text_model,
-                "image": payload.image_model,
-                "video": payload.video_model,
-            },
-            "valid": True,
+            "id": job.id,
+            "project_id": job.project_id,
+            "parent_job_id": job.parent_job_id,
+            "operation": job.operation,
+            "status": job.status,
+            "result_visible": job.result_visible,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
         }
+
+    @app.post(
+        "/api/projects/{project_id}/images/generate",
+        response_model=ImageGenerationResponse,
+        openapi_extra=_json_request_openapi(ImageGenerationRequest),
+    )
+    async def generate_project_image(
+        request: Request,
+        project_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
+        workbench: WorkbenchStore = Depends(get_store),
+        db: Session = Depends(get_db),
+        settings: AppSettings = Depends(get_settings),
+        newapi: NewApiClient = Depends(get_newapi_client),
+    ) -> ImageGenerationResponse:
+        payload = await parse_json_request(request, ImageGenerationRequest)
+        result = generate_billed_project_image(
+            db=db,
+            newapi=newapi,
+            settings=settings,
+            media_store=workbench,
+            user_id=project.owner_user_id,
+            project_id=project_id,
+            prompt=payload.prompt,
+            model=payload.model,
+            count=payload.count,
+            size=payload.size,
+            quality=payload.quality,
+            billing_job_id=payload.billing_job_id,
+        )
+        return ImageGenerationResponse(
+            job_id=result.job_id,
+            images=list(result.images),
+        )
 
     @app.post(
         "/api/projects",
@@ -706,19 +829,60 @@ def create_app(
         workbench: WorkbenchStore = Depends(get_store),
         current: CurrentUser = Depends(require_csrf),
         db: Session = Depends(get_db),
+        settings: AppSettings = Depends(get_settings),
+        newapi: NewApiClient = Depends(get_newapi_client),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, ShortDramaRequest)
-        key_environment(payload.video_key, payload.base_url)
+        if payload.billing_job_id is None:
+            project = ProjectRepository(db).create(
+                owner_user_id=current.id,
+                title=payload.title,
+                mode="short_drama",
+                project_type=payload.project_type,
+            )
+        else:
+            billed_job = db.query(GenerationJob).filter(
+                GenerationJob.id == payload.billing_job_id,
+                GenerationJob.user_id == current.id,
+                GenerationJob.operation == "storyboard_generation",
+            ).one_or_none()
+            if billed_job is None:
+                raise HTTPException(status_code=404, detail="Billing job not found")
+            project = ProjectRepository(db).require_owned(
+                billed_job.project_id, current.id
+            )
         try:
             result = generate_short_drama_storyboard(
+                db=db,
+                newapi=newapi,
+                settings=settings,
+                media_store=workbench,
+                user_id=current.id,
+                project_id=project.id,
                 title=payload.title,
                 prompt=payload.prompt,
                 model=payload.text_model,
-                base_url=payload.base_url,
-                api_key=payload.text_key,
                 shot_count=payload.shot_count,
+                billing_job_id=payload.billing_job_id,
             )
+        except (NewApiCallError, NewApiRateLimited):
+            has_child = db.query(GenerationJob.id).filter(
+                GenerationJob.project_id == project.id,
+                GenerationJob.chargeable.is_(True),
+            ).first()
+            if has_child is None and payload.billing_job_id is None:
+                db.rollback()
+            raise
+        except (
+            PaymentRequiredQuote,
+            ProviderResultPending,
+            ProviderResultUnavailable,
+            ProviderPricingUnavailable,
+            ProviderPricingUnstable,
+        ):
+            raise
         except Exception as exc:
+            db.rollback()
             raise HTTPException(status_code=502, detail=STORYBOARD_GENERATION_FAILED) from exc
 
         result["consistency_report"] = evaluate_storyboard_consistency(
@@ -727,12 +891,6 @@ def create_app(
         )
         apply_consistency_scores(result["storyboard"], result["consistency_report"])
 
-        project = ProjectRepository(db).create(
-            owner_user_id=current.id,
-            title=payload.title,
-            mode="short_drama",
-            project_type=payload.project_type,
-        )
         with _project_mutation(
             db=db,
             workbench=workbench,
@@ -740,7 +898,7 @@ def create_app(
             operation="create_short_drama",
             changed_paths=[],
             failure_detail="Project creation failed",
-            new_workspace=True,
+            new_workspace=not workbench.project_dir(project.id).exists(),
         ):
             continuity_plan = _default_continuity_plan(payload.project_type)
             _persist_storyboard_state(
@@ -930,8 +1088,73 @@ def create_app(
         relative_path: str,
         project: Annotated[ProjectRecord, Depends(_require_owned_reader)],
         workbench: WorkbenchStore = Depends(get_store),
+        db: Session = Depends(get_db),
     ) -> FileResponse:
-        media_path = safe_project_media_file(workbench.project_dir(project_id), relative_path)
+        project_dir = workbench.project_dir(project_id)
+        media_path = safe_project_media_file(project_dir, relative_path)
+        canonical_relative = media_path.relative_to(project_dir.resolve()).as_posix()
+        if ".hidden" in Path(canonical_relative).parts or canonical_relative.startswith(".billing-results/"):
+            raise HTTPException(status_code=404, detail="Media file not found")
+        generated = _GENERATED_IMAGE_PATH.fullmatch(canonical_relative)
+        if generated is not None:
+            job = db.query(GenerationJob).filter(
+                GenerationJob.id == generated.group(1),
+                GenerationJob.project_id == project.id,
+                GenerationJob.user_id == project.owner_user_id,
+                GenerationJob.capability == "image",
+                GenerationJob.result_visible.is_(True),
+            ).one_or_none()
+            if job is None:
+                raise HTTPException(status_code=404, detail="Media file not found")
+        generated_video = _GENERATED_VIDEO_PATH.fullmatch(canonical_relative)
+        if generated_video is not None:
+            shot_id = generated_video.group(1)
+            jobs = db.query(GenerationJob).filter(
+                GenerationJob.project_id == project.id,
+                GenerationJob.user_id == project.owner_user_id,
+                GenerationJob.capability == "video",
+                GenerationJob.operation == f"shot:{shot_id}",
+            ).all()
+            if jobs:
+                storyboard = workbench.read_artifact(
+                    project_id, "episode_storyboard.json"
+                )
+                shot = next(
+                    (
+                        item
+                        for item in (storyboard or {}).get("shots", [])
+                        if isinstance(item, dict)
+                        and str(item.get("id")) == shot_id
+                    ),
+                    None,
+                )
+                authorized = False
+                if (
+                    shot is not None
+                    and sanitize_project_path(
+                        project_dir, shot.get("output_path")
+                    )
+                    == canonical_relative
+                ):
+                    for job in jobs:
+                        if job.status != "billed" or not job.result_visible:
+                            continue
+                        try:
+                            intent = workbench.read_video_generation_intent(
+                                project_id, job.id
+                            )
+                        except ValueError:
+                            continue
+                        if (
+                            intent.project_id == project_id
+                            and intent.job_id == job.id
+                            and intent.shot_id == shot_id
+                            and intent.shot_version == shot.get("version")
+                        ):
+                            authorized = True
+                            break
+                if not authorized:
+                    raise HTTPException(status_code=404, detail="Media file not found")
         if not media_path.exists():
             raise HTTPException(status_code=404, detail="Media file not found")
         return FileResponse(media_path, media_type=media_content_type(media_path))
@@ -1009,17 +1232,35 @@ def create_app(
         project_id: str,
         project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
         workbench: WorkbenchStore = Depends(get_store),
+        db: Session = Depends(get_db),
+        settings: AppSettings = Depends(get_settings),
+        newapi: NewApiClient = Depends(get_newapi_client),
     ) -> PromptOptimizeResponse:
         payload = await parse_json_request(request, PromptOptimizeRequest)
         try:
             result = optimize_text_prompt(
+                db=db,
+                newapi=newapi,
+                settings=settings,
+                media_store=workbench,
+                user_id=project.owner_user_id,
+                project_id=project_id,
                 source_text=payload.source_text,
                 model=payload.text_model,
-                base_url=payload.base_url,
-                api_key=payload.text_key,
                 context={"target": payload.target, "target_id": payload.target_id, "mode": payload.mode},
+                billing_job_id=payload.billing_job_id,
             )
             return PromptOptimizeResponse(project_id=project_id, model=payload.text_model, **result)
+        except (
+            PaymentRequiredQuote,
+            ProviderResultPending,
+            ProviderResultUnavailable,
+            ProviderPricingUnavailable,
+            ProviderPricingUnstable,
+            NewApiCallError,
+            NewApiRateLimited,
+        ):
+            raise
         except Exception as exc:
             raise HTTPException(status_code=502, detail=PROMPT_OPTIMIZATION_FAILED) from exc
 
@@ -1035,6 +1276,8 @@ def create_app(
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
         db: Session = Depends(get_db),
+        settings: AppSettings = Depends(get_settings),
+        newapi: NewApiClient = Depends(get_newapi_client),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, ShotRegenerateRequest)
         project = _lock_owned_project_after_parse(
@@ -1043,9 +1286,6 @@ def create_app(
             project_id=project_id,
             authorized_project=project,
         )
-        if not payload.video_key:
-            raise HTTPException(status_code=422, detail="video_key is required for shot regeneration")
-        key_environment(payload.video_key, payload.base_url)
         storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
         series_bible = workbench.read_artifact(project_id, "series_bible.json")
         continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
@@ -1076,13 +1316,29 @@ def create_app(
         ):
             try:
                 output = run_single_shot_generation(
+                    db=db,
+                    newapi=newapi,
+                    settings=settings,
+                    media_store=workbench,
+                    user_id=project.owner_user_id,
+                    project_id=project_id,
+                    parent_job_id=None,
                     project_dir=workbench.project_dir(project_id),
                     shot=shot,
                     series_bible=series_bible,
-                    video_key=payload.video_key,
-                    base_url=payload.base_url,
                     video_model=payload.video_model,
+                    billing_job_id=payload.billing_job_id,
                 )
+            except (
+                PaymentRequiredQuote,
+                ProviderResultPending,
+                ProviderResultUnavailable,
+                ProviderPricingUnavailable,
+                ProviderPricingUnstable,
+                NewApiCallError,
+                NewApiRateLimited,
+            ):
+                raise
             except Exception as exc:
                 shot["status"] = "failed"
                 report = evaluate_storyboard_consistency(series_bible, storyboard)
@@ -1163,6 +1419,8 @@ def create_app(
         workbench: WorkbenchStore = Depends(get_store),
         bus: EventBus = Depends(get_events),
         db: Session = Depends(get_db),
+        settings: AppSettings = Depends(get_settings),
+        newapi: NewApiClient = Depends(get_newapi_client),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, RenderProjectRequest)
         project = _lock_owned_project_after_parse(
@@ -1177,7 +1435,48 @@ def create_app(
         if storyboard is None or series_bible is None:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        job_id = uuid.uuid4().hex
+        render_shot_versions = {
+            str(shot.get("id")): shot.get("version")
+            for shot in storyboard.get("shots", [])
+            if isinstance(shot, dict)
+        }
+
+        try:
+            if payload.billing_job_id is None:
+                parent = db.query(GenerationJob).filter(
+                    GenerationJob.user_id == project.owner_user_id,
+                    GenerationJob.project_id == project_id,
+                    GenerationJob.chargeable.is_(False),
+                    GenerationJob.operation == "render",
+                    GenerationJob.status == "running",
+                ).order_by(GenerationJob.created_at.desc()).first()
+                if parent is None:
+                    parent = BillingService(
+                        db, settings, workbench.inspect_staged_artifact
+                    ).create_parent_job(
+                        user_id=project.owner_user_id,
+                        project_id=project_id,
+                        operation="render",
+                    )
+                retry_job_id = None
+                retry_child = None
+            else:
+                retry_child = db.query(GenerationJob).filter(
+                    GenerationJob.id == payload.billing_job_id,
+                    GenerationJob.user_id == project.owner_user_id,
+                    GenerationJob.project_id == project_id,
+                    GenerationJob.status == "payment_required_quote",
+                ).one_or_none()
+                if retry_child is None or retry_child.parent_job_id is None:
+                    raise HTTPException(status_code=404, detail="Billing job not found")
+                parent = db.get(GenerationJob, retry_child.parent_job_id)
+                retry_job_id = retry_child.id
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Project update failed") from None
+        job_id = parent.id
+        db.commit()
 
         def emit(stage: str, status: str, message: str) -> None:
             public_message = PROJECT_RENDER_FAILED if status == "failed" else message
@@ -1190,6 +1489,9 @@ def create_app(
             )
 
         project_dir = workbench.project_dir(project_id)
+        staged_final_path = (
+            project_dir / "renders" / f".{parent.id}.final.pending.mp4"
+        )
         generated_shot_paths = []
         for shot in storyboard.get("shots", []):
             existing_output = sanitize_project_path(project_dir, shot.get("output_path"))
@@ -1198,44 +1500,157 @@ def create_app(
             generated_shot_paths.append(
                 f"assets/video/{str(shot.get('id', 'shot'))}.mp4"
             )
+        render_changed_paths = [
+            *STORYBOARD_ARTIFACT_PATHS,
+            *WORKFLOW_ARTIFACT_PATHS,
+            "artifacts/render_report.json",
+            "renders/final.mp4",
+            *generated_shot_paths,
+        ]
+
+        def generate_missing_shot(shot: dict[str, Any]) -> dict[str, Any]:
+            operation = f"shot:{shot.get('id')}"
+            existing = db.query(GenerationJob).filter(
+                GenerationJob.parent_job_id == parent.id,
+                GenerationJob.user_id == project.owner_user_id,
+                GenerationJob.project_id == project_id,
+                GenerationJob.capability == "video",
+                GenerationJob.operation == operation,
+            ).order_by(GenerationJob.created_at.desc()).first()
+            child_job_id = existing.id if existing is not None else None
+            if retry_child is not None and retry_child.operation == operation:
+                child_job_id = retry_job_id
+            return run_single_shot_generation(
+                db=db,
+                newapi=newapi,
+                settings=settings,
+                media_store=workbench,
+                user_id=project.owner_user_id,
+                project_id=project_id,
+                parent_job_id=parent.id,
+                project_dir=workbench.project_dir(project_id),
+                shot=shot,
+                series_bible=series_bible,
+                video_model=payload.video_model,
+                billing_job_id=child_job_id,
+            )
 
         with _project_mutation(
             db=db,
             workbench=workbench,
             project_id=project_id,
-            operation="render",
-            changed_paths=[
-                *STORYBOARD_ARTIFACT_PATHS,
-                *WORKFLOW_ARTIFACT_PATHS,
-                "artifacts/render_report.json",
-                "renders/final.mp4",
-                *generated_shot_paths,
-            ],
+            operation="render-preflight",
+            changed_paths=render_changed_paths,
             failure_detail="Project update failed",
         ):
-            emit("render", "running", "Starting final render")
-            try:
-                result = render_short_drama_project(
-                    project_dir=workbench.project_dir(project_id),
-                    series_bible=series_bible,
-                    storyboard=storyboard,
-                    video_key=payload.video_key,
-                    base_url=payload.base_url,
-                    continuity_plan=continuity_plan,
-                    video_model=payload.video_model,
-                    render_runtime="ffmpeg",
-                    emit_event=emit,
-                )
-            except Exception as exc:
-                emit("render", "failed", PROJECT_RENDER_FAILED)
-                raise HTTPException(status_code=500, detail=PROJECT_RENDER_FAILED) from exc
+            pass
 
-            report = evaluate_storyboard_consistency(series_bible, result["storyboard"])
-            apply_consistency_scores(result["storyboard"], report)
-            workbench.write_artifact(project_id, "episode_storyboard.json", result["storyboard"])
-            workbench.write_artifact(project_id, "consistency_report.json", report)
-            workbench.write_artifact(project_id, "render_report.json", result["render_report"])
-            project.updated_at = datetime.now(timezone.utc)
+        emit("render", "running", "Starting final render")
+        try:
+            result = render_short_drama_project(
+                project_dir=workbench.project_dir(project_id),
+                series_bible=series_bible,
+                storyboard=storyboard,
+                continuity_plan=continuity_plan,
+                video_model=payload.video_model,
+                render_runtime="ffmpeg",
+                emit_event=emit,
+                generate_missing_shot=generate_missing_shot,
+                composition_output_path=staged_final_path,
+                persist_render_report=False,
+            )
+        except (
+            PaymentRequiredQuote,
+            ProviderResultPending,
+            ProviderResultUnavailable,
+            ProviderPricingUnavailable,
+            ProviderPricingUnstable,
+            NewApiCallError,
+            NewApiRateLimited,
+        ):
+            staged_final_path.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            staged_final_path.unlink(missing_ok=True)
+            failed_parent = db.query(GenerationJob).filter(
+                GenerationJob.id == parent.id
+            ).with_for_update().one_or_none()
+            if failed_parent is not None:
+                failed_parent.status = "failed"
+            db.commit()
+            emit("render", "failed", PROJECT_RENDER_FAILED)
+            raise HTTPException(status_code=500, detail=PROJECT_RENDER_FAILED) from exc
+
+        render_stale = False
+        try:
+            with _project_mutation(
+                db=db,
+                workbench=workbench,
+                project_id=project_id,
+                operation="render",
+                changed_paths=render_changed_paths,
+                failure_detail="Project update failed",
+            ):
+                owner_user_id = project.owner_user_id
+                project = db.query(ProjectRecord).filter(
+                    ProjectRecord.id == project_id,
+                    ProjectRecord.owner_user_id == owner_user_id,
+                ).with_for_update().one()
+                parent = db.query(GenerationJob).filter(
+                    GenerationJob.id == parent.id,
+                    GenerationJob.project_id == project_id,
+                    GenerationJob.chargeable.is_(False),
+                ).with_for_update().one()
+                current_storyboard = workbench.read_artifact(
+                    project_id, "episode_storyboard.json"
+                )
+                current_versions = {
+                    str(shot.get("id")): shot.get("version")
+                    for shot in (current_storyboard or {}).get("shots", [])
+                    if isinstance(shot, dict)
+                }
+                render_stale = current_versions != render_shot_versions
+                if render_stale:
+                    parent.status = "partial_failure"
+                else:
+                    result["storyboard"] = current_storyboard
+                    final_path = project_dir / "renders" / "final.mp4"
+                    replace_atomic_output(
+                        staged_final_path,
+                        final_path,
+                        final_path.parent.resolve(strict=True),
+                    )
+                    result["final_path"] = str(final_path)
+                    result["render_report"]["outputs"][0]["path"] = str(
+                        final_path
+                    )
+                    report = evaluate_storyboard_consistency(
+                        series_bible, result["storyboard"]
+                    )
+                    apply_consistency_scores(result["storyboard"], report)
+                    workbench.write_artifact(
+                        project_id,
+                        "episode_storyboard.json",
+                        result["storyboard"],
+                    )
+                    workbench.write_artifact(
+                        project_id, "consistency_report.json", report
+                    )
+                    workbench.write_artifact(
+                        project_id,
+                        "render_report.json",
+                        result["render_report"],
+                    )
+                    project.updated_at = datetime.now(timezone.utc)
+                    parent.status = (
+                        "partial_failure"
+                        if result.get("partial_failure")
+                        else "complete"
+                    )
+        finally:
+            staged_final_path.unlink(missing_ok=True)
+        if render_stale:
+            raise ProviderResultPending("project changed during final composition")
         project_dir = workbench.project_dir(project_id)
         response_storyboard = _sanitize_storyboard_response(project_dir, result["storyboard"])
         response_render_report = _sanitize_render_report_response(project_dir, result["render_report"])

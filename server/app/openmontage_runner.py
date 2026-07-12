@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,6 +18,25 @@ from server.app.media_files import (
     atomic_write_text,
     create_atomic_output,
     replace_atomic_output,
+)
+from server.app.billing.execution import (
+    PaymentRequiredQuote,
+    ProviderPricingUnstable,
+    ProviderResultPending,
+    execute_billed_provider_call,
+    retry_payment_required_quote,
+)
+from server.app.billing.models import GenerationJob
+from server.app.billing.reconciliation import resume_reconcile_publish_job
+from server.app.billing.service import (
+    BillingService,
+    ExistingProviderOperation,
+    ProviderPricingUnavailable,
+)
+from server.app.provider.newapi import (
+    NewApiCallError,
+    NewApiRateLimited,
+    PreparedNewApiRequest,
 )
 from tools.video._shared import probe_output
 
@@ -170,6 +192,23 @@ def build_video_selector_inputs(
     if reference_image_paths:
         inputs["reference_image_paths"] = reference_image_paths
     return inputs
+
+
+def prepare_video_generation_request(
+    *,
+    model: str,
+    prompt: str,
+    size: str,
+    images: list[str] | None = None,
+) -> PreparedNewApiRequest:
+    body: dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+    }
+    if images:
+        body["images"] = list(images)
+    return PreparedNewApiRequest.json("POST", "/v1/videos", body)
 
 
 def build_pipeline_inputs(
@@ -383,6 +422,202 @@ def run_single_shot_generation(
     }
 
 
+def _reference_image_data_uri(path_value: str) -> str:
+    path = Path(path_value)
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return f"data:{content_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def generate_billed_shot(
+    *,
+    db,
+    newapi,
+    settings,
+    media_store,
+    user_id: str,
+    project_id: str,
+    parent_job_id: str | None,
+    project_dir: str | Path,
+    shot: dict[str, Any],
+    series_bible: dict[str, Any],
+    video_model: str = DEFAULT_VIDEO_MODEL,
+    billing_job_id: str | None = None,
+) -> dict[str, Any]:
+    project_path = Path(project_dir)
+    character_lookup = {
+        str(character.get("id")): character
+        for character in series_bible.get("characters", [])
+    }
+    asset_lookup = {
+        str(asset.get("id")): asset
+        for asset in series_bible.get("assets", [])
+    }
+    prompt = compile_shot_prompt(
+        shot,
+        character_lookup,
+        series_bible.get("style_lock"),
+        asset_lookup,
+    )
+    shot_id = str(shot.get("id", "shot"))
+    selector_inputs = build_video_selector_inputs(
+        project_dir=project_path,
+        shot=shot,
+        prompt=prompt,
+        video_model=video_model,
+        output_path=project_path / "assets" / "video" / f"{shot_id}.mp4",
+        asset_lookup=asset_lookup,
+    )
+    images = [
+        _reference_image_data_uri(path)
+        for path in selector_inputs.get("reference_image_paths", [])
+    ]
+    request = prepare_video_generation_request(
+        model=video_model,
+        prompt=prompt,
+        size="720x1280",
+        images=images,
+    )
+    operation = f"shot:{shot_id}"
+    shot_version = int(shot.get("version", 1))
+
+    def record_intent(job_id: str) -> None:
+        media_store.record_video_generation_intent(
+            project_id=project_id,
+            job_id=job_id,
+            shot_id=shot_id,
+            shot_version=shot_version,
+        )
+
+    def discard_intent(job_id: str) -> None:
+        media_store.delete_video_generation_intent(project_id, job_id)
+
+    def validate_intent(job_id: str) -> None:
+        intent = media_store.read_video_generation_intent(project_id, job_id)
+        current_storyboard = media_store.read_artifact(
+            project_id, "episode_storyboard.json"
+        )
+        current_shot = next(
+            (
+                item
+                for item in (current_storyboard or {}).get("shots", [])
+                if isinstance(item, dict) and str(item.get("id")) == shot_id
+            ),
+            None,
+        )
+        if (
+            intent.shot_id != shot_id
+            or intent.shot_version != shot_version
+            or current_shot is None
+            or current_shot.get("version") != shot_version
+        ):
+            raise NewApiCallError(
+                "video generation intent does not match current shot"
+            )
+
+    call = {
+        "db": db,
+        "newapi": newapi,
+        "settings": settings,
+        "artifact_inspector": media_store.inspect_staged_artifact,
+        "user_id": user_id,
+        "project_id": project_id,
+        "capability": "video",
+        "operation": operation,
+        "request": request,
+        "prepare_reservation": record_intent,
+        "reservation_validator": validate_intent,
+        "discard_reservation": discard_intent,
+    }
+    claim = None
+    if billing_job_id is None:
+        try:
+            context = execute_billed_provider_call(
+                parent_job_id=parent_job_id, **call
+            )
+            job_id = context.job_id
+            claim = context.claim
+        except ExistingProviderOperation as exc:
+            job_id = exc.job_id
+    else:
+        existing = db.get(GenerationJob, billing_job_id)
+        if (
+            existing is None
+            or not existing.chargeable
+            or existing.user_id != user_id
+            or existing.project_id != project_id
+            or existing.parent_job_id != parent_job_id
+            or existing.capability != "video"
+            or existing.operation != operation
+            or existing.provider_method != request.method
+            or existing.provider_route != request.path
+            or existing.model != request.model
+        ):
+            db.rollback()
+            raise NewApiCallError("video billing job is invalid")
+        existing_status = existing.status
+        db.commit()
+        if existing_status == "payment_required_quote":
+            context = retry_payment_required_quote(
+                job_id=billing_job_id,
+                parent_job_id=parent_job_id,
+                **call,
+            )
+            job_id = context.job_id
+            claim = context.claim
+        elif existing_status == "payment_required":
+            raise ProviderResultPending("video payment is pending")
+        elif existing_status != "billed" and existing_status.endswith("_no_charge"):
+            raise NewApiCallError("video generation failed")
+        else:
+            job_id = billing_job_id
+    try:
+        intent = media_store.read_video_generation_intent(project_id, job_id)
+    except ValueError:
+        raise ProviderResultPending("video generation binding is pending") from None
+    if intent.shot_id != shot_id or intent.shot_version != shot_version:
+        raise NewApiCallError("video billing job does not match the current shot")
+    if claim is None:
+        BillingService(
+            db, settings, media_store.inspect_staged_artifact
+        ).validate_reserved_provider_call(
+            job_id,
+            user_id=user_id,
+            project_id=project_id,
+            parent_job_id=parent_job_id,
+            reservation_validator=validate_intent,
+        )
+    outcome = resume_reconcile_publish_job(
+        db,
+        newapi,
+        job_id,
+        datetime.now(timezone.utc),
+        settings=settings,
+        media_store=media_store,
+        claim=claim,
+        pending_delay_seconds=0,
+    )
+    if outcome == "pending":
+        raise ProviderResultPending("provider result is pending")
+    job = BillingService(
+        db, settings, media_store.inspect_staged_artifact
+    ).load_job(job_id)
+    if job.status == "failed_no_charge" or job.status.endswith("_no_charge"):
+        raise NewApiCallError("video generation failed")
+    if not job.result_visible or job.result_locator is None:
+        raise ProviderResultPending("provider result is pending")
+    output_path = project_path / "assets" / "video" / f"{shot_id}.mp4"
+    if not output_path.is_file():
+        raise ProviderResultPending("provider result is detached from current shot")
+    return {
+        "shot_id": shot_id,
+        "output_path": str(output_path),
+        "tool_result": {"billing_job_id": job_id},
+        "cost_usd": 0.0,
+        "operation": selector_inputs["operation"],
+        "reference_image_paths": selector_inputs.get("reference_image_paths", []),
+    }
+
+
 def run_pipeline_handoff(
     *,
     project_dir: str | Path,
@@ -438,12 +673,15 @@ def render_short_drama_project(
     project_dir: str | Path,
     series_bible: dict[str, Any],
     storyboard: dict[str, Any],
-    video_key: str,
-    base_url: str,
+    video_key: str | None = None,
+    base_url: str | None = None,
     continuity_plan: dict[str, Any] | None = None,
     video_model: str = DEFAULT_VIDEO_MODEL,
     render_runtime: RenderRuntime = "ffmpeg",
     emit_event: Callable[[str, str, str], None] | None = None,
+    generate_missing_shot: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    composition_output_path: str | Path | None = None,
+    persist_render_report: bool = True,
 ) -> dict[str, Any]:
     project_path = Path(project_dir)
     pipeline_inputs = build_pipeline_inputs(
@@ -455,6 +693,7 @@ def render_short_drama_project(
     )
     written = write_pipeline_artifacts(project_path, pipeline_inputs)
     outputs: list[dict[str, Any]] = []
+    provider_results_pending = False
 
     for stage in ("proposal", "scene_plan", "edit"):
         if emit_event:
@@ -480,23 +719,54 @@ def render_short_drama_project(
         shot["status"] = "generating"
         if emit_event:
             emit_event("assets", "running", f"Generating shot {shot.get('id')}")
-        output = run_single_shot_generation(
-            project_dir=project_path,
-            shot=shot,
-            series_bible=series_bible,
-            video_key=video_key,
-            base_url=base_url,
-            video_model=video_model,
-            emit_event=emit_event,
-        )
+        try:
+            if generate_missing_shot is not None:
+                output = generate_missing_shot(shot)
+            else:
+                if video_key is None or base_url is None:
+                    raise ValueError("server video provider is unavailable")
+                output = run_single_shot_generation(
+                    project_dir=project_path,
+                    shot=shot,
+                    series_bible=series_bible,
+                    video_key=video_key,
+                    base_url=base_url,
+                    video_model=video_model,
+                    emit_event=emit_event,
+                )
+        except PaymentRequiredQuote:
+            raise
+        except ProviderResultPending:
+            provider_results_pending = True
+            continue
+        except (
+            ProviderPricingUnavailable,
+            ProviderPricingUnstable,
+            NewApiCallError,
+            NewApiRateLimited,
+        ):
+            shot["status"] = "failed"
+            if emit_event:
+                emit_event("assets", "failed", "Shot generation failed")
+            continue
         shot["status"] = "complete"
         shot["output_path"] = output["output_path"]
         shot["output_url"] = output["tool_result"].get("url")
         outputs.append(output)
 
+    if provider_results_pending:
+        raise ProviderResultPending("provider results are pending")
+
     if emit_event:
         emit_event("compose", "running", "Composing final video")
-    final_path = compose_final_video(project_path, storyboard)
+    if composition_output_path is None:
+        final_path = compose_final_video(project_path, storyboard)
+    else:
+        final_path = compose_final_video(
+            project_path,
+            storyboard,
+            output_path=Path(composition_output_path),
+        )
     if emit_event:
         emit_event("compose", "complete", "Final video rendered")
 
@@ -509,11 +779,12 @@ def render_short_drama_project(
         ],
         "render_grammar": "cinematic-trailer",
     }
-    atomic_write_text(
-        project_path / "artifacts" / "render_report.json",
-        json.dumps(render_report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    if persist_render_report:
+        atomic_write_text(
+            project_path / "artifacts" / "render_report.json",
+            json.dumps(render_report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     return {
         "artifacts": {key: str(path) for key, path in written.items()},
@@ -521,12 +792,18 @@ def render_short_drama_project(
         "final_path": str(final_path),
         "render_report": render_report,
         "storyboard": storyboard,
+        "partial_failure": any(shot.get("status") == "failed" for shot in shots),
     }
 
 
-def compose_final_video(project_dir: str | Path, storyboard: dict[str, Any]) -> Path:
+def compose_final_video(
+    project_dir: str | Path,
+    storyboard: dict[str, Any],
+    *,
+    output_path: Path | None = None,
+) -> Path:
     project_path = Path(project_dir)
-    output_path = project_path / "renders" / "final.mp4"
+    output_path = output_path or project_path / "renders" / "final.mp4"
     shot_paths = [
         resolved_path
         for shot in sorted(storyboard.get("shots", []), key=lambda item: int(item.get("index", 0)))

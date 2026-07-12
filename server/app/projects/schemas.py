@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 from server.app.models import (
     CameraMovement,
     ContinuityPlan,
+    CredentialFreeRequest,
     ProjectType,
     ShotLanguage,
     ShotRevision,
@@ -28,9 +29,7 @@ OpaqueArtifactId = Annotated[
 ]
 
 
-class ProjectCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ProjectCreateRequest(CredentialFreeRequest):
     title: str = Field(min_length=1, max_length=255)
     project_type: ProjectType = "single_video"
 

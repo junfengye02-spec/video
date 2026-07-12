@@ -299,7 +299,11 @@ class SyapiVideo(BaseTool):
             if status == "completed":
                 video_url = self._extract_video_url(data)
                 if not video_url:
-                    return ToolResult(success=False, error=f"SYAPI video task completed without URL: {data}")
+                    return ToolResult(
+                        success=False,
+                        data={"task_id": task_id},
+                        error="SYAPI video task completed without a downloadable result",
+                    )
                 download = requests.get(video_url, timeout=240)
                 download.raise_for_status()
                 output_path.write_bytes(download.content)
@@ -319,10 +323,18 @@ class SyapiVideo(BaseTool):
                     model=inputs.get("model_variant", "omni_flash-10s"),
                 )
             if status == "failed":
-                return ToolResult(success=False, error=f"SYAPI video task failed: {self._response_error(data)}")
+                return ToolResult(
+                    success=False,
+                    data={"task_id": task_id},
+                    error="SYAPI video task failed",
+                )
             time.sleep(interval)
 
-        return ToolResult(success=False, error=f"SYAPI video task timed out: {last_data}")
+        return ToolResult(
+            success=False,
+            data={"task_id": task_id},
+            error="SYAPI video task timed out",
+        )
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         api_key = self._api_key()
@@ -367,7 +379,7 @@ class SyapiVideo(BaseTool):
             data = response.json()
             task_id = data.get("id")
             if not task_id:
-                return ToolResult(success=False, error=f"SYAPI video response missing id: {data}")
+                return ToolResult(success=False, error="SYAPI video response missing task id")
             result = self._poll_task(task_id, inputs, output_path)
             result.duration_seconds = round(time.time() - start, 2)
             return result

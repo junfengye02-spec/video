@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,7 @@ from server.app.billing.models import (
     CostReceipt,
     GenerationJob,
 )
+from server.app.billing.lease import FencedReconciliationClaim
 from server.app.billing.money import provider_micro_to_charge_units
 from server.app.projects.models import ProjectRecord
 from server.app.provider.newapi import (
@@ -46,6 +47,12 @@ class InvalidBillingState(RuntimeError):
     pass
 
 
+class ExistingProviderOperation(RuntimeError):
+    def __init__(self, job_id: str) -> None:
+        super().__init__("provider operation already has a billing job")
+        self.job_id = job_id
+
+
 @dataclass(frozen=True, slots=True)
 class StagedArtifact:
     locator: str
@@ -68,6 +75,12 @@ _CAPABILITY_ROUTES = {
     "text": {"/v1/chat/completions": "openai", "/v1/responses": "openai_responses"},
     "image": {"/v1/images/generations": "openai_image"},
     "video": {"/v1/videos": "task"},
+}
+_MACHINE_RECONCILIATION_REASONS = {
+    "reference_recovery",
+    "provider_completion",
+    "receipt_pending",
+    "upstream_refund_pending",
 }
 
 
@@ -279,6 +292,31 @@ class BillingService:
             raise InvalidBillingState("billing job not found")
         return job
 
+    def _require_claim_locked(
+        self,
+        job: GenerationJob,
+        claim: FencedReconciliationClaim | None,
+    ) -> None:
+        if claim is None:
+            return
+        if claim.job_id != job.id:
+            raise InvalidBillingState("reconciliation claim does not match billing job")
+        owned = self.db.scalar(
+            select(BillingReconciliation.id)
+            .where(
+                BillingReconciliation.id == claim.row_id,
+                BillingReconciliation.job_id == claim.job_id,
+                BillingReconciliation.reason == claim.reason,
+                BillingReconciliation.status == "open",
+                BillingReconciliation.attempts == claim.generation,
+                BillingReconciliation.next_retry_at.is_not(None),
+                BillingReconciliation.next_retry_at > func.current_timestamp(),
+            )
+            .with_for_update()
+        )
+        if owned is None:
+            raise InvalidBillingState("reconciliation claim is no longer owned")
+
     def _open_reconciliation(
         self,
         job: GenerationJob,
@@ -286,6 +324,32 @@ class BillingService:
         *,
         last_error: str | None = None,
     ) -> None:
+        if reason in _MACHINE_RECONCILIATION_REASONS:
+            rows = self.db.scalars(
+                select(BillingReconciliation)
+                .where(
+                    BillingReconciliation.job_id == job.id,
+                    BillingReconciliation.reason.in_(
+                        _MACHINE_RECONCILIATION_REASONS
+                    ),
+                )
+                .with_for_update()
+            ).all()
+            existing = next(
+                (row for row in rows if row.status == "open"),
+                rows[0] if rows else None,
+            )
+            if existing is not None:
+                existing.reason = reason
+                existing.status = "open"
+                existing.next_retry_at = None
+                existing.last_error = last_error
+                for duplicate in rows:
+                    if duplicate is not existing and duplicate.status == "open":
+                        duplicate.status = "resolved"
+                        duplicate.next_retry_at = None
+                        duplicate.last_error = None
+                return
         existing = self.db.scalar(
             select(BillingReconciliation).where(
                 BillingReconciliation.job_id == job.id,
@@ -405,6 +469,8 @@ class BillingService:
         provider_method: str,
         provider_route: str,
         quote: TokenScopedQuote,
+        job_id: str | None = None,
+        reservation_validator: Callable[[str], None] | None = None,
     ) -> GenerationJob:
         now = self._now()
         provider_quote = _validate_quote(
@@ -416,8 +482,16 @@ class BillingService:
         )
         try:
             _validate_nonempty(operation, label="operation", maximum=191)
+            if job_id is not None and (
+                type(job_id) is not str
+                or len(job_id) != 32
+                or any(character not in "0123456789abcdef" for character in job_id)
+            ):
+                raise InvalidBillingState("billing job identifier is invalid")
             project = self.db.scalar(
-                select(ProjectRecord).where(ProjectRecord.id == project_id)
+                select(ProjectRecord)
+                .where(ProjectRecord.id == project_id)
+                .with_for_update()
             )
             if project is None or project.owner_user_id != user_id:
                 raise InvalidBillingState("project does not belong to user")
@@ -435,6 +509,30 @@ class BillingService:
                     or parent.project_id != project_id
                 ):
                     raise InvalidBillingState("invalid parent billing job")
+                existing = self.db.scalar(
+                    select(GenerationJob)
+                    .where(
+                        GenerationJob.parent_job_id == parent_job_id,
+                        GenerationJob.operation == operation,
+                    )
+                    .with_for_update()
+                )
+                if existing is not None:
+                    if (
+                        existing.user_id != user_id
+                        or existing.project_id != project_id
+                        or existing.capability != capability
+                        or existing.provider_method != provider_method
+                        or existing.provider_route != provider_route
+                        or existing.model != provider_quote.model
+                    ):
+                        raise InvalidBillingState(
+                            "existing parent operation does not match provider call"
+                        )
+                    raise ExistingProviderOperation(existing.id)
+            reserved_job_id = job_id or uuid.uuid4().hex
+            if reservation_validator is not None:
+                reservation_validator(reserved_job_id)
             setting = self.db.scalar(
                 select(BillingSetting)
                 .where(BillingSetting.id == 1)
@@ -443,7 +541,7 @@ class BillingService:
             if setting is None:
                 raise InvalidBillingState("billing setting is unavailable")
             job = GenerationJob(
-                id=uuid.uuid4().hex,
+                id=reserved_job_id,
                 parent_job_id=parent_job_id,
                 chargeable=True,
                 user_id=user_id,
@@ -466,6 +564,7 @@ class BillingService:
             _apply_quote_snapshot(job, provider_quote)
             self.db.add(job)
             self.db.flush()
+            self._open_reconciliation(job, "provider_completion")
             create_hold(
                 self.db,
                 user_id=user_id,
@@ -502,6 +601,55 @@ class BillingService:
             self.db.rollback()
             raise
 
+    def validate_reserved_provider_call(
+        self,
+        job_id: str,
+        *,
+        user_id: str,
+        project_id: str,
+        parent_job_id: str | None,
+        reservation_validator: Callable[[str], None],
+    ) -> None:
+        try:
+            project = self.db.scalar(
+                select(ProjectRecord)
+                .where(ProjectRecord.id == project_id)
+                .with_for_update()
+            )
+            if project is None or project.owner_user_id != user_id:
+                raise InvalidBillingState("project does not belong to user")
+            if parent_job_id is not None:
+                parent = self.db.scalar(
+                    select(GenerationJob)
+                    .where(GenerationJob.id == parent_job_id)
+                    .with_for_update()
+                )
+                if (
+                    parent is None
+                    or parent.chargeable
+                    or parent.user_id != user_id
+                    or parent.project_id != project_id
+                ):
+                    raise InvalidBillingState("invalid parent billing job")
+            job = self.db.scalar(
+                select(GenerationJob)
+                .where(GenerationJob.id == job_id)
+                .with_for_update()
+            )
+            if (
+                job is None
+                or not job.chargeable
+                or job.user_id != user_id
+                or job.project_id != project_id
+                or job.parent_job_id != parent_job_id
+            ):
+                raise InvalidBillingState("billing job does not match reservation")
+            reservation_validator(job.id)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
     def load_owned_payment_required_quote(
         self, job_id: str, *, user_id: str, project_id: str
     ) -> GenerationJob:
@@ -530,6 +678,7 @@ class BillingService:
         fresh_quote: TokenScopedQuote,
         *,
         expected_quote_id: str,
+        claim: FencedReconciliationClaim | None = None,
     ) -> str:
         try:
             try:
@@ -543,12 +692,17 @@ class BillingService:
             )
             if job is None or not job.chargeable:
                 raise InvalidBillingState("billing job not found")
+            self._require_claim_locked(job, claim)
             if job.quote_id != expected_quote_id:
                 raise InvalidBillingState("expected quote does not match current job")
             if job.status == "provider_pricing_unavailable_no_charge":
                 self.db.commit()
                 return "provider_pricing_unavailable_no_charge"
-            if job.status not in {"reserved", "payment_required_quote"}:
+            if job.status not in {
+                "reserved",
+                "submitted_ambiguous",
+                "payment_required_quote",
+            }:
                 raise InvalidBillingState("quote cannot be replaced in current state")
             try:
                 provider_quote = _validate_quote(
@@ -611,8 +765,30 @@ class BillingService:
             self.db.rollback()
             raise
 
+    def mark_submitted_ambiguous(
+        self, job_id: str, claim: FencedReconciliationClaim
+    ) -> None:
+        try:
+            job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
+            if job.status == "submitted_ambiguous":
+                self.db.commit()
+                return
+            if job.status != "reserved" or job.provider_reference_id is not None:
+                raise InvalidBillingState("provider call cannot be marked submitted")
+            job.status = "submitted_ambiguous"
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
     def bind_provider_reference(
-        self, job_id: str, reference_type: str, reference_id: str
+        self,
+        job_id: str,
+        reference_type: str,
+        reference_id: str,
+        *,
+        claim: FencedReconciliationClaim | None = None,
     ) -> None:
         try:
             job = self.db.scalar(
@@ -622,6 +798,7 @@ class BillingService:
             )
             if job is None or not job.chargeable:
                 raise InvalidBillingState("billing job not found")
+            self._require_claim_locked(job, claim)
             expected_type = "task" if job.capability == "video" else "request"
             if reference_type != expected_type:
                 raise InvalidBillingState("provider reference type does not match capability")
@@ -667,7 +844,12 @@ class BillingService:
             raise
 
     def stage_result(
-        self, job_id: str, result_locator: str, result_sha256: str
+        self,
+        job_id: str,
+        result_locator: str,
+        result_sha256: str,
+        *,
+        claim: FencedReconciliationClaim | None = None,
     ) -> None:
         if (
             type(result_locator) is not str
@@ -692,6 +874,7 @@ class BillingService:
             raise InvalidBillingState("staged artifact hash does not match")
         try:
             job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
             if job.provider_reference_id is None:
                 raise InvalidBillingState("staged artifact requires a provider reference")
             if artifact.source_reference != job.provider_reference_id:
@@ -728,9 +911,15 @@ class BillingService:
             self.db.rollback()
             raise
 
-    def mark_reference_recovery_pending(self, job_id: str) -> None:
+    def mark_reference_recovery_pending(
+        self,
+        job_id: str,
+        *,
+        claim: FencedReconciliationClaim | None = None,
+    ) -> None:
         try:
             job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
             if job.status == "reference_recovery_pending":
                 self.db.commit()
                 return
@@ -746,9 +935,15 @@ class BillingService:
             self.db.rollback()
             raise
 
-    def mark_receipt_pending(self, job_id: str) -> None:
+    def mark_receipt_pending(
+        self,
+        job_id: str,
+        *,
+        claim: FencedReconciliationClaim | None = None,
+    ) -> None:
         try:
             job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
             if job.status == "receipt_pending":
                 self.db.commit()
                 return
@@ -774,11 +969,13 @@ class BillingService:
         status: str,
         *,
         operator_error: str | None = None,
+        claim: FencedReconciliationClaim | None = None,
     ) -> None:
         if status not in _UNSUBMITTED_TERMINALS:
             raise InvalidBillingState("invalid unsubmitted terminal state")
         try:
             job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
             if job.status == status:
                 if operator_error is not None:
                     self._open_reconciliation(
@@ -814,11 +1011,16 @@ class BillingService:
             raise
 
     def fail_missing_result(
-        self, job_id: str, *, operator_error: str | None = None
+        self,
+        job_id: str,
+        *,
+        operator_error: str | None = None,
+        claim: FencedReconciliationClaim | None = None,
     ) -> None:
         target = "provider_result_missing_no_charge"
         try:
             job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
             if job.status == target:
                 if operator_error is not None:
                     self._open_reconciliation(
@@ -855,11 +1057,17 @@ class BillingService:
             raise
 
     def fail_undeliverable_sync_call(
-        self, job_id: str, reference_type: str, reference_id: str
+        self,
+        job_id: str,
+        reference_type: str,
+        reference_id: str,
+        *,
+        claim: FencedReconciliationClaim | None = None,
     ) -> None:
         target = "provider_result_missing_no_charge"
         try:
             job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
             if job.status == target:
                 if (
                     job.provider_reference_type,
@@ -874,6 +1082,7 @@ class BillingService:
                 "reserved",
                 "submitted_ambiguous",
                 "reference_recovery_pending",
+                "receipt_pending",
             }:
                 raise InvalidBillingState("invalid undeliverable sync predecessor")
             if job.result_staged:
@@ -914,18 +1123,19 @@ class BillingService:
             job.status = target
             job.result_visible = False
             self._open_reconciliation(job, "provider_result_missing")
-            self._open_reconciliation(job, "receipt_pending")
-            reference_rows = self.db.scalars(
-                select(BillingReconciliation).where(
-                    BillingReconciliation.job_id == job.id,
-                    BillingReconciliation.reason == "reference_recovery",
-                    BillingReconciliation.status == "open",
-                )
-            ).all()
-            for row in reference_rows:
-                row.status = "resolved"
-                row.next_retry_at = None
-                row.last_error = None
+            if claim is None:
+                self._open_reconciliation(job, "receipt_pending")
+                reference_rows = self.db.scalars(
+                    select(BillingReconciliation).where(
+                        BillingReconciliation.job_id == job.id,
+                        BillingReconciliation.reason == "reference_recovery",
+                        BillingReconciliation.status == "open",
+                    )
+                ).all()
+                for row in reference_rows:
+                    row.status = "resolved"
+                    row.next_retry_at = None
+                    row.last_error = None
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
@@ -934,11 +1144,18 @@ class BillingService:
             self.db.rollback()
             raise
 
-    def settle_job(self, job_id: str, receipt: UsageReceipt) -> None:
+    def settle_job(
+        self,
+        job_id: str,
+        receipt: UsageReceipt,
+        *,
+        claim: FencedReconciliationClaim | None = None,
+    ) -> None:
         if not isinstance(receipt, UsageReceipt):
             raise InvalidBillingState("invalid provider receipt")
         try:
             job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
             self._validate_receipt_identity(job, receipt)
             if receipt.status == "pending":
                 if job.status in _TERMINALS:
@@ -969,7 +1186,10 @@ class BillingService:
                 job.status = "failed_no_charge"
                 job.result_visible = False
                 if receipt.status == "refund_pending":
-                    self._open_reconciliation(job, "upstream_refund_pending")
+                    if claim is None:
+                        self._open_reconciliation(
+                            job, "upstream_refund_pending"
+                        )
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
@@ -984,11 +1204,16 @@ class BillingService:
         self.settle_job(job_id, receipt)
 
     def fail_missing_receipt(
-        self, job_id: str, *, operator_error: str | None = None
+        self,
+        job_id: str,
+        *,
+        operator_error: str | None = None,
+        claim: FencedReconciliationClaim | None = None,
     ) -> None:
         target = "receipt_missing_no_charge"
         try:
             job = self._lock_chargeable_job(job_id)
+            self._require_claim_locked(job, claim)
             if job.status == target:
                 if operator_error is not None:
                     self._open_reconciliation(

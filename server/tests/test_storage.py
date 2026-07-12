@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import uuid
 from types import SimpleNamespace
@@ -61,6 +62,61 @@ def test_hidden_video_commit_is_verified_durable_and_restart_readable(tmp_path):
     assert inspected.source_reference == artifact.source_reference
     assert inspected.capability == "video"
     assert restarted.exists(artifact.locator, sha256=digest)
+
+
+def test_video_generation_intent_contains_only_exact_binding_fields(tmp_path):
+    store = WorkbenchStore(projects_root=tmp_path / "projects")
+    project_id = uuid.uuid4().hex
+    job_id = uuid.uuid4().hex
+
+    intent = store.record_video_generation_intent(
+        project_id=project_id,
+        job_id=job_id,
+        shot_id="s1",
+        shot_version=3,
+    )
+
+    path = (
+        store.project_dir(project_id)
+        / ".billing-results"
+        / "video-intents"
+        / f"{job_id}.json"
+    )
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "project_id": project_id,
+        "job_id": job_id,
+        "shot_id": "s1",
+        "shot_version": 3,
+    }
+    assert store.read_video_generation_intent(project_id, job_id) == intent
+
+
+def test_store_restart_restores_active_project_mutation(tmp_path):
+    projects_root = tmp_path / "projects"
+    project_id = uuid.uuid4().hex
+    store = WorkbenchStore(projects_root=projects_root)
+    store._ensure_project_dirs(project_id)
+    storyboard = store.artifact_dir(project_id) / "episode_storyboard.json"
+    public_video = store.project_dir(project_id) / "assets" / "video" / "s1.mp4"
+    storyboard.write_bytes(b"before")
+
+    store.begin_project_mutation(
+        project_id,
+        operation="publish-billed-video",
+        changed_paths=[
+            "artifacts/episode_storyboard.json",
+            "assets/video/s1.mp4",
+        ],
+    )
+    storyboard.write_bytes(b"after")
+    public_video.write_bytes(b"uncommitted-public-video")
+
+    restarted = WorkbenchStore(projects_root=projects_root)
+
+    assert storyboard.read_bytes() == b"before"
+    assert not public_video.exists()
+    assert not (projects_root / ".recovery").exists()
+    restarted.assert_project_available(project_id)
 
 
 def test_hidden_video_publish_failure_never_exposes_half_artifact(

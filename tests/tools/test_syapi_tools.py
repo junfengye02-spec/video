@@ -249,7 +249,9 @@ def test_syapi_video_reports_failed_task(monkeypatch, tmp_path):
     )
 
     assert not result.success
-    assert "model not enabled" in result.error
+    assert result.data == {"task_id": "task_bad"}
+    assert result.error == "SYAPI video task failed"
+    assert "model not enabled" not in result.error
 
 
 def test_syapi_video_default_base_url_is_current_gateway(monkeypatch):

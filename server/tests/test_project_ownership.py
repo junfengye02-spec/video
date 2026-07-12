@@ -1286,7 +1286,7 @@ def test_short_drama_creation_uses_current_owner(ownership_context, monkeypatch)
     assert ownership_context["db"].get(ProjectRecord, project_id).owner_user_id == ALICE_ID
 
 
-def test_project_route_inventory_has_exactly_fourteen_surfaces(ownership_context):
+def test_project_route_inventory_has_exactly_fifteen_surfaces(ownership_context):
     routes = {
         (method, route.path)
         for route in ownership_context["app"].routes
@@ -1303,6 +1303,7 @@ def test_project_route_inventory_has_exactly_fourteen_surfaces(ownership_context
         ("GET", "/api/projects/{project_id}"),
         ("PATCH", "/api/projects/{project_id}/continuity"),
         ("POST", "/api/projects/{project_id}/assets/upload"),
+        ("POST", "/api/projects/{project_id}/images/generate"),
         ("GET", "/api/projects/{project_id}/media/{relative_path:path}"),
         ("PATCH", "/api/projects/{project_id}/shots/{shot_id}"),
         ("POST", "/api/projects/{project_id}/prompt-optimize"),

@@ -27,6 +27,7 @@ from server.app.billing.models import (
 from server.app.billing.money import provider_micro_to_charge_units
 from server.app.billing.service import (
     BillingService,
+    ExistingProviderOperation,
     InvalidBillingState,
     ProviderPricingUnavailable,
     StagedArtifact,
@@ -863,6 +864,7 @@ def test_failure_receipts_release_without_charge(
     hold = db_session.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
     reconciliations = db_session.scalars(
         select(BillingReconciliation).where(BillingReconciliation.job_id == child.id)
+        .where(BillingReconciliation.reason == "upstream_refund_pending")
     ).all()
 
     assert failed.status == "failed_no_charge"
@@ -885,7 +887,10 @@ def test_refund_pending_uses_upstream_reconciliation_reason(
     )
 
     reconciliation = db_session.scalar(
-        select(BillingReconciliation).where(BillingReconciliation.job_id == child.id)
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == child.id,
+            BillingReconciliation.reason == "upstream_refund_pending",
+        )
     )
     assert reconciliation is not None
     assert reconciliation.reason == "upstream_refund_pending"
@@ -903,7 +908,10 @@ def test_missing_receipt_releases_bound_pending_job_idempotently(
     job = billing_service.load_job(child.id)
     hold = db_session.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
     reconciliation = db_session.scalar(
-        select(BillingReconciliation).where(BillingReconciliation.job_id == child.id)
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == child.id,
+            BillingReconciliation.reason == "receipt_missing",
+        )
     )
     assert job.status == "receipt_missing_no_charge"
     assert job.result_visible is False
@@ -1751,3 +1759,57 @@ def test_postgres_same_fresh_quote_race_maps_unique_loser_to_domain_error(
         )
         assert wallet is not None
         assert wallet.held_units == sum(hold.amount_units for hold in durable_holds)
+
+
+def test_postgres_concurrent_same_parent_operation_returns_one_child(
+    postgres_engine: Engine,
+) -> None:
+    user_id = "u-parent-operation-race"
+    project_id = "p-parent-operation-race"
+    parent_id = "parent-operation-race-000000001"
+    with Session(postgres_engine, expire_on_commit=False) as db:
+        db.add(User(id=user_id, email="parent-race@example.com", password_hash="hash", role="user", status="active"))
+        db.flush()
+        db.add_all(
+            [
+                ProjectRecord(id=project_id, owner_user_id=user_id, title="Parent race", mode="short_drama", project_type="single_video"),
+                WalletAccount(id="wallet-parent-operation-race", user_id=user_id, balance_units=40_000_000, held_units=0),
+                BillingSetting(id=1, multiplier_bps=15_000, version=0),
+            ]
+        )
+        db.flush()
+        db.add(GenerationJob.parent(id=parent_id, user_id=user_id, project_id=project_id, operation="render"))
+        db.commit()
+
+    def reserve(index: int):
+        with Session(postgres_engine, expire_on_commit=False) as db:
+            service = BillingService(db, service_settings(), lambda _locator: None)
+            try:
+                child = service.reserve_provider_call(
+                    user_id=user_id,
+                    project_id=project_id,
+                    parent_job_id=parent_id,
+                    capability="video",
+                    operation="shot:s1",
+                    provider_method="POST",
+                    provider_route="/v1/videos",
+                    quote=usage_quote(quote_id="uq_" + f"{index:032x}"),
+                )
+                return "created", child.id
+            except ExistingProviderOperation as exc:
+                return "existing", exc.job_id
+
+    outcomes = run_concurrently(lambda: reserve(1), lambda: reserve(2))
+    assert sorted(outcome for outcome, _job_id in outcomes) == ["created", "existing"]
+    assert len({job_id for _outcome, job_id in outcomes}) == 1
+    with Session(postgres_engine) as db:
+        children = db.scalars(
+            select(GenerationJob).where(
+                GenerationJob.parent_job_id == parent_id,
+                GenerationJob.operation == "shot:s1",
+            )
+        ).all()
+        assert len(children) == 1
+        assert db.scalar(
+            select(func.count(WalletHold.id)).where(WalletHold.job_id == children[0].id)
+        ) == 1

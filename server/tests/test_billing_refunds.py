@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +22,13 @@ from server.app.billing.models import (
     CostReceipt,
     GenerationJob,
 )
+from server.app.billing.lease import (
+    claim_is_owned,
+    claim_reconciliation,
+    heartbeat_claim,
+    reschedule_claim,
+    resolve_claim,
+)
 from server.app.billing.reconciliation import (
     reconcile_due_jobs,
     recover_provider_reference,
@@ -40,6 +48,7 @@ from server.app.provider.newapi import (
     VideoTaskStatus,
     TokenScopedQuote,
 )
+from server.app.provider.video_recovery import resume_billed_video_job
 from server.app.storage import WorkbenchStore
 from server.app.wallet.models import WalletAccount, WalletEntry, WalletHold
 
@@ -103,6 +112,268 @@ def pending_receipt(reference_id: str) -> UsageReceipt:
         cost_amount_micro=0,
         settled_at=None,
     )
+
+
+def test_reconciliation_claim_expiry_takeover_fences_stale_generation(
+    billing_context,
+):
+    db, service, _store, user_id, project_id = billing_context
+    child = reserve(service, user_id, project_id)
+    first = claim_reconciliation(
+        db,
+        job_id=child.id,
+        reason="provider_completion",
+        lease_seconds=300,
+    )
+    assert first is not None
+    row = db.get(BillingReconciliation, first.row_id)
+    row.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+
+    assert claim_is_owned(db, first) is False
+    second = claim_reconciliation(
+        db,
+        job_id=child.id,
+        reason="provider_completion",
+        lease_seconds=300,
+    )
+    assert second is not None
+    assert second.row_id == first.row_id
+    assert second.generation == first.generation + 1
+
+    assert heartbeat_claim(db, first) is False
+    assert reschedule_claim(db, first, delay_seconds=5) is False
+    assert resolve_claim(db, first) is False
+    assert claim_is_owned(db, second) is True
+
+
+def test_video_resume_recovers_deterministic_committed_artifact_without_redownload(
+    billing_context,
+):
+    db, service, store, user_id, project_id = billing_context
+    child = reserve(service, user_id, project_id)
+    task_id = f"task_{uuid.uuid4().hex}"
+    service.bind_provider_reference(child.id, "task", task_id)
+    service.mark_receipt_pending(child.id)
+    with store.hidden_video_destination(
+        project_id,
+        "shot:s1",
+        artifact_id=child.id,
+    ) as destination:
+        destination.temporary_path.write_bytes(b"committed-before-db-stage")
+        artifact = destination.commit(
+            sha256=hashlib.sha256(b"committed-before-db-stage").hexdigest(),
+            source_reference=task_id,
+        )
+
+    class RecoveryClient:
+        def get_video_task(self, token_alias, reference_id):
+            assert (token_alias, reference_id) == ("video-original", task_id)
+            return VideoTaskStatus(id=task_id, status="completed")
+
+        def download_video_content(self, *_args, **_kwargs):
+            raise AssertionError("committed deterministic artifact must be reused")
+
+    assert resume_billed_video_job(
+        db,
+        RecoveryClient(),
+        child.id,
+        store,
+        settings=SETTINGS,
+    ) == "completed"
+    staged = service.load_job(child.id)
+    assert staged.result_staged is True
+    assert staged.result_locator == artifact.locator
+
+
+@pytest.mark.parametrize("initial_status", ["reserved", "submitted_ambiguous"])
+def test_unbound_job_waits_for_unexpired_quote_before_no_charge_recovery(
+    billing_context, initial_status
+):
+    db, service, store, user_id, project_id = billing_context
+    child = reserve(service, user_id, project_id, recovery=False)
+    machine = db.scalar(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == child.id,
+            BillingReconciliation.reason == "provider_completion",
+        )
+    )
+    assert machine is not None and machine.status == "open"
+    if initial_status == "submitted_ambiguous":
+        claim = claim_reconciliation(
+            db,
+            job_id=child.id,
+            reason="provider_completion",
+            lease_seconds=300,
+        )
+        assert claim is not None
+        service.mark_submitted_ambiguous(child.id, claim)
+        machine = db.get(BillingReconciliation, machine.id)
+        machine.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+    else:
+        assert machine.attempts == 0
+    client = fake_client()
+    client.get_quote_status.return_value = UsageQuoteStatus(
+        quote_id=child.quote_id,
+        status="quoted",
+        reference_type=None,
+        reference_id=None,
+        created_at=int(NOW.timestamp()),
+        expires_at=int((NOW + timedelta(minutes=2)).timestamp()),
+        consumed_at=None,
+        updated_at=int(NOW.timestamp()),
+    )
+
+    assert reconcile_due_jobs(
+        db, client, NOW, 1, settings=SETTINGS, media_store=store
+    ) == 1
+
+    waiting = service.load_job(child.id)
+    hold = db.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
+    assert waiting.status == initial_status
+    assert hold.status == "active"
+    client.execute_quoted.assert_not_called()
+
+    machine = db.get(BillingReconciliation, machine.id)
+    machine.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+    client.get_quote_status.return_value = UsageQuoteStatus(
+        quote_id=child.quote_id,
+        status="expired",
+        reference_type=None,
+        reference_id=None,
+        created_at=int(NOW.timestamp()),
+        expires_at=int((NOW + timedelta(minutes=2)).timestamp()),
+        consumed_at=None,
+        updated_at=int((NOW + timedelta(minutes=3)).timestamp()),
+    )
+
+    assert reconcile_due_jobs(
+        db,
+        client,
+        NOW + timedelta(minutes=3),
+        1,
+        settings=SETTINGS,
+        media_store=store,
+    ) == 1
+
+    recovered = service.load_job(child.id)
+    hold = db.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
+    assert recovered.status == "provider_not_submitted_no_charge"
+    assert hold.status == "released"
+    client.execute_quoted.assert_not_called()
+
+
+def test_takeover_waits_for_quoted_then_recovers_stale_execution_reference(
+    billing_context, monkeypatch
+):
+    db, service, store, user_id, project_id = billing_context
+    child = reserve(service, user_id, project_id, recovery=False)
+    store._ensure_project_dirs(project_id)
+    store.write_artifact(
+        project_id,
+        "episode_storyboard.json",
+        {
+            "shots": [
+                {
+                    "id": "s1",
+                    "version": 1,
+                    "status": "generating",
+                    "output_path": None,
+                    "output_url": None,
+                }
+            ]
+        },
+    )
+    store.record_video_generation_intent(
+        project_id=project_id,
+        job_id=child.id,
+        shot_id="s1",
+        shot_version=1,
+    )
+    first = claim_reconciliation(
+        db,
+        job_id=child.id,
+        reason="provider_completion",
+        lease_seconds=300,
+    )
+    assert first is not None and heartbeat_claim(db, first)
+    service.mark_submitted_ambiguous(child.id, first)
+    machine = db.get(BillingReconciliation, first.row_id)
+    machine.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+    client = fake_client()
+    client.get_quote_status.return_value = UsageQuoteStatus(
+        quote_id=child.quote_id,
+        status="quoted",
+        reference_type=None,
+        reference_id=None,
+        created_at=int(NOW.timestamp()),
+        expires_at=int((NOW + timedelta(minutes=2)).timestamp()),
+        consumed_at=None,
+        updated_at=int(NOW.timestamp()),
+    )
+
+    assert reconcile_due_jobs(
+        db, client, NOW, 1, settings=SETTINGS, media_store=store
+    ) == 1
+
+    waiting = service.load_job(child.id)
+    hold = db.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
+    assert waiting.status == "submitted_ambiguous"
+    assert hold.status == "active"
+
+    task_id = f"task_{uuid.uuid4().hex}"
+    machine = db.get(BillingReconciliation, first.row_id)
+    machine.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+    client.get_quote_status.return_value = UsageQuoteStatus(
+        quote_id=child.quote_id,
+        status="accepted",
+        reference_type="task",
+        reference_id=task_id,
+        created_at=int(NOW.timestamp()),
+        expires_at=int((NOW + timedelta(minutes=2)).timestamp()),
+        consumed_at=int((NOW + timedelta(seconds=1)).timestamp()),
+        updated_at=int((NOW + timedelta(seconds=1)).timestamp()),
+    )
+    client.get_video_task.return_value = VideoTaskStatus(
+        id=task_id, status="completed"
+    )
+    client.download_video_content.side_effect = (
+        lambda _alias, _task, path, **_kwargs: path.write_bytes(b"video")
+    )
+    client.get_task_receipt.return_value = receipt(task_id)
+    monkeypatch.setattr(
+        "server.app.provider.video_recovery.probe_output",
+        lambda path: {"file_size_bytes": path.stat().st_size, "video_width": 16},
+    )
+    monkeypatch.setattr(
+        "server.app.provider.video_recovery.get_settings", lambda: SETTINGS
+    )
+
+    assert reconcile_due_jobs(
+        db,
+        client,
+        NOW + timedelta(seconds=2),
+        1,
+        settings=SETTINGS,
+        media_store=store,
+    ) == 1
+
+    recovered = service.load_job(child.id)
+    hold = db.scalar(select(WalletHold).where(WalletHold.job_id == child.id))
+    assert recovered.status == "billed" and recovered.result_visible
+    assert recovered.provider_reference_id == task_id
+    assert hold.status == "captured"
+    public_path = store.project_dir(project_id) / "assets" / "video" / "s1.mp4"
+    reconciliations = db.scalars(
+        select(BillingReconciliation).where(BillingReconciliation.job_id == child.id)
+    ).all()
+    assert public_path.is_file(), [
+        (row.reason, row.status, row.last_error) for row in reconciliations
+    ]
 
 
 @pytest.fixture
@@ -202,7 +473,7 @@ def test_accepted_video_reference_recovers_downloads_stages_and_bills(
     )
     client.get_video_task.return_value = VideoTaskStatus(id=task_id, status="completed")
     client.download_video_content.side_effect = (
-        lambda _alias, _task, path: path.write_bytes(b"video")
+        lambda _alias, _task, path, **_kwargs: path.write_bytes(b"video")
     )
     client.get_task_receipt.return_value = receipt(task_id)
     monkeypatch.setattr(
@@ -215,7 +486,12 @@ def test_accepted_video_reference_recovers_downloads_stages_and_bills(
     ) == 1
 
     job = db.get(GenerationJob, child.id)
-    assert job is not None and job.status == "billed"
+    reconciliations = db.scalars(
+        select(BillingReconciliation).where(BillingReconciliation.job_id == child.id)
+    ).all()
+    assert job is not None and job.status == "billed", [
+        (row.reason, row.status, row.last_error) for row in reconciliations
+    ]
     assert job.provider_reference_id == task_id
     assert job.result_staged is True and job.result_visible is True
     assert store.exists(job.result_locator, sha256=job.result_sha256)
@@ -295,26 +571,31 @@ def test_recovered_sync_receipt_accounting_survives_pending_passes_and_restart(
         pending_receipt(request_id),
         receipt(request_id),
     ]
-    current = NOW
-    for _pass in range(2):
+    for pass_index in range(2):
         with Session(db.get_bind(), expire_on_commit=False) as restarted:
+            if pass_index:
+                due = restarted.get(BillingReconciliation, machine.id)
+                due.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                restarted.commit()
             assert reconcile_due_jobs(
                 restarted,
                 client,
-                current,
+                NOW,
                 100,
                 settings=SETTINGS,
                 media_store=store,
             ) == 1
             row = restarted.get(BillingReconciliation, machine.id)
             assert row is not None and row.status == "open"
-            current = row.next_retry_at.replace(tzinfo=timezone.utc)
 
     with Session(db.get_bind(), expire_on_commit=False) as restarted:
+        due = restarted.get(BillingReconciliation, machine.id)
+        due.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        restarted.commit()
         assert reconcile_due_jobs(
             restarted,
             client,
-            current,
+            NOW,
             100,
             settings=SETTINGS,
             media_store=store,
@@ -369,7 +650,14 @@ def test_worker_recovered_sync_hands_off_to_one_receipt_machine(
             ),
         )
     ).all()
-    assert [row.reason for row in machines] == ["receipt_pending"]
+    assert [row.reason for row in machines] == []
+    canonical = db.scalar(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == child.id,
+            BillingReconciliation.reason == "provider_completion",
+        )
+    )
+    assert canonical is not None and canonical.status == "open"
     client.get_request_receipt.assert_called_once()
 
 
@@ -411,7 +699,7 @@ def test_reconciliation_discovery_excludes_covered_jobs_before_limit(
     assert db.scalar(
         select(BillingReconciliation.id).where(
             BillingReconciliation.job_id == eligible.id,
-            BillingReconciliation.reason == "reference_recovery",
+            BillingReconciliation.reason == "provider_completion",
         )
     ) is not None
 
@@ -438,12 +726,14 @@ def test_retired_alias_retries_then_leaves_durable_operator_reconciliation(
     machine = db.scalar(
         select(BillingReconciliation).where(
             BillingReconciliation.job_id == child.id,
-            BillingReconciliation.reason == "reference_recovery",
+            BillingReconciliation.reason == "provider_completion",
         )
     )
     assert db.get(GenerationJob, child.id).status == "reference_recovery_pending"
     assert machine is not None and machine.status == "open"
     assert "CapabilityAliasUnavailable" in machine.last_error
+    machine.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
 
     reconcile_due_jobs(
         db,
@@ -637,17 +927,27 @@ def test_retry_schedule_and_all_expired_payment_orders(billing_context):
     client = fake_client()
     client.get_request_receipt.side_effect = ReceiptNotFound("missing bearer abc")
 
-    current = NOW
     expected = [5, 15, 30, 60, 300]
-    for delay in expected:
-        reconcile_due_jobs(db, client, current, 100, settings=SETTINGS, media_store=store)
+    for index, delay in enumerate(expected):
+        if index:
+            due = db.scalar(
+                select(BillingReconciliation).where(
+                    BillingReconciliation.job_id == child.id
+                )
+            )
+            due.next_retry_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+        reconcile_due_jobs(db, client, NOW, 100, settings=SETTINGS, media_store=store)
         row = db.scalar(
             select(BillingReconciliation).where(BillingReconciliation.job_id == child.id)
         )
         assert row is not None
-        assert row.next_retry_at.replace(tzinfo=timezone.utc) == current + timedelta(seconds=delay)
+        retry_seconds = (
+            row.next_retry_at.replace(tzinfo=timezone.utc)
+            - datetime.now(timezone.utc)
+        ).total_seconds()
+        assert delay - 2 <= retry_seconds <= delay + 1
         assert len(row.last_error) <= 500 and "abc" not in row.last_error
-        current = row.next_retry_at.replace(tzinfo=timezone.utc)
 
     assert all(order.status == "expired" for order in db.scalars(select(PaymentOrder)).all())
 
@@ -877,7 +1177,7 @@ def test_postgres_skip_locked_lease_prevents_duplicate_network_and_holds_no_job_
             second = executor.submit(run_once)
             assert second.result(timeout=10) == 0
             release_network.set()
-            assert first.result(timeout=10) == 2
+            assert first.result(timeout=10) == 1
     finally:
         event.remove(postgres_engine, "before_cursor_execute", capture_sql)
         release_network.set()
@@ -945,11 +1245,20 @@ def test_postgres_video_file_io_keeps_job_unlocked_and_claim_exclusive(
                 calls["task"] += 1
             return VideoTaskStatus(id=task_id, status="completed")
 
-        def download_video_content(self, alias, reference_id, destination):
+        def download_video_content(
+            self,
+            alias,
+            reference_id,
+            destination,
+            *,
+            progress_callback=None,
+        ):
             assert (alias, reference_id) == ("video-original", task_id)
             with calls_lock:
                 calls["download"] += 1
             destination.write_bytes(b"postgres-video")
+            if progress_callback is not None:
+                progress_callback()
 
         def get_task_receipt(self, kind, alias, reference_id):
             assert (kind, alias, reference_id) == (
@@ -991,9 +1300,17 @@ def test_postgres_video_file_io_keeps_job_unlocked_and_claim_exclusive(
                     db, client, NOW, 100, settings=SETTINGS, media_store=store
                 )
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        def resume_from_api():
+            with Session(postgres_engine, expire_on_commit=False) as db:
+                return resume_billed_video_job(
+                    db, client, child.id, store, settings=SETTINGS
+                )
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
             first = executor.submit(run_once)
             assert entered_probe.wait(timeout=10)
+            api_resume = executor.submit(resume_from_api)
+            assert api_resume.result(timeout=10) == "pending"
             second = executor.submit(run_once)
             assert second.result(timeout=10) == 0
             release_probe.set()

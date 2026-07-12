@@ -6,8 +6,15 @@ from typing import Any
 
 import requests
 
+from server.app.billing.execution import (
+    StagedProviderResult,
+    execute_billed_provider_call,
+    finalize_billed_sync_result,
+    retry_payment_required_quote,
+)
 from server.app.model_output_normalization import normalize_shot_language
 from server.app.models import Shot
+from server.app.provider.newapi import PreparedNewApiRequest
 
 
 SYSTEM_PROMPT = """Create short-drama storyboard JSON only.
@@ -18,6 +25,81 @@ shot_language must use these fields when relevant:
 shot_size, camera_movement, lens_mm, lighting_key, depth_of_field, color_temperature.
 Use the exact enum vocabulary from OpenMontage scene_plan.schema.json.
 Return no markdown fences and no commentary."""
+
+
+def prepare_storyboard_request(
+    *, title: str, prompt: str, model: str, shot_count: int | None = None
+) -> PreparedNewApiRequest:
+    return PreparedNewApiRequest.json(
+        "POST",
+        "/v1/chat/completions",
+        {
+            "model": model,
+            "temperature": 0.4,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                        "role": "user",
+                        "content": (
+                            f"Title: {title.strip()}\nBrief: {prompt.strip()}\n"
+                            f"{_billing_shot_count_instruction(shot_count)}"
+                        ),
+                },
+            ],
+        },
+    )
+
+
+def generate_short_drama_storyboard_billed(
+    *, db, newapi, settings, media_store, user_id: str, project_id: str,
+    title: str, prompt: str, model: str, shot_count: int | None = None,
+    billing_job_id: str | None = None,
+) -> dict[str, Any]:
+    request = prepare_storyboard_request(
+        title=title, prompt=prompt, model=model, shot_count=shot_count
+    )
+    call = {
+        "db": db,
+        "newapi": newapi,
+        "settings": settings,
+        "artifact_inspector": media_store.inspect_staged_artifact,
+        "user_id": user_id,
+        "project_id": project_id,
+        "capability": "text",
+        "operation": "storyboard_generation",
+        "request": request,
+    }
+    context = (
+        execute_billed_provider_call(parent_job_id=None, **call)
+        if billing_job_id is None
+        else retry_payment_required_quote(job_id=billing_job_id, **call)
+    )
+
+    def persist_hidden(job_id, response):
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+        except Exception:
+            raise ValueError("storyboard generator returned an invalid result") from None
+        value = _parse_json_object(str(content))
+        _normalize_storyboard(value, title)
+        artifact = media_store.stage_sync_result(
+            project_id=project_id,
+            job_id=job_id,
+            operation="storyboard_generation",
+            capability="text",
+            source_reference=context.execution.reference_id,
+            content=response.content,
+        )
+        return StagedProviderResult(artifact.locator, artifact.sha256, value)
+
+    return finalize_billed_sync_result(
+        db=db,
+        newapi=newapi,
+        settings=settings,
+        artifact_inspector=media_store.inspect_staged_artifact,
+        context=context,
+        persist_hidden=persist_hidden,
+    ).value
 
 
 def generate_short_drama_storyboard(
@@ -126,6 +208,13 @@ def _requested_shot_count(shot_count: int | None) -> int:
     if shot_count is None:
         return 5
     return min(max(int(shot_count), 1), 60)
+
+
+def _billing_shot_count_instruction(shot_count: int | None) -> str:
+    current_helper = globals().get("_shot_count_instruction")
+    if callable(current_helper):
+        return current_helper(shot_count)
+    return f"Shots: {_requested_shot_count(shot_count)}"
 
 
 def _normalize_string_list(value: Any) -> list[str]:
