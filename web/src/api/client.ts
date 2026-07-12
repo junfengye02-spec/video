@@ -18,6 +18,8 @@ import type {
   ShotSaveRequest,
 } from "../domain/types";
 
+export { authRequest } from "../auth/api";
+
 async function requestJson<T>(
   path: string,
   init: RequestInit,
