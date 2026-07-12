@@ -425,15 +425,23 @@ def billing_context(tmp_path):
 
 
 def reserve(
-    service, user_id, project_id, *, capability="video", alias=None, recovery=True
+    service,
+    user_id,
+    project_id,
+    *,
+    capability="video",
+    alias=None,
+    recovery=True,
+    parent_job_id=None,
+    operation="shot:s1",
 ):
     scoped = quote(alias=alias or f"{capability}-original", capability=capability)
     child = service.reserve_provider_call(
         user_id=user_id,
         project_id=project_id,
-        parent_job_id=None,
+        parent_job_id=parent_job_id,
         capability=capability,
-        operation="shot:s1",
+        operation=operation,
         provider_method="POST",
         provider_route="/v1/videos" if capability == "video" else "/v1/chat/completions",
         quote=scoped,
@@ -441,6 +449,76 @@ def reserve(
     if recovery:
         service.mark_reference_recovery_pending(child.id)
     return child
+
+
+def test_terminal_video_reconciliation_recomputes_parent_after_final_child_fails_no_charge(
+    billing_context,
+):
+    db, service, store, user_id, project_id = billing_context
+    parent = service.create_parent_job(
+        user_id=user_id,
+        project_id=project_id,
+        operation="render",
+    )
+    complete_child = reserve(
+        service,
+        user_id,
+        project_id,
+        recovery=False,
+        parent_job_id=parent.id,
+        operation="shot:s1",
+    )
+    failing_child = reserve(
+        service,
+        user_id,
+        project_id,
+        parent_job_id=parent.id,
+        operation="shot:s2",
+    )
+    complete_child.status = "billed"
+    complete_machine = db.scalar(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == complete_child.id,
+            BillingReconciliation.reason == "provider_completion",
+        )
+    )
+    complete_machine.status = "resolved"
+    db.commit()
+    store.write_artifact(
+        project_id,
+        "episode_storyboard.json",
+        {
+            "shots": [
+                {"id": "s1", "version": 1},
+                {"id": "s2", "version": 1},
+            ]
+        },
+    )
+    store.record_video_generation_intent(
+        project_id=project_id,
+        job_id=complete_child.id,
+        shot_id="s1",
+        shot_version=1,
+    )
+    client = fake_client()
+    client.get_quote_status.return_value = UsageQuoteStatus(
+        quote_id=failing_child.quote_id,
+        status="failed",
+        reference_type=None,
+        reference_id=None,
+        created_at=int(NOW.timestamp()),
+        expires_at=int((NOW + timedelta(minutes=2)).timestamp()),
+        consumed_at=None,
+        updated_at=int(NOW.timestamp()),
+    )
+
+    assert reconcile_due_jobs(
+        db, client, NOW, 1, settings=SETTINGS, media_store=store
+    ) == 1
+
+    db.expire_all()
+    assert db.get(GenerationJob, failing_child.id).status == "provider_rejected_no_charge"
+    assert db.get(GenerationJob, parent.id).status == "partial_failure"
 
 
 def valid_request_id() -> str:

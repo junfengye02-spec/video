@@ -35,6 +35,7 @@ from server.app.provider.newapi import (
 from server.app.provider.video_recovery import (
     InvalidVideoArtifact,
     publish_billed_video_result,
+    recompute_video_parent_status,
     resume_billed_video_job,
 )
 from server.app.settings import DEFAULT_PROJECTS_ROOT
@@ -541,6 +542,32 @@ def _retry_delay(attempts: int) -> int:
     return _RETRY_SECONDS[attempts - 1] if attempts <= len(_RETRY_SECONDS) else 300
 
 
+def _recompute_completed_video_parent(
+    db: Session,
+    job_id: str,
+    media_store: WorkbenchStore,
+) -> None:
+    job = db.get(GenerationJob, job_id)
+    if (
+        job is None
+        or job.capability != "video"
+        or job.parent_job_id is None
+        or not job.status.endswith("_no_charge")
+    ):
+        db.commit()
+        return
+    storyboard = media_store.read_artifact(
+        job.project_id, "episode_storyboard.json"
+    ) or {"shots": []}
+    recompute_video_parent_status(
+        db,
+        job.parent_job_id,
+        media_store,
+        storyboard,
+    )
+    db.commit()
+
+
 def resume_reconcile_publish_job(
     db: Session,
     client: NewApiClient,
@@ -582,6 +609,8 @@ def resume_reconcile_publish_job(
             last_error=_sanitize_error(exc),
         )
         raise
+    if outcome == "completed":
+        _recompute_completed_video_parent(db, job_id, media_store)
     updated = (
         resolve_claim(db, claim)
         if outcome == "completed"

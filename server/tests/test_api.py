@@ -33,7 +33,9 @@ from server.app.main import (
 )
 from server.app.models import ImageGenerationRequest, PromptOptimizeRequest
 from server.app.provider.newapi import (
+    InvalidNewApiResponse,
     NewApiCallError,
+    NewApiRateLimited,
     QuotedExecutionResult,
     TokenScopedQuote,
     UsageQuote,
@@ -96,7 +98,9 @@ class FakeNewApi:
         self.counter = 0
         self.references = {}
         self.invalid_prompt = False
+        self.invalid_quote = False
         self.quote_failure = False
+        self.quote_rate_limited = False
         self.video_status = "completed"
         self.execute_calls = []
 
@@ -104,6 +108,10 @@ class FakeNewApi:
         return None
 
     def quote(self, kind, request, token_alias=None):
+        if self.invalid_quote:
+            raise InvalidNewApiResponse("invalid quote")
+        if self.quote_rate_limited:
+            raise NewApiRateLimited("provider rate limited")
         if self.quote_failure:
             raise NewApiCallError("provider unavailable")
         self.counter += 1
@@ -795,6 +803,97 @@ def test_render_does_not_hold_project_mutation_across_provider_io(
     assert active["journals"] == 0
 
 
+def test_regenerate_does_not_hold_route_mutation_across_provider_lifecycle(
+    tmp_path, monkeypatch
+):
+    app = create_app(
+        db_path=tmp_path / "workbench.db",
+        projects_root=tmp_path / "projects",
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    created = _create_project_with_fake_generator(client)
+    project_id = created["project"]["id"]
+    shot_id = created["storyboard"]["shots"][0]["id"]
+    active_operations: list[str] = []
+    observed: list[tuple[str, tuple[str, ...]]] = []
+    original_begin = app.state.store.begin_project_mutation
+
+    class TrackedJournal:
+        def __init__(self, journal, operation):
+            self.journal = journal
+            self.operation = operation
+            self.closed = False
+
+        def _close(self, method):
+            try:
+                return method()
+            finally:
+                if not self.closed:
+                    active_operations.remove(self.operation)
+                    self.closed = True
+
+        def complete(self):
+            return self._close(self.journal.complete)
+
+        def restore(self):
+            return self._close(self.journal.restore)
+
+    def begin_mutation(*args, **kwargs):
+        operation = kwargs["operation"]
+        journal = original_begin(*args, **kwargs)
+        active_operations.append(operation)
+        return TrackedJournal(journal, operation)
+
+    def track(name, original):
+        def wrapped(*args, **kwargs):
+            observed.append((name, tuple(active_operations)))
+            return original(*args, **kwargs)
+
+        return wrapped
+
+    monkeypatch.setattr(app.state.store, "begin_project_mutation", begin_mutation)
+    for name in (
+        "quote",
+        "execute_quoted",
+        "get_video_task",
+        "download_video_content",
+        "get_task_receipt",
+    ):
+        monkeypatch.setattr(
+            app.state.fake_newapi,
+            name,
+            track(name, getattr(app.state.fake_newapi, name)),
+        )
+    monkeypatch.setattr(
+        app.state.store,
+        "publish_staged_video",
+        track("publish_staged_video", app.state.store.publish_staged_video),
+    )
+    monkeypatch.setattr(
+        "server.app.provider.video_recovery.probe_output",
+        lambda path: {"file_size_bytes": path.stat().st_size, "video_width": 16},
+    )
+
+    response = client.post(
+        f"/api/projects/{project_id}/shots/{shot_id}/regenerate",
+        json={"video_model": "omni_flash-10s"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert [name for name, _operations in observed] == [
+        "quote",
+        "execute_quoted",
+        "get_video_task",
+        "download_video_content",
+        "get_task_receipt",
+        "publish_staged_video",
+    ]
+    assert all(
+        "shot_regenerate" not in operations for _name, operations in observed
+    ), observed
+    assert active_operations == []
+
+
 def test_stale_public_video_bytes_are_not_served_after_shot_version_edit(
     tmp_path,
 ):
@@ -1309,6 +1408,107 @@ def test_create_short_drama_quote_failure_returns_sanitized_error_without_child(
     assert response.json() == {"code": "provider_call_failed"}
     assert list((tmp_path / "projects").iterdir()) == []
     assert app.state.test_db.query(GenerationJob).count() == 0
+    assert app.state.test_db.query(ProjectRecord).count() == 0
+
+    app.state.fake_newapi.quote_failure = False
+    retry = client.post(
+        "/api/projects/short-drama",
+        json={"title": "Rain Alley", "prompt": "rain-night urban reversal short drama"},
+    )
+
+    assert retry.status_code == 200, retry.text
+    assert app.state.test_db.query(ProjectRecord).count() == 1
+    assert len(list((tmp_path / "projects").iterdir())) == 1
+
+
+def test_create_short_drama_quote_rate_limit_rolls_back_project_and_retry_succeeds(
+    tmp_path,
+):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    app.state.fake_newapi.quote_rate_limited = True
+
+    response = client.post(
+        "/api/projects/short-drama",
+        json={"title": "Rain Alley", "prompt": "rain-night urban reversal short drama"},
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {"code": "provider_quote_rate_limited"}
+    assert app.state.test_db.query(ProjectRecord).count() == 0
+    assert app.state.test_db.query(GenerationJob).count() == 0
+    assert list((tmp_path / "projects").iterdir()) == []
+
+    app.state.fake_newapi.quote_rate_limited = False
+    retry = client.post(
+        "/api/projects/short-drama",
+        json={"title": "Rain Alley", "prompt": "rain-night urban reversal short drama"},
+    )
+
+    assert retry.status_code == 200, retry.text
+    assert app.state.test_db.query(ProjectRecord).count() == 1
+    assert len(list((tmp_path / "projects").iterdir())) == 1
+
+
+def test_create_short_drama_invalid_quote_rolls_back_project_before_retry(
+    tmp_path,
+):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    app.state.fake_newapi.invalid_quote = True
+
+    response = client.post(
+        "/api/projects/short-drama",
+        json={"title": "Rain Alley", "prompt": "rain-night urban reversal short drama"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"code": "provider_pricing_unavailable"}
+    assert app.state.test_db.query(ProjectRecord).count() == 0
+    assert app.state.test_db.query(GenerationJob).count() == 0
+    assert list((tmp_path / "projects").iterdir()) == []
+
+    app.state.fake_newapi.invalid_quote = False
+    retry = client.post(
+        "/api/projects/short-drama",
+        json={"title": "Rain Alley", "prompt": "rain-night urban reversal short drama"},
+    )
+
+    assert retry.status_code == 200, retry.text
+    assert app.state.test_db.query(ProjectRecord).count() == 1
+    assert len(list((tmp_path / "projects").iterdir())) == 1
+
+
+def test_create_short_drama_insufficient_balance_rolls_back_project_and_retry_succeeds(
+    tmp_path,
+):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    wallet = app.state.test_db.query(WalletAccount).filter_by(user_id=TEST_USER.id).one()
+    wallet.balance_units = 0
+    app.state.test_db.commit()
+
+    response = client.post(
+        "/api/projects/short-drama",
+        json={"title": "Rain Alley", "prompt": "rain-night urban reversal short drama"},
+    )
+
+    assert response.status_code == 402
+    assert response.json() == {"code": "payment_required"}
+    assert app.state.test_db.query(ProjectRecord).count() == 0
+    assert app.state.test_db.query(GenerationJob).count() == 0
+    assert list((tmp_path / "projects").iterdir()) == []
+
+    wallet.balance_units = 1_000_000_000
+    app.state.test_db.commit()
+    retry = client.post(
+        "/api/projects/short-drama",
+        json={"title": "Rain Alley", "prompt": "rain-night urban reversal short drama"},
+    )
+
+    assert retry.status_code == 200, retry.text
+    assert app.state.test_db.query(ProjectRecord).count() == 1
+    assert len(list((tmp_path / "projects").iterdir())) == 1
 
 
 def test_load_project_returns_written_artifacts(tmp_path):

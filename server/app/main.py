@@ -865,21 +865,14 @@ def create_app(
                 shot_count=payload.shot_count,
                 billing_job_id=payload.billing_job_id,
             )
-        except (NewApiCallError, NewApiRateLimited):
-            has_child = db.query(GenerationJob.id).filter(
-                GenerationJob.project_id == project.id,
-                GenerationJob.chargeable.is_(True),
-            ).first()
-            if has_child is None and payload.billing_job_id is None:
-                db.rollback()
-            raise
-        except (
-            PaymentRequiredQuote,
-            ProviderResultPending,
-            ProviderResultUnavailable,
-            ProviderPricingUnavailable,
-            ProviderPricingUnstable,
-        ):
+        except _BILLING_CONTROL_ERRORS:
+            if payload.billing_job_id is None:
+                has_child = db.query(GenerationJob.id).filter(
+                    GenerationJob.project_id == project.id,
+                    GenerationJob.chargeable.is_(True),
+                ).first()
+                if has_child is None:
+                    db.rollback()
             raise
         except Exception as exc:
             db.rollback()
@@ -1298,80 +1291,149 @@ def create_app(
             message = f"Shot '{shot_id}' not found"
             bus.emit(project_id, job_id=job_id, stage="regenerate", status="failed", message=message)
             raise HTTPException(status_code=404, detail=message)
-        shot["status"] = "generating"
-        shot["output_path"] = None
-        shot["output_url"] = None
+        shot_version = shot.get("version")
+        generation_shot = deepcopy(shot)
+        generation_shot["status"] = "generating"
+        generation_shot["output_path"] = None
+        generation_shot["output_url"] = None
+        generation_series_bible = deepcopy(series_bible)
+        owner_user_id = project.owner_user_id
+        regenerate_changed_paths = [
+            *STORYBOARD_ARTIFACT_PATHS,
+            *WORKFLOW_ARTIFACT_PATHS,
+            f"assets/video/{shot_id}.mp4",
+        ]
         with _project_mutation(
             db=db,
             workbench=workbench,
             project_id=project_id,
             operation="shot_regenerate",
-            changed_paths=[
-                *STORYBOARD_ARTIFACT_PATHS,
-                *WORKFLOW_ARTIFACT_PATHS,
-                f"assets/video/{shot_id}.mp4",
-            ],
+            changed_paths=regenerate_changed_paths,
             failure_detail="Project update failed",
-            preserve_http_error_writes=True,
         ):
-            try:
-                output = run_single_shot_generation(
-                    db=db,
-                    newapi=newapi,
-                    settings=settings,
-                    media_store=workbench,
-                    user_id=project.owner_user_id,
-                    project_id=project_id,
-                    parent_job_id=None,
-                    project_dir=workbench.project_dir(project_id),
-                    shot=shot,
-                    series_bible=series_bible,
-                    video_model=payload.video_model,
-                    billing_job_id=payload.billing_job_id,
-                )
-            except (
-                PaymentRequiredQuote,
-                ProviderResultPending,
-                ProviderResultUnavailable,
-                ProviderPricingUnavailable,
-                ProviderPricingUnstable,
-                NewApiCallError,
-                NewApiRateLimited,
+            pass
+        try:
+            output = run_single_shot_generation(
+                db=db,
+                newapi=newapi,
+                settings=settings,
+                media_store=workbench,
+                user_id=owner_user_id,
+                project_id=project_id,
+                parent_job_id=None,
+                project_dir=workbench.project_dir(project_id),
+                shot=generation_shot,
+                series_bible=generation_series_bible,
+                video_model=payload.video_model,
+                billing_job_id=payload.billing_job_id,
+            )
+        except _BILLING_CONTROL_ERRORS:
+            raise
+        except Exception as exc:
+            project = _lock_owned_project_after_parse(
+                request=request,
+                db=db,
+                project_id=project_id,
+                authorized_project=project,
+            )
+            storyboard = workbench.read_artifact(
+                project_id, "episode_storyboard.json"
+            )
+            series_bible = workbench.read_artifact(project_id, "series_bible.json")
+            shot = next(
+                (
+                    item
+                    for item in (storyboard or {}).get("shots", [])
+                    if item.get("id") == shot_id
+                ),
+                None,
+            )
+            if (
+                storyboard is not None
+                and series_bible is not None
+                and shot is not None
+                and shot.get("version") == shot_version
             ):
-                raise
-            except Exception as exc:
-                shot["status"] = "failed"
-                report = evaluate_storyboard_consistency(series_bible, storyboard)
-                apply_consistency_scores(storyboard, report)
-                series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
-                workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
-                continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
-                _persist_storyboard_state(
+                with _project_mutation(
+                    db=db,
                     workbench=workbench,
                     project_id=project_id,
-                    storyboard=storyboard,
-                    series_bible=series_bible,
-                    consistency_report=report,
-                )
-                rewrite_workflow_artifacts(
-                    workbench=workbench,
-                    project_id=project_id,
-                    series_bible=series_bible,
-                    storyboard=storyboard,
-                    render_runtime=workflow_settings["render_runtime"],
-                    video_model=payload.video_model,
-                    continuity_plan=continuity_plan,
-                )
-                bus.emit(
-                    project_id,
-                    job_id=job_id,
-                    stage="regenerate",
-                    status="failed",
-                    message=SHOT_GENERATION_FAILED,
-                )
-                raise HTTPException(status_code=500, detail=SHOT_GENERATION_FAILED) from exc
+                    operation="shot_regenerate",
+                    changed_paths=regenerate_changed_paths,
+                    failure_detail="Project update failed",
+                ):
+                    shot["status"] = "failed"
+                    shot["output_path"] = None
+                    shot["output_url"] = None
+                    report = evaluate_storyboard_consistency(series_bible, storyboard)
+                    apply_consistency_scores(storyboard, report)
+                    series_bible["assets"] = sync_asset_shot_ids(series_bible.get("assets", []), storyboard)
+                    workflow_settings = read_workflow_settings(workbench, project_id, default_video_model=payload.video_model)
+                    continuity_plan = workbench.read_artifact(project_id, "continuity_plan.json")
+                    _persist_storyboard_state(
+                        workbench=workbench,
+                        project_id=project_id,
+                        storyboard=storyboard,
+                        series_bible=series_bible,
+                        consistency_report=report,
+                    )
+                    rewrite_workflow_artifacts(
+                        workbench=workbench,
+                        project_id=project_id,
+                        series_bible=series_bible,
+                        storyboard=storyboard,
+                        render_runtime=workflow_settings["render_runtime"],
+                        video_model=payload.video_model,
+                        continuity_plan=continuity_plan,
+                    )
+                    project.updated_at = datetime.now(timezone.utc)
+            else:
+                db.commit()
+            bus.emit(
+                project_id,
+                job_id=job_id,
+                stage="regenerate",
+                status="failed",
+                message=SHOT_GENERATION_FAILED,
+            )
+            raise HTTPException(status_code=500, detail=SHOT_GENERATION_FAILED) from exc
+
+        project = _lock_owned_project_after_parse(
+            request=request,
+            db=db,
+            project_id=project_id,
+            authorized_project=project,
+        )
+        storyboard = workbench.read_artifact(project_id, "episode_storyboard.json")
+        series_bible = workbench.read_artifact(project_id, "series_bible.json")
+        shot = next(
+            (
+                item
+                for item in (storyboard or {}).get("shots", [])
+                if item.get("id") == shot_id
+            ),
+            None,
+        )
+        if (
+            storyboard is None
+            or series_bible is None
+            or shot is None
+            or shot.get("version") != shot_version
+        ):
+            db.commit()
+            raise ProviderResultPending(
+                "video generation result is detached from the current shot"
+            )
+        with _project_mutation(
+            db=db,
+            workbench=workbench,
+            project_id=project_id,
+            operation="shot_regenerate",
+            changed_paths=regenerate_changed_paths,
+            failure_detail="Project update failed",
+        ):
             shot["status"] = "complete"
-            shot["output_path"] = output["output_path"]
+            shot["output_path"] = shot.get("output_path") or output["output_path"]
             shot["output_url"] = output["tool_result"].get("url")
             report = evaluate_storyboard_consistency(series_bible, storyboard)
             apply_consistency_scores(storyboard, report)

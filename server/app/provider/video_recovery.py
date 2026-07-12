@@ -120,7 +120,7 @@ def _verify_video(path) -> None:
         raise InvalidVideoArtifact("downloaded content is not a valid video")
 
 
-def _recompute_parent_status(
+def recompute_video_parent_status(
     db: Session,
     parent_job_id: str | None,
     media_store: WorkbenchStore,
@@ -354,7 +354,7 @@ def publish_billed_video_result(
             or intent.shot_id != shot_id
             or intent.shot_version != shot.get("version")
         ):
-            _recompute_parent_status(
+            recompute_video_parent_status(
                 db,
                 current_job.parent_job_id,
                 media_store,
@@ -392,7 +392,7 @@ def publish_billed_video_result(
         shot["output_path"] = relative_path
         shot["output_url"] = None
         current_job = db.get(GenerationJob, job_id)
-        _recompute_parent_status(
+        recompute_video_parent_status(
             db,
             current_job.parent_job_id,
             media_store,

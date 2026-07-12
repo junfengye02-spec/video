@@ -187,7 +187,6 @@ def execute_billed_provider_call(
     now: datetime | None = None,
 ) -> ProviderCallContext:
     ensure_billing_settings(db, settings)
-    db.commit()
     billing = _service(db, settings, artifact_inspector, now)
     if retry_job_id is None:
         try:
