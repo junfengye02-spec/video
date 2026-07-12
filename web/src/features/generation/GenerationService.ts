@@ -1,11 +1,15 @@
 import type {
+  ContinuityPlan,
+  ContinuityPlanResponse,
   JobEvent,
   PromptOptimizeResponse,
+  ReferenceImageUploadRequest,
+  ReferenceImageUploadResponse,
   RegenerateShotResponse,
   RenderProjectResponse,
   ShotSaveRequest,
 } from "../../domain/types";
-import { httpClient, type JsonRequestInit } from "../../platform/http/HttpClient";
+import { httpClient, type FormRequestInit, type JsonRequestInit } from "../../platform/http/HttpClient";
 
 export type ShotSaveResponse = RegenerateShotResponse;
 
@@ -13,6 +17,11 @@ export interface GenerationService {
   optimize(projectId: string, shotId: string, sourceText: string): Promise<PromptOptimizeResponse>;
   saveShot(projectId: string, shotId: string, payload: ShotSaveRequest): Promise<ShotSaveResponse>;
   regenerate(projectId: string, shotId: string): Promise<RegenerateShotResponse>;
+  saveContinuity(projectId: string, plan: ContinuityPlan): Promise<ContinuityPlanResponse>;
+  uploadReference(
+    projectId: string,
+    payload: ReferenceImageUploadRequest,
+  ): Promise<ReferenceImageUploadResponse>;
   render(projectId: string): Promise<RenderProjectResponse>;
   subscribe(projectId: string, onEvent: (event: JobEvent) => void): () => void;
 }
@@ -24,6 +33,7 @@ interface EventSourceLike {
 
 interface GenerationHttp {
   json<T>(path: string, init?: JsonRequestInit): Promise<T>;
+  form<T>(path: string, init: FormRequestInit): Promise<T>;
 }
 
 export interface GenerationServiceOptions {
@@ -100,6 +110,28 @@ export class LocalGenerationService implements GenerationService {
     return this.http.json<RegenerateShotResponse>(`${shotPath(projectId, shotId)}/regenerate`, {
       method: "POST",
       body: {},
+    });
+  }
+
+  saveContinuity(projectId: string, plan: ContinuityPlan): Promise<ContinuityPlanResponse> {
+    return this.http.json<ContinuityPlanResponse>(`${projectPath(projectId)}/continuity`, {
+      method: "PATCH",
+      body: plan,
+    });
+  }
+
+  uploadReference(
+    projectId: string,
+    payload: ReferenceImageUploadRequest,
+  ): Promise<ReferenceImageUploadResponse> {
+    const form = new FormData();
+    form.append("kind", payload.kind);
+    form.append("label", payload.label);
+    form.append("description", payload.description);
+    form.append("prompt", payload.prompt);
+    form.append("file", payload.file);
+    return this.http.form<ReferenceImageUploadResponse>(`${projectPath(projectId)}/assets/upload`, {
+      body: form,
     });
   }
 

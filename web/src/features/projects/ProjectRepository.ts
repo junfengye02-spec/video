@@ -1,7 +1,7 @@
 import type {
   ContinuityPlan,
-  DraftProjectRequest,
   Project,
+  ShortDramaProjectRequest,
   ShortDramaProjectResponse,
 } from "../../domain/types";
 import {
@@ -11,7 +11,7 @@ import {
   prepareProjectBackupImport,
   type PreparedProjectBackupImport,
 } from "../../localdb/exportProject";
-import type { LocalProjectSummary } from "../../localdb/types";
+import type { LocalProjectSummary, LocalProjectVersion } from "../../localdb/types";
 import { ApiError, httpClient } from "../../platform/http/HttpClient";
 import {
   browserProjectCache,
@@ -22,15 +22,30 @@ export interface CachedProject {
   snapshot: ShortDramaProjectResponse;
   freshness: "fresh" | "stale";
   writable: boolean;
+  version: LocalProjectVersion | null;
 }
 
-export type CreateProjectInput = DraftProjectRequest;
+export type CreateProjectInput = Pick<
+  ShortDramaProjectRequest,
+  "title" | "prompt" | "project_type"
+>;
 
 export interface ProjectRepository {
   list(): Promise<LocalProjectSummary[]>;
   open(projectId: string): Promise<CachedProject | null>;
   create(input: CreateProjectInput): Promise<ShortDramaProjectResponse>;
+  refresh(projectId: string): Promise<ShortDramaProjectResponse>;
+  save(snapshot: ShortDramaProjectResponse): Promise<LocalProjectVersion | null>;
+  saveIfVersion(
+    snapshot: ShortDramaProjectResponse,
+    expectedVersion: LocalProjectVersion,
+  ): Promise<LocalProjectVersion | null>;
+  markRecent(projectId: string): Promise<void>;
   importBackup(file: File, options?: ImportProjectBackupOptions): Promise<ShortDramaProjectResponse>;
+  importBackupDirectory(
+    files: Iterable<File> | ArrayLike<File>,
+    options?: ImportProjectBackupOptions,
+  ): Promise<ShortDramaProjectResponse>;
   exportBackup(projectId: string): Promise<Blob>;
   delete(projectId: string): Promise<void>;
 }
@@ -119,6 +134,13 @@ function cachedSummary(project: Project, cached: ShortDramaProjectResponse | nul
   };
 }
 
+function cacheVersion(record: LocalProjectVersion): LocalProjectVersion {
+  return {
+    incarnation: record.incarnation,
+    revision: record.revision,
+  };
+}
+
 export class ServerProjectRepository implements ProjectRepository {
   private readonly cache: BrowserProjectCache;
   private readonly http: ProjectRepositoryHttp;
@@ -157,28 +179,58 @@ export class ServerProjectRepository implements ProjectRepository {
         projectPath(projectId),
         { method: "GET" },
       );
-      await this.cache.put(snapshot);
-      return { snapshot, freshness: "fresh", writable: true };
+      const record = await this.cache.put(snapshot);
+      return { snapshot, freshness: "fresh", writable: true, version: cacheVersion(record) };
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         await this.cache.remove(projectId);
         return null;
       }
       if (error instanceof ApiError && error.status === 0) {
-        const snapshot = await this.cache.get(projectId);
-        return snapshot ? { snapshot, freshness: "stale", writable: false } : null;
+        const record = await this.cache.getRecord(projectId);
+        return record ? {
+          snapshot: record.snapshot,
+          freshness: "stale",
+          writable: false,
+          version: cacheVersion(record),
+        } : null;
       }
       throw error;
     }
   }
 
   async create(input: CreateProjectInput): Promise<ShortDramaProjectResponse> {
-    const snapshot = await this.http.json<ShortDramaProjectResponse>("/api/projects", {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>("/api/projects/short-drama", {
       method: "POST",
       body: input,
     });
     await this.cache.put(snapshot);
     return snapshot;
+  }
+
+  async refresh(projectId: string): Promise<ShortDramaProjectResponse> {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>(
+      projectPath(projectId),
+      { method: "GET" },
+    );
+    await this.cache.put(snapshot);
+    return snapshot;
+  }
+
+  async save(snapshot: ShortDramaProjectResponse): Promise<LocalProjectVersion | null> {
+    return cacheVersion(await this.cache.put(snapshot));
+  }
+
+  async saveIfVersion(
+    snapshot: ShortDramaProjectResponse,
+    expectedVersion: LocalProjectVersion,
+  ): Promise<LocalProjectVersion | null> {
+    const record = await this.cache.putIfVersion(snapshot, expectedVersion);
+    return record ? cacheVersion(record) : null;
+  }
+
+  markRecent(projectId: string): Promise<void> {
+    return this.cache.markRecent(projectId);
   }
 
   async importBackup(

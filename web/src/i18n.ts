@@ -125,6 +125,7 @@ export interface UIStrings {
     createStoryboardRequiresPrompt: string;
     saveContinuityFallback: string;
     uploadReferenceFallback: string;
+    readOnlyProjectFallback: string;
     localProjectSaveFallback: string;
     exportProjectFallback: string;
     importProjectFallback: string;
@@ -468,6 +469,8 @@ const STRINGS: Record<Locale, UIStrings> = {
       createStoryboardRequiresPrompt: "Enter a story prompt before creating the storyboard.",
       saveContinuityFallback: "Unable to save continuity settings.",
       uploadReferenceFallback: "Unable to upload reference image.",
+      readOnlyProjectFallback:
+        "This project is an offline read-only copy. Reconnect before making changes.",
       localProjectSaveFallback:
         "This project is open, but the browser could not save the local draft. Export the project before closing this tab.",
       exportProjectFallback: "Project export failed.",
@@ -887,6 +890,8 @@ const STRINGS: Record<Locale, UIStrings> = {
       createStoryboardRequiresPrompt: "\u8bf7\u5148\u8f93\u5165\u6545\u4e8b\u63d0\u793a\uff0c\u518d\u521b\u5efa\u6545\u4e8b\u677f\u3002",
       saveContinuityFallback: "\u65e0\u6cd5\u4fdd\u5b58\u8fde\u7eed\u6027\u8bbe\u5b9a\u3002",
       uploadReferenceFallback: "\u65e0\u6cd5\u4e0a\u4f20\u53c2\u8003\u56fe\u3002",
+      readOnlyProjectFallback:
+        "\u5f53\u524d\u9879\u76ee\u662f\u79bb\u7ebf\u53ea\u8bfb\u526f\u672c\uff0c\u8bf7\u5728\u8fde\u63a5\u6062\u590d\u540e\u518d\u4fee\u6539\u3002",
       localProjectSaveFallback:
         "\u9879\u76ee\u5df2\u6253\u5f00\uff0c\u4f46\u6d4f\u89c8\u5668\u65e0\u6cd5\u4fdd\u5b58\u672c\u5730\u8349\u7a3f\u3002\u5173\u95ed\u6b64\u6807\u7b7e\u9875\u524d\u8bf7\u5148\u5bfc\u51fa\u9879\u76ee\u3002",
       exportProjectFallback: "\u9879\u76ee\u5bfc\u51fa\u5931\u8d25\u3002",

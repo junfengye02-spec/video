@@ -107,6 +107,12 @@ vi.mock("../features/generation/GenerationService", () => ({
     regenerate: vi.fn((projectId: string, shotId: string) => (
       apiMocks.regenerateShot(projectId, shotId, {})
     )),
+    saveContinuity: vi.fn((projectId: string, plan: unknown) => (
+      apiMocks.saveContinuityPlan(projectId, plan)
+    )),
+    uploadReference: vi.fn((projectId: string, payload: unknown) => (
+      apiMocks.uploadReferenceImage(projectId, payload)
+    )),
     render: vi.fn((projectId: string) => (
       apiMocks.renderProject(projectId, { render_runtime: "ffmpeg" })
     )),
@@ -128,6 +134,66 @@ vi.mock("../localdb/mediaStore", () => localMediaStoreMocks);
 vi.mock("../localdb/mediaUrls", () => localMediaUrlMocks);
 vi.mock("../localdb/exportProject", () => localExportMocks);
 vi.mock("../localdb/storageEstimate", () => localStorageEstimateMocks);
+vi.mock("../features/projects/ProjectRepository", () => ({
+  projectRepository: {
+    list: localProjectStoreMocks.listProjectSummaries,
+    open: vi.fn(async (projectId: string) => {
+      const record = await localProjectStoreMocks.loadProjectSnapshot(projectId);
+      if (!record) return null;
+      return {
+        snapshot: record.snapshot,
+        freshness: "fresh",
+        writable: true,
+        version: {
+          incarnation: record.incarnation ?? `legacy:${record.id}`,
+          revision: record.revision ?? 0,
+        },
+      };
+    }),
+    create: vi.fn(async (input: unknown) => {
+      const snapshot = await apiMocks.createShortDramaProject(input);
+      await localProjectStoreMocks.saveProjectSnapshot({ ...snapshot, final_path: null });
+      return snapshot;
+    }),
+    refresh: vi.fn(async (projectId: string) => apiMocks.loadProject(projectId)),
+    save: vi.fn(async (snapshot: ShortDramaProjectResponse) => {
+      const record = await localProjectStoreMocks.saveProjectSnapshot(snapshot);
+      return record ? {
+        incarnation: record.incarnation ?? `legacy:${record.id}`,
+        revision: record.revision ?? 0,
+      } : null;
+    }),
+    saveIfVersion: vi.fn(async (snapshot: ShortDramaProjectResponse, expectedVersion: unknown) => {
+      const record = await localProjectStoreMocks.saveProjectSnapshotIfVersion(
+        snapshot,
+        expectedVersion,
+      );
+      return record ? {
+        incarnation: record.incarnation ?? `legacy:${record.id}`,
+        revision: record.revision ?? 0,
+      } : null;
+    }),
+    markRecent: localProjectStoreMocks.setRecentProjectId,
+    importBackup: localExportMocks.importProjectBackup,
+    importBackupDirectory: localExportMocks.importProjectBackupDirectory,
+    exportBackup: localExportMocks.exportProjectBackup,
+    delete: localProjectStoreMocks.deleteProject,
+  },
+}));
+vi.mock("../platform/storage/MediaRepository", () => ({
+  mediaRepository: {
+    cacheRemote: localMediaStoreMocks.cacheRemoteMedia,
+    findCommitted: localMediaStoreMocks.findCommittedMedia,
+    load: localMediaStoreMocks.loadMediaBlob,
+    resolve: localMediaUrlMocks.resolveLocalMediaUrl,
+    remoteUrl: apiMocks.mediaUrl,
+    startRecovery: localMediaStoreMocks.startMediaRecoveryController,
+    revokeProject: vi.fn(() => localMediaUrlMocks.revokeLocalMediaUrls()),
+    revokeAll: localMediaUrlMocks.revokeLocalMediaUrls,
+    deleteProject: localProjectStoreMocks.deleteProject,
+    estimate: localStorageEstimateMocks.getStorageEstimate,
+  },
+}));
 
 const projectWithEightShots = createProjectResponse({ shotCount: 8 });
 const zh = getStrings("zh");

@@ -4,9 +4,11 @@ import { ApiError } from "../../platform/http/HttpClient";
 import { LocalGenerationService } from "./GenerationService";
 
 function serviceWithJson(json = vi.fn()) {
+  const form = vi.fn();
   return {
+    form,
     json,
-    service: new LocalGenerationService({ http: { json } }),
+    service: new LocalGenerationService({ http: { json, form } }),
   };
 }
 
@@ -78,6 +80,79 @@ describe("GenerationService", () => {
       method: "POST",
       body: {},
     });
+  });
+
+  it("saves continuity through the project continuity endpoint", async () => {
+    const continuity = {
+      project_type: "single_video" as const,
+      active_episode_number: null,
+      series_bible: {
+        worldview: "world",
+        main_arc: "arc",
+        style_lock: "style",
+        visual_rules: "rules",
+        taboos: [],
+        locations: [],
+        props: [],
+        relationship_map: [],
+      },
+      episodes: [],
+      story_state: {
+        character_knowledge: [],
+        relationship_changes: [],
+        active_foreshadowing: [],
+        resolved_foreshadowing: [],
+        prop_state: [],
+        character_status: [],
+        current_locations: [],
+      },
+    };
+    const { json, service } = serviceWithJson(vi.fn(async () => ({
+      project: { id: "p1", title: "Project", mode: "short_drama" },
+      continuity_plan: continuity,
+    })));
+
+    await service.saveContinuity("p1", continuity);
+
+    expect(json).toHaveBeenCalledWith("/api/projects/p1/continuity", {
+      method: "PATCH",
+      body: continuity,
+    });
+  });
+
+  it("uploads a reference image as form data", async () => {
+    const { form, service } = serviceWithJson();
+    const file = new File(["image"], "mara.png", { type: "image/png" });
+    form.mockResolvedValue({
+      media: {
+        path: "assets/images/mara.png",
+        media_url: "/api/projects/p1/media/assets/images/mara.png",
+        filename: "mara.png",
+        content_type: "image/png",
+      },
+      asset: {
+        id: "asset-1",
+        kind: "character",
+        label: "Mara",
+        reference_images: [],
+      },
+    });
+
+    await service.uploadReference("p1", {
+      kind: "character",
+      label: "Mara",
+      description: "Red coat",
+      prompt: "Mara in a red coat",
+      file,
+    });
+
+    expect(form).toHaveBeenCalledWith("/api/projects/p1/assets/upload", {
+      body: expect.any(FormData),
+    });
+    const body = form.mock.calls[0]?.[1].body as FormData;
+    expect(body.get("kind")).toBe("character");
+    expect(body.get("label")).toBe("Mara");
+    expect(body.get("file")).toBe(file);
   });
 
   it("renders with the server-selected ffmpeg runtime payload", async () => {

@@ -30,8 +30,10 @@ function deferred<T>() {
 
 function repository(options: {
   cacheRemoteMedia?: ReturnType<typeof vi.fn>;
+  findCommittedMedia?: ReturnType<typeof vi.fn>;
   loadMediaBlob?: ReturnType<typeof vi.fn>;
   loadMediaRecord?: ReturnType<typeof vi.fn>;
+  startMediaRecoveryController?: ReturnType<typeof vi.fn>;
   deleteProject?: ReturnType<typeof vi.fn>;
   getStorageEstimate?: ReturnType<typeof vi.fn>;
   createObjectURL?: ReturnType<typeof vi.fn>;
@@ -40,8 +42,13 @@ function repository(options: {
 } = {}) {
   return new LocalMediaRepository({
     cacheRemoteMedia: options.cacheRemoteMedia ?? vi.fn(),
+    findCommittedMedia: options.findCommittedMedia ?? vi.fn(async () => null),
     loadMediaBlob: options.loadMediaBlob ?? vi.fn(async () => null),
     loadMediaRecord: options.loadMediaRecord ?? vi.fn(async () => null),
+    startMediaRecoveryController: options.startMediaRecoveryController ?? vi.fn(() => ({
+      dispose: vi.fn(),
+      run: vi.fn(async () => 0),
+    })),
     deleteProject: options.deleteProject ?? vi.fn(),
     getStorageEstimate: options.getStorageEstimate ?? vi.fn(async () => ({
       usageBytes: null,
@@ -61,13 +68,35 @@ describe("MediaRepository", () => {
 
     await expect(repo.cacheRemote("https://example.test/shot.png", {
       projectId: "p1",
+      projectIncarnation: "incarnation-1",
       sourcePath: "assets/shot.png",
     })).resolves.toBe("local://media/remote");
 
     expect(cacheRemoteMedia).toHaveBeenCalledWith("https://example.test/shot.png", {
       projectId: "p1",
+      projectIncarnation: "incarnation-1",
       sourcePath: "assets/shot.png",
     });
+  });
+
+  it("exposes committed media lookup, blob loading, remote URLs, and recovery startup", async () => {
+    const record = mediaRecord("shot", "p1");
+    const findCommittedMedia = vi.fn(async () => record);
+    const loadMediaBlob = vi.fn(async () => new Blob(["video"], { type: "video/mp4" }));
+    const controller = { dispose: vi.fn(), run: vi.fn(async () => 1) };
+    const startMediaRecoveryController = vi.fn(() => controller);
+    const repo = repository({ findCommittedMedia, loadMediaBlob, startMediaRecoveryController });
+
+    await expect(repo.findCommitted("p1", "assets/video/shot.mp4", "incarnation-1"))
+      .resolves.toBe(record);
+    await expect(repo.load("local://media/shot")).resolves.toBeInstanceOf(Blob);
+    expect(repo.remoteUrl("assets/video/shot.mp4", "p1"))
+      .toBe("/api/projects/p1/media/assets/video/shot.mp4");
+    expect(repo.startRecovery()).toBe(controller);
+
+    expect(findCommittedMedia).toHaveBeenCalledWith("p1", "assets/video/shot.mp4", "incarnation-1");
+    expect(loadMediaBlob).toHaveBeenCalledWith("local://media/shot");
+    expect(startMediaRecoveryController).toHaveBeenCalledTimes(1);
   });
 
   it("deduplicates object URL resolution for the same local ref", async () => {

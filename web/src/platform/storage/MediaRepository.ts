@@ -1,10 +1,14 @@
 import {
   cacheRemoteMedia,
+  findCommittedMedia,
   loadMediaBlob,
   loadMediaRecord,
+  startMediaRecoveryController,
+  type MediaRecoveryController,
 } from "../../localdb/mediaStore";
 import { deleteProject as deleteLocalProject } from "../../localdb/projectStore";
 import { getStorageEstimate } from "../../localdb/storageEstimate";
+import { mediaUrl } from "../../api/client";
 import type {
   LocalMediaRecord,
   LocalMediaRef,
@@ -12,9 +16,21 @@ import type {
 } from "../../localdb/types";
 
 export interface MediaRepository {
-  cacheRemote(url: string, metadata: { projectId: string; sourcePath: string }): Promise<LocalMediaRef | null>;
+  cacheRemote(
+    url: string,
+    metadata: { projectId: string; projectIncarnation?: string; sourcePath: string },
+  ): Promise<LocalMediaRef | null>;
+  findCommitted(
+    projectId: string,
+    sourcePath: string,
+    projectIncarnation?: string,
+  ): Promise<LocalMediaRecord | null>;
+  load(ref: LocalMediaRef): Promise<Blob | null>;
   resolve(ref: LocalMediaRef): Promise<string | null>;
+  remoteUrl(path: string | null | undefined, projectId?: string | null): string | null;
+  startRecovery(): MediaRecoveryController;
   revokeProject(projectId: string): void;
+  revokeAll(): void;
   deleteProject(projectId: string): Promise<void>;
   estimate(): Promise<StorageEstimate>;
 }
@@ -32,8 +48,10 @@ interface FailedResolution {
 
 interface MediaRepositoryOptions {
   cacheRemoteMedia?: typeof cacheRemoteMedia;
+  findCommittedMedia?: typeof findCommittedMedia;
   loadMediaBlob?: typeof loadMediaBlob;
   loadMediaRecord?: typeof loadMediaRecord;
+  startMediaRecoveryController?: typeof startMediaRecoveryController;
   deleteProject?: typeof deleteLocalProject;
   getStorageEstimate?: typeof getStorageEstimate;
   createObjectURL?: (blob: Blob) => string;
@@ -46,8 +64,10 @@ const ERROR_RETRY_MAX_MS = 30_000;
 
 export class LocalMediaRepository implements MediaRepository {
   private readonly cacheRemoteMedia: typeof cacheRemoteMedia;
+  private readonly findCommittedMedia: typeof findCommittedMedia;
   private readonly loadMediaBlob: typeof loadMediaBlob;
   private readonly loadMediaRecord: typeof loadMediaRecord;
+  private readonly startMediaRecoveryController: typeof startMediaRecoveryController;
   private readonly deleteLocalProject: typeof deleteLocalProject;
   private readonly getStorageEstimate: typeof getStorageEstimate;
   private readonly createObjectURL: (blob: Blob) => string;
@@ -60,8 +80,11 @@ export class LocalMediaRepository implements MediaRepository {
 
   constructor(options: MediaRepositoryOptions = {}) {
     this.cacheRemoteMedia = options.cacheRemoteMedia ?? cacheRemoteMedia;
+    this.findCommittedMedia = options.findCommittedMedia ?? findCommittedMedia;
     this.loadMediaBlob = options.loadMediaBlob ?? loadMediaBlob;
     this.loadMediaRecord = options.loadMediaRecord ?? loadMediaRecord;
+    this.startMediaRecoveryController = options.startMediaRecoveryController
+      ?? startMediaRecoveryController;
     this.deleteLocalProject = options.deleteProject ?? deleteLocalProject;
     this.getStorageEstimate = options.getStorageEstimate ?? getStorageEstimate;
     this.createObjectURL = options.createObjectURL ?? ((blob) => URL.createObjectURL(blob));
@@ -71,9 +94,29 @@ export class LocalMediaRepository implements MediaRepository {
 
   cacheRemote(
     url: string,
-    metadata: { projectId: string; sourcePath: string },
+    metadata: { projectId: string; projectIncarnation?: string; sourcePath: string },
   ): Promise<LocalMediaRef | null> {
     return this.cacheRemoteMedia(url, metadata);
+  }
+
+  findCommitted(
+    projectId: string,
+    sourcePath: string,
+    projectIncarnation?: string,
+  ): Promise<LocalMediaRecord | null> {
+    return this.findCommittedMedia(projectId, sourcePath, projectIncarnation);
+  }
+
+  load(ref: LocalMediaRef): Promise<Blob | null> {
+    return this.loadMediaBlob(ref);
+  }
+
+  remoteUrl(path: string | null | undefined, projectId?: string | null): string | null {
+    return mediaUrl(path, projectId);
+  }
+
+  startRecovery(): MediaRecoveryController {
+    return this.startMediaRecoveryController();
   }
 
   async resolve(ref: LocalMediaRef): Promise<string | null> {

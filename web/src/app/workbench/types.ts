@@ -34,6 +34,8 @@ export interface WorkbenchContextValue {
   selectedShotId: string | null;
   events: JobEvent[];
   error: string | null;
+  load: "idle" | "loading" | "ready" | "missing" | "stale";
+  readOnly: boolean;
   finalRenderUrl: string | null;
   localMediaUrls: Partial<Record<LocalMediaRef, string>>;
   localBackupStatus: LocalBackupStatus;

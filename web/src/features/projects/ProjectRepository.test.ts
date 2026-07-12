@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ShortDramaProjectResponse } from "../../domain/types";
+import type { LocalProjectVersion } from "../../localdb/types";
 import { ApiError } from "../../platform/http/HttpClient";
 import type { BrowserProjectCache } from "../../platform/storage/BrowserProjectCache";
 import {
@@ -73,12 +74,52 @@ function snapshot(id: string, title: string): ShortDramaProjectResponse {
 
 function fakeCache(initial: Record<string, ShortDramaProjectResponse | null> = {}) {
   const records = new Map(Object.entries(initial)
-    .filter((entry): entry is [string, ShortDramaProjectResponse] => entry[1] !== null));
+    .filter((entry): entry is [string, ShortDramaProjectResponse] => entry[1] !== null)
+    .map(([id, value]) => [id, {
+      id,
+      title: value.project.title,
+      updatedAt: "2026-07-12T00:00:00.000Z",
+      incarnation: `test:${id}`,
+      revision: 1,
+      snapshot: value,
+    }]));
   return {
     cache: {
-      get: vi.fn(async (projectId: string) => records.get(projectId) ?? null),
+      get: vi.fn(async (projectId: string) => records.get(projectId)?.snapshot ?? null),
+      getRecord: vi.fn(async (projectId: string) => records.get(projectId) ?? null),
       put: vi.fn(async (value: ShortDramaProjectResponse) => {
-        records.set(value.project.id, value);
+        const previous = records.get(value.project.id);
+        const record = {
+          id: value.project.id,
+          title: value.project.title,
+          updatedAt: "2026-07-12T00:00:00.000Z",
+          incarnation: previous?.incarnation ?? `test:${value.project.id}`,
+          revision: (previous?.revision ?? 0) + 1,
+          snapshot: value,
+        };
+        records.set(value.project.id, record);
+        return record;
+      }),
+      putIfVersion: vi.fn(async (
+        value: ShortDramaProjectResponse,
+        expectedVersion: LocalProjectVersion,
+      ) => {
+        const previous = records.get(value.project.id);
+        if (
+          !previous
+          || previous.incarnation !== expectedVersion.incarnation
+          || previous.revision !== expectedVersion.revision
+        ) return null;
+        const record = {
+          ...previous,
+          revision: previous.revision + 1,
+          snapshot: value,
+        };
+        records.set(value.project.id, record);
+        return record;
+      }),
+      markRecent: vi.fn(async () => {
+        // No-op for repository tests.
       }),
       remove: vi.fn(async (projectId: string) => {
         records.delete(projectId);
@@ -94,7 +135,7 @@ function repository(options: {
   prepareImport?: (file: File) => Promise<PreparedBackupImport>;
 } = {}) {
   const responses = [...(options.responses ?? [])];
-  const json = vi.fn(async <T,>() => {
+  const json = vi.fn(async <T,>(_path: string, _options?: { method?: string; body?: unknown }) => {
     const next = responses.shift();
     if (next instanceof Error) throw next;
     return next as T;
@@ -122,6 +163,7 @@ describe("ProjectRepository", () => {
       snapshot: remote,
       freshness: "fresh",
       writable: true,
+      version: { incarnation: "test:p1", revision: 2 },
     });
 
     expect(http.json).toHaveBeenCalledWith("/api/projects/p1", { method: "GET" });
@@ -152,22 +194,49 @@ describe("ProjectRepository", () => {
       snapshot: cached,
       freshness: "stale",
       writable: false,
+      version: { incarnation: "test:p1", revision: 1 },
     });
   });
 
-  it("creates projects through the server and then caches the authoritative snapshot", async () => {
+  it("creates short-drama projects through the server and then caches the authoritative snapshot", async () => {
     const created = snapshot("server-id", "Draft");
     const { cache } = fakeCache();
     const { repo, http } = repository({ cache, responses: [created] });
 
-    await expect(repo.create({ title: "Draft", project_type: "single_video" }))
+    await expect(repo.create({
+      title: "Draft",
+      prompt: "Plan this story",
+      project_type: "single_video",
+    }))
       .resolves.toBe(created);
 
-    expect(http.json).toHaveBeenCalledWith("/api/projects", {
+    expect(http.json).toHaveBeenCalledWith("/api/projects/short-drama", {
       method: "POST",
-      body: { title: "Draft", project_type: "single_video" },
+      body: {
+        title: "Draft",
+        prompt: "Plan this story",
+        project_type: "single_video",
+      },
     });
+    const createBody = (
+      http.json.mock.calls[0]?.[1] as { body: Record<string, unknown> } | undefined
+    )?.body;
+    expect(createBody).not.toHaveProperty("shot_count");
     expect(cache.put).toHaveBeenCalledWith(created);
+  });
+
+  it("refreshes and saves snapshots through the browser cache boundary", async () => {
+    const refreshed = snapshot("p1", "Fresh");
+    const saved = snapshot("p1", "Saved");
+    const { cache } = fakeCache();
+    const { repo, http } = repository({ cache, responses: [refreshed] });
+
+    await expect(repo.refresh("p1")).resolves.toBe(refreshed);
+    await repo.save(saved);
+
+    expect(http.json).toHaveBeenCalledWith("/api/projects/p1", { method: "GET" });
+    expect(cache.put).toHaveBeenNthCalledWith(1, refreshed);
+    expect(cache.put).toHaveBeenNthCalledWith(2, saved);
   });
 
   it("posts a validated backup to the server before committing it to browser cache", async () => {
