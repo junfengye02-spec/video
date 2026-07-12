@@ -186,13 +186,17 @@ def execute_billed_provider_call(
     discard_reservation: Callable[[str], None] | None = None,
     now: datetime | None = None,
 ) -> ProviderCallContext:
-    ensure_billing_settings(db, settings)
+    bootstrap_before_quote = db.get_bind().dialect.name == "postgresql"
+    if bootstrap_before_quote:
+        ensure_billing_settings(db, settings)
     billing = _service(db, settings, artifact_inspector, now)
     if retry_job_id is None:
         try:
             scoped_quote = newapi.quote(capability, request)
         except InvalidNewApiResponse:
             raise ProviderPricingUnavailable("provider pricing is unavailable") from None
+        if not bootstrap_before_quote:
+            ensure_billing_settings(db, settings)
         proposed_job_id = uuid.uuid4().hex
         if prepare_reservation is not None:
             prepare_reservation(proposed_job_id)
@@ -232,6 +236,8 @@ def execute_billed_provider_call(
                 child.id, "provider_pricing_unavailable_no_charge"
             )
             raise ProviderPricingUnavailable("provider pricing is unavailable") from None
+        if not bootstrap_before_quote:
+            ensure_billing_settings(db, settings)
         outcome = billing.replace_job_quote(
             child.id, fresh, expected_quote_id=previous_quote_id
         )

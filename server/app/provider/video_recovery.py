@@ -143,15 +143,20 @@ def recompute_video_parent_status(
     if any(child.status in _PENDING_CHILD_STATUSES for child in children):
         parent.status = "running"
         return
+    if not children:
+        parent.status = "running"
+        return
     shots = {
         str(shot.get("id")): shot
         for shot in storyboard.get("shots", [])
         if isinstance(shot, dict)
     }
-    stale_or_failed = any(child.status != "billed" for child in children)
+    valid_billed = 0
+    stale_or_failed = False
     for child in children:
         operation = _SHOT_OPERATION.fullmatch(child.operation)
         if child.status != "billed" or operation is None:
+            stale_or_failed = True
             continue
         try:
             intent = media_store.read_video_generation_intent(
@@ -163,7 +168,37 @@ def recompute_video_parent_status(
         shot = shots.get(operation.group(1))
         if shot is None or intent.shot_version != shot.get("version"):
             stale_or_failed = True
-    parent.status = "partial_failure" if stale_or_failed else "running"
+            continue
+        valid_billed += 1
+    if valid_billed == 0:
+        parent.status = "failed"
+    elif stale_or_failed:
+        parent.status = "partial_failure"
+    else:
+        parent.status = "running"
+
+
+def reduce_video_parent_for_child(
+    db: Session,
+    job_id: str,
+    media_store: WorkbenchStore,
+) -> None:
+    child = db.get(GenerationJob, job_id)
+    if (
+        child is None
+        or child.capability != "video"
+        or child.parent_job_id is None
+    ):
+        return
+    storyboard = media_store.read_artifact(
+        child.project_id, "episode_storyboard.json"
+    ) or {"shots": []}
+    recompute_video_parent_status(
+        db,
+        child.parent_job_id,
+        media_store,
+        storyboard,
+    )
 
 
 def resume_billed_video_job(

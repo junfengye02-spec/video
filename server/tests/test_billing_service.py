@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import httpx
 import json
 import os
 import time
@@ -24,6 +25,7 @@ from server.app.billing.models import (
     CostReceipt,
     GenerationJob,
 )
+from server.app.billing.execution import execute_billed_provider_call
 from server.app.billing.money import provider_micro_to_charge_units
 from server.app.billing.service import (
     BillingService,
@@ -34,7 +36,14 @@ from server.app.billing.service import (
 )
 from server.app.db.base import Base
 from server.app.projects.models import ProjectRecord
-from server.app.provider.newapi import TokenScopedQuote, UsageQuote, UsageReceipt
+from server.app.provider.newapi import (
+    NewApiCallError,
+    PreparedNewApiRequest,
+    QuotedExecutionResult,
+    TokenScopedQuote,
+    UsageQuote,
+    UsageReceipt,
+)
 from server.app.wallet.models import WalletAccount, WalletEntry, WalletHold
 from server.app.wallet.service import InsufficientBalance, credit
 
@@ -1432,6 +1441,215 @@ def run_concurrently(*operations):
 
     with ThreadPoolExecutor(max_workers=len(operations)) as executor:
         return list(executor.map(synchronized, range(len(operations))))
+
+
+def test_sqlite_quote_failure_does_not_flush_bootstrap_or_commit_project():
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    user_id = "sqlite-bootstrap-user"
+    project_id = "sqlite-bootstrap-project"
+    with Session(engine, expire_on_commit=False) as db:
+        db.add(
+            User(
+                id=user_id,
+                email="sqlite-bootstrap@example.com",
+                password_hash="hash",
+                role="user",
+                status="active",
+            )
+        )
+        db.flush()
+        db.add(
+            WalletAccount(
+                id="sqlite-bootstrap-wallet",
+                user_id=user_id,
+                balance_units=40_000_000,
+                held_units=0,
+            )
+        )
+        db.commit()
+        db.add(
+            ProjectRecord(
+                id=project_id,
+                owner_user_id=user_id,
+                title="SQLite bootstrap rollback",
+                mode="short_drama",
+                project_type="single_video",
+            )
+        )
+        db.flush()
+
+        class FailingNewApi:
+            def quote(self, *_args, **_kwargs):
+                assert db.get(BillingSetting, 1) is None
+                raise NewApiCallError("provider unavailable")
+
+        with pytest.raises(NewApiCallError):
+            execute_billed_provider_call(
+                db=db,
+                newapi=FailingNewApi(),
+                settings=SimpleNamespace(
+                    billing_default_multiplier_bps=15_000,
+                    billing_reference_recovery_seconds=86_400,
+                    billing_receipt_deadline_seconds=86_400,
+                    billing_hold_timeout_seconds=86_400,
+                    billing_quote_stale_retries=2,
+                ),
+                artifact_inspector=lambda _locator: None,
+                user_id=user_id,
+                project_id=project_id,
+                parent_job_id=None,
+                capability="video",
+                operation="shot:s1",
+                request=PreparedNewApiRequest.json(
+                    "POST",
+                    "/v1/videos",
+                    {"model": "video-model", "prompt": "rollback"},
+                ),
+                now=NOW,
+            )
+        db.rollback()
+
+        assert db.get(BillingSetting, 1) is None
+        assert db.get(ProjectRecord, project_id) is None
+    engine.dispose()
+
+
+def test_postgres_first_paid_requests_bootstrap_one_setting_before_provider_io(
+    postgres_engine: Engine,
+) -> None:
+    user_ids = ["bootstrap-user-1", "bootstrap-user-2"]
+    project_ids = ["bootstrap-project-1", "bootstrap-project-2"]
+    with Session(postgres_engine) as db:
+        db.add_all(
+            [
+                User(
+                    id=user_id,
+                    email=f"{user_id}@example.com",
+                    password_hash="hash",
+                    role="user",
+                    status="active",
+                )
+                for user_id in user_ids
+            ]
+        )
+        db.flush()
+        db.add_all(
+            [
+                WalletAccount(
+                    id=f"bootstrap-wallet-{index}",
+                    user_id=user_id,
+                    balance_units=40_000_000,
+                    held_units=0,
+                )
+                for index, user_id in enumerate(user_ids, start=1)
+            ]
+        )
+        db.commit()
+
+    quote_started = [Event(), Event()]
+    release_quotes = Event()
+    request = PreparedNewApiRequest.json(
+        "POST",
+        "/v1/videos",
+        {"model": "video-model", "prompt": "bootstrap race"},
+    )
+    settings = SimpleNamespace(
+        billing_default_multiplier_bps=15_000,
+        billing_reference_recovery_seconds=86_400,
+        billing_receipt_deadline_seconds=86_400,
+        billing_hold_timeout_seconds=86_400,
+        billing_quote_stale_retries=2,
+    )
+
+    class BlockingNewApi:
+        def __init__(self, index: int):
+            self.index = index
+
+        def quote(self, capability, prepared, token_alias=None):
+            assert capability == "video"
+            assert prepared is request
+            assert token_alias is None
+            quote_started[self.index].set()
+            assert release_quotes.wait(timeout=10)
+            return usage_quote(
+                quote_id=f"uq_{self.index + 1:032x}",
+                token_alias="video-v1",
+            )
+
+        def execute_quoted(self, capability, token_alias, prepared, quote_id):
+            assert (capability, token_alias, prepared) == ("video", "video-v1", request)
+            return QuotedExecutionResult(
+                "task",
+                f"task_{self.index + 1:032x}",
+                httpx.Response(200, json={"id": f"task_{self.index + 1:032x}"}),
+            )
+
+    def paid_request(index: int):
+        with Session(postgres_engine, expire_on_commit=False) as db:
+            db.add(
+                ProjectRecord(
+                    id=project_ids[index],
+                    owner_user_id=user_ids[index],
+                    title="Bootstrap race",
+                    mode="short_drama",
+                    project_type="single_video",
+                )
+            )
+            db.flush()
+            context = execute_billed_provider_call(
+                db=db,
+                newapi=BlockingNewApi(index),
+                settings=settings,
+                artifact_inspector=lambda _locator: None,
+                user_id=user_ids[index],
+                project_id=project_ids[index],
+                parent_job_id=None,
+                capability="video",
+                operation=f"shot:s{index + 1}",
+                request=request,
+                now=NOW,
+            )
+            return context.job_id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(paid_request, index) for index in range(2)]
+        both_reached_provider = all(event.wait(timeout=3) for event in quote_started)
+        with Session(postgres_engine) as probe:
+            setting_count_during_quote = probe.scalar(
+                select(func.count(BillingSetting.id))
+            )
+            project_count_during_quote = probe.scalar(
+                select(func.count(ProjectRecord.id)).where(
+                    ProjectRecord.id.in_(project_ids)
+                )
+            )
+        release_quotes.set()
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result(timeout=10))
+            except Exception as exc:
+                outcomes.append(exc)
+
+    assert both_reached_provider
+    assert setting_count_during_quote == 1
+    assert project_count_during_quote == 0
+    assert all(isinstance(outcome, str) for outcome in outcomes), outcomes
+    with Session(postgres_engine) as db:
+        assert db.scalar(select(func.count(BillingSetting.id))) == 1
+        assert db.scalar(
+            select(func.count(ProjectRecord.id)).where(ProjectRecord.id.in_(project_ids))
+        ) == 2
+        assert db.scalar(
+            select(func.count(GenerationJob.id)).where(
+                GenerationJob.project_id.in_(project_ids)
+            )
+        ) == 2
 
 
 def test_postgres_duplicate_settlement_and_capture_create_one_entry(

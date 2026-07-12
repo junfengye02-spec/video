@@ -48,7 +48,10 @@ from server.app.provider.newapi import (
     VideoTaskStatus,
     TokenScopedQuote,
 )
-from server.app.provider.video_recovery import resume_billed_video_job
+from server.app.provider.video_recovery import (
+    recompute_video_parent_status,
+    resume_billed_video_job,
+)
 from server.app.storage import WorkbenchStore
 from server.app.wallet.models import WalletAccount, WalletEntry, WalletHold
 
@@ -518,6 +521,156 @@ def test_terminal_video_reconciliation_recomputes_parent_after_final_child_fails
 
     db.expire_all()
     assert db.get(GenerationJob, failing_child.id).status == "provider_rejected_no_charge"
+    assert db.get(GenerationJob, parent.id).status == "partial_failure"
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("pending", "running"),
+        ("all_failed", "failed"),
+        ("mixed_failed", "partial_failure"),
+        ("mixed_stale", "partial_failure"),
+        ("all_billed", "running"),
+    ],
+)
+def test_video_parent_reducer_distinguishes_running_failed_and_partial(
+    billing_context, case, expected
+):
+    db, service, store, user_id, project_id = billing_context
+    parent = service.create_parent_job(
+        user_id=user_id,
+        project_id=project_id,
+        operation="render",
+    )
+    first = reserve(
+        service,
+        user_id,
+        project_id,
+        recovery=False,
+        parent_job_id=parent.id,
+        operation="shot:s1",
+    )
+    second = reserve(
+        service,
+        user_id,
+        project_id,
+        recovery=False,
+        parent_job_id=parent.id,
+        operation="shot:s2",
+    )
+    storyboard = {
+        "shots": [
+            {"id": "s1", "version": 1},
+            {"id": "s2", "version": 1},
+        ]
+    }
+    store.write_artifact(project_id, "episode_storyboard.json", storyboard)
+
+    if case == "pending":
+        first.status = "billed"
+        second.status = "reserved"
+    elif case == "all_failed":
+        first.status = "provider_rejected_no_charge"
+        second.status = "provider_not_submitted_no_charge"
+    elif case == "mixed_failed":
+        first.status = "billed"
+        second.status = "provider_rejected_no_charge"
+    else:
+        first.status = "billed"
+        second.status = "billed"
+    for child in (first, second):
+        if child.status == "billed":
+            store.record_video_generation_intent(
+                project_id=project_id,
+                job_id=child.id,
+                shot_id=child.operation.split(":", 1)[1],
+                shot_version=(2 if case == "mixed_stale" and child is second else 1),
+            )
+    db.commit()
+
+    recompute_video_parent_status(db, parent.id, store, storyboard)
+    db.commit()
+
+    db.expire_all()
+    assert db.get(GenerationJob, parent.id).status == expected
+
+
+def test_expired_payment_required_video_child_reduces_drained_parent(
+    billing_context,
+):
+    db, service, store, user_id, project_id = billing_context
+    parent = service.create_parent_job(
+        user_id=user_id,
+        project_id=project_id,
+        operation="render",
+    )
+    complete_child = reserve(
+        service,
+        user_id,
+        project_id,
+        recovery=False,
+        parent_job_id=parent.id,
+        operation="shot:s1",
+    )
+    expiring_child = reserve(
+        service,
+        user_id,
+        project_id,
+        recovery=False,
+        parent_job_id=parent.id,
+        operation="shot:s2",
+    )
+    complete_child.status = "billed"
+    complete_machine = db.scalar(
+        select(BillingReconciliation).where(
+            BillingReconciliation.job_id == complete_child.id,
+            BillingReconciliation.reason == "provider_completion",
+        )
+    )
+    complete_machine.status = "resolved"
+    wallet = db.scalar(select(WalletAccount).where(WalletAccount.user_id == user_id))
+    wallet.balance_units = wallet.held_units
+    db.commit()
+    fresh = quote()
+    fresh = TokenScopedQuote(
+        token_alias=fresh.token_alias,
+        quote=fresh.quote.model_copy(
+            update={
+                "quote_id": f"uq_{uuid.uuid4().hex}",
+                "estimated_cost_amount_micro": 200_000_000,
+            }
+        ),
+    )
+    assert service.replace_job_quote(
+        expiring_child.id, fresh, expected_quote_id=expiring_child.quote_id
+    ) == "payment_required_quote"
+    hold = db.scalar(select(WalletHold).where(WalletHold.job_id == expiring_child.id))
+    storyboard = {
+        "shots": [
+            {"id": "s1", "version": 1},
+            {"id": "s2", "version": 1},
+        ]
+    }
+    store.write_artifact(project_id, "episode_storyboard.json", storyboard)
+    store.record_video_generation_intent(
+        project_id=project_id,
+        job_id=complete_child.id,
+        shot_id="s1",
+        shot_version=1,
+    )
+
+    reconcile_due_jobs(
+        db,
+        fake_client(),
+        hold.expires_at.replace(tzinfo=timezone.utc) + timedelta(seconds=1),
+        100,
+        settings=SETTINGS,
+        media_store=store,
+    )
+
+    db.expire_all()
+    assert db.get(GenerationJob, expiring_child.id).status == "provider_not_submitted_no_charge"
     assert db.get(GenerationJob, parent.id).status == "partial_failure"
 
 
@@ -1157,6 +1310,83 @@ def postgres_engine() -> Engine:
         with admin_engine.begin() as connection:
             connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE'))
         admin_engine.dispose()
+
+
+def test_postgres_video_parent_reducer_marks_all_failed_children_failed(
+    postgres_engine: Engine,
+    tmp_path,
+):
+    user_id = uuid.uuid4().hex
+    project_id = uuid.uuid4().hex
+    store = WorkbenchStore(projects_root=tmp_path / "parent-reducer-pg")
+    with Session(postgres_engine, expire_on_commit=False) as db:
+        db.add(
+            User(
+                id=user_id,
+                email="parent-reducer-pg@example.com",
+                password_hash="hash",
+                role="user",
+                status="active",
+            )
+        )
+        db.flush()
+        db.add_all(
+            [
+                ProjectRecord(
+                    id=project_id,
+                    owner_user_id=user_id,
+                    title="PostgreSQL parent reducer",
+                    mode="short_drama",
+                    project_type="single_video",
+                ),
+                WalletAccount(
+                    id=uuid.uuid4().hex,
+                    user_id=user_id,
+                    balance_units=100_000_000,
+                    held_units=0,
+                ),
+                BillingSetting(id=1, multiplier_bps=15_000, version=0),
+            ]
+        )
+        db.commit()
+        service = BillingService(
+            db, SETTINGS, store.inspect_staged_artifact, now=lambda: NOW
+        )
+        parent = service.create_parent_job(
+            user_id=user_id,
+            project_id=project_id,
+            operation="render",
+        )
+        first = reserve(
+            service,
+            user_id,
+            project_id,
+            recovery=False,
+            parent_job_id=parent.id,
+            operation="shot:s1",
+        )
+        second = reserve(
+            service,
+            user_id,
+            project_id,
+            recovery=False,
+            parent_job_id=parent.id,
+            operation="shot:s2",
+        )
+        first.status = "provider_rejected_no_charge"
+        second.status = "provider_not_submitted_no_charge"
+        db.commit()
+
+        recompute_video_parent_status(
+            db,
+            parent.id,
+            store,
+            {"shots": [{"id": "s1", "version": 1}, {"id": "s2", "version": 1}]},
+        )
+        db.commit()
+
+        db.expire_all()
+        assert db.get(GenerationJob, parent.id).status == "failed"
 
 
 def test_postgres_skip_locked_lease_prevents_duplicate_network_and_holds_no_job_lock(

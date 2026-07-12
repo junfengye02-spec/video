@@ -35,7 +35,7 @@ from server.app.provider.newapi import (
 from server.app.provider.video_recovery import (
     InvalidVideoArtifact,
     publish_billed_video_result,
-    recompute_video_parent_status,
+    reduce_video_parent_for_child,
     resume_billed_video_job,
 )
 from server.app.settings import DEFAULT_PROJECTS_ROOT
@@ -444,7 +444,12 @@ def _reason_for(job: GenerationJob) -> str | None:
     return "receipt_pending"
 
 
-def _expire_non_network_work(db: Session, now: datetime, settings) -> None:
+def _expire_non_network_work(
+    db: Session,
+    now: datetime,
+    settings,
+    media_store: WorkbenchStore,
+) -> None:
     expired_orders = db.scalars(
         select(PaymentOrder)
         .where(PaymentOrder.status == "pending", PaymentOrder.expires_at <= now)
@@ -467,6 +472,8 @@ def _expire_non_network_work(db: Session, now: datetime, settings) -> None:
         BillingService(db, settings, _unavailable_artifact).fail_unsubmitted(
             job_id, "provider_not_submitted_no_charge"
         )
+        reduce_video_parent_for_child(db, job_id, media_store)
+        db.commit()
 
 
 def _ensure_reconciliations(db: Session, limit: int) -> None:
@@ -542,32 +549,6 @@ def _retry_delay(attempts: int) -> int:
     return _RETRY_SECONDS[attempts - 1] if attempts <= len(_RETRY_SECONDS) else 300
 
 
-def _recompute_completed_video_parent(
-    db: Session,
-    job_id: str,
-    media_store: WorkbenchStore,
-) -> None:
-    job = db.get(GenerationJob, job_id)
-    if (
-        job is None
-        or job.capability != "video"
-        or job.parent_job_id is None
-        or not job.status.endswith("_no_charge")
-    ):
-        db.commit()
-        return
-    storyboard = media_store.read_artifact(
-        job.project_id, "episode_storyboard.json"
-    ) or {"shots": []}
-    recompute_video_parent_status(
-        db,
-        job.parent_job_id,
-        media_store,
-        storyboard,
-    )
-    db.commit()
-
-
 def resume_reconcile_publish_job(
     db: Session,
     client: NewApiClient,
@@ -610,7 +591,8 @@ def resume_reconcile_publish_job(
         )
         raise
     if outcome == "completed":
-        _recompute_completed_video_parent(db, job_id, media_store)
+        reduce_video_parent_for_child(db, job_id, media_store)
+        db.commit()
     updated = (
         resolve_claim(db, claim)
         if outcome == "completed"
@@ -644,7 +626,7 @@ def reconcile_due_jobs(
         raise ValueError("reconciliation limit must be between 1 and 100")
     settings = settings or get_settings()
     media_store = media_store or WorkbenchStore(projects_root=DEFAULT_PROJECTS_ROOT)
-    _expire_non_network_work(db, now, settings)
+    _expire_non_network_work(db, now, settings, media_store)
     _ensure_reconciliations(db, limit)
 
     processed = 0
