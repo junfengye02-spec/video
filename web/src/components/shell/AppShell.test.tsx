@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -126,5 +127,14 @@ describe("AppShell", () => {
       "href",
       "/admin/billing",
     );
+  });
+
+  it("keeps account actions wrapped in the mobile shell", () => {
+    const responsiveStyles = readFileSync("src/styles/responsive.css", "utf8");
+
+    expect(responsiveStyles).toMatch(/@media \(max-width: 767px\)/);
+    expect(responsiveStyles).toMatch(/\.workbench-topbar-actions\s*\{[\s\S]*flex-wrap:\s*wrap/);
+    expect(responsiveStyles).toMatch(/\.workbench-account\s*\{[\s\S]*text-overflow:\s*ellipsis/);
+    expect(responsiveStyles).toMatch(/\.workbench-topbar-actions button\s*\{[\s\S]*flex:\s*0 0 auto/);
   });
 });

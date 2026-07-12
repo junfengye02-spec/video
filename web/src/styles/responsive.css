@@ -99,22 +99,45 @@
 
 @media (max-width: 767px) {
   .workbench-topbar {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px 12px;
     padding: 9px 12px;
   }
 
+  .workbench-brand {
+    grid-column: 1;
+  }
+
   .workbench-project-title {
     grid-column: 1 / -1;
-    grid-row: 2;
     padding: 0;
   }
 
   .workbench-topbar-actions {
+    grid-column: 1 / -1;
     min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .workbench-topbar-actions a,
+  .workbench-topbar-actions button,
+  .workbench-account {
+    min-width: 0;
+    max-width: 100%;
+    flex: 0 1 auto;
+  }
+
+  .workbench-account {
+    overflow: hidden;
+    justify-content: flex-start;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .workbench-topbar-actions button {
+    flex: 0 0 auto;
     min-width: 36px;
     min-height: 36px;
     padding: 0 8px;
