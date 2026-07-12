@@ -720,6 +720,11 @@ export async function loadMediaBlob(ref: LocalMediaRef): Promise<Blob | null> {
   return null;
 }
 
+export async function loadMediaRecord(ref: LocalMediaRef): Promise<LocalMediaRecord | null> {
+  const record = await readMediaRecord(mediaIdFromRef(ref));
+  return record?.state === "staged" ? null : record;
+}
+
 export async function findCommittedMedia(
   projectId: string,
   sourcePath: string,
