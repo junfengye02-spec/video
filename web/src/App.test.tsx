@@ -304,6 +304,22 @@ describe("App workbench integration", () => {
       configurable: true,
       value: "zh-CN",
     });
+    authMocks.value = {
+      user: { id: "user-1", email: "user@example.com", role: "user" },
+      loading: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+      sendVerification: vi.fn(),
+      requestPasswordReset: vi.fn(),
+      resetPassword: vi.fn(),
+    };
+    billingMocks.value = {
+      wallet: { balance_units: 1000, held_units: 0, available_units: 1000 },
+      loading: false,
+      error: null,
+      refreshWallet: vi.fn(),
+    };
     localProjectStoreMocks.listProjectSummaries.mockResolvedValue([]);
     localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue(null);
     let storageRevision = 0;
@@ -378,6 +394,34 @@ describe("App workbench integration", () => {
     expect(localMediaStoreMocks.startMediaRecoveryController).toHaveBeenCalledTimes(1);
     rendered.unmount();
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes logout through the account action without deleting portable browser backups", async () => {
+    const dispose = vi.fn();
+    localMediaStoreMocks.startMediaRecoveryController.mockReturnValue({
+      dispose,
+      run: vi.fn().mockResolvedValue(0),
+    });
+    localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+      id: "p1",
+      title: "Rain Alley",
+      updatedAt: "2026-07-11T08:00:00Z",
+      snapshot: projectResponse(),
+    });
+    authMocks.value.logout = vi.fn(() => {
+      authMocks.value = { ...authMocks.value, user: null };
+    });
+    window.history.replaceState({}, "", "/projects/p1/storyboard");
+    const rendered = render(<App />);
+    await screen.findByLabelText(zh.shotEditor.promptLabel);
+
+    fireEvent.click(screen.getByRole("button", { name: /退出|閫/ }));
+    rendered.rerender(<App />);
+
+    expect(authMocks.value.logout).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(localProjectStoreMocks.deleteProject).not.toHaveBeenCalled();
   });
 
   it("hydrates exact committed shot, final, and asset media before opening a local project", async () => {

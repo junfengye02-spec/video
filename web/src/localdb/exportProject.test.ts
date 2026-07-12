@@ -467,6 +467,33 @@ describe("exportProject", () => {
     expect(completedProgress?.bytesRead).toBe(completedProgress?.totalBytes);
   });
 
+  it("retains validated project content and media references across a portable backup", async () => {
+    await saveProjectSnapshot(snapshot(null, { id: "portable-source", title: "Portable Source" }));
+    const ref = await saveMediaBlob({
+      projectId: "portable-source",
+      sourcePath: "assets/video/shot.mp4",
+      contentType: "video/mp4",
+      blob: await blobFromText("portable media", "video/mp4"),
+    });
+    const source = snapshot(ref, { id: "portable-source", title: "Portable Source" });
+    source.storyboard.shots[0].prompt = "Validated portable content";
+    await saveProjectSnapshot(source);
+    const backup = await exportProjectBackup("portable-source");
+    await deleteLocalDb();
+
+    const imported = await importProjectBackup(
+      new File([backup], "portable-source.omproj", { type: "application/zip" }),
+    );
+
+    expect(imported.project.id).toBe("portable-source");
+    expect(imported.project.title).toBe("Portable Source");
+    expect(imported.storyboard.shots[0].prompt).toBe("Validated portable content");
+    expect(imported.final_path).toMatch(/^local:\/\/media\//);
+    expect(imported.storyboard.shots[0].output_path).toBe(imported.final_path);
+    const restored = await loadMediaBlob(imported.final_path as LocalMediaRef);
+    expect(restored ? await blobToText(restored) : null).toBe("portable media");
+  });
+
   it("streams extracted-directory media into staged storage before one atomic commit", async () => {
     const ref = "local://media/extracted-original" as LocalMediaRef;
     const mediaBytes = new Uint8Array(2.5 * 1024 * 1024).fill(37);

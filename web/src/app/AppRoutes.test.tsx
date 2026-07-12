@@ -222,6 +222,11 @@ describe("App routes", () => {
   });
 
   it.each([
+    "/projects",
+    "/projects/p1/storyboard",
+    "/projects/p1/settings",
+    "/projects/p1/resources",
+    "/projects/p1/production",
     "/wallet",
     "/orders",
     "/admin/billing?tab=orders#latest",
