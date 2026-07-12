@@ -1,3 +1,12 @@
+import {
+  ApiError,
+  HttpClient,
+  getCsrfToken,
+  notifyUnauthorized,
+  onUnauthorized,
+  setCsrfToken as setHttpCsrfToken,
+} from "../platform/http/HttpClient";
+
 export type AuthErrorCode =
   | "network"
   | "unauthorized"
@@ -26,29 +35,22 @@ interface AuthRequestOptions {
 
 type UnauthorizedListener = () => void;
 
-let csrfToken: string | null = null;
-const unauthorizedListeners = new Set<UnauthorizedListener>();
-
 export function setCsrfToken(value: string | null) {
-  csrfToken = value;
+  setHttpCsrfToken(value);
 }
 
 export function subscribeToAuthUnauthorized(listener: UnauthorizedListener) {
-  unauthorizedListeners.add(listener);
-  return () => unauthorizedListeners.delete(listener);
+  return onUnauthorized(listener);
 }
 
 export function notifyAuthUnauthorized() {
-  for (const listener of unauthorizedListeners) {
-    try {
-      listener();
-    } catch {
-      // A stale consumer must not prevent the remaining auth listeners from recovering.
-    }
-  }
+  notifyUnauthorized();
 }
 
 function errorForStatus(status: number): AuthRequestError {
+  if (status === 0) {
+    return new AuthRequestError("network", "Unable to reach the service.");
+  }
   if (status === 400 || status === 422) {
     return new AuthRequestError("validation", "Please check the submitted information.", status);
   }
@@ -70,8 +72,18 @@ function errorForStatus(status: number): AuthRequestError {
   return new AuthRequestError("request_failed", "The request could not be completed.", status);
 }
 
-function isJsonBody(body: BodyInit | null | undefined): boolean {
-  return typeof body === "string";
+function requestBody(init: RequestInit): unknown {
+  if (init.body === undefined || init.body === null) return undefined;
+  const headers = new Headers(init.headers);
+  const contentType = headers.get("Content-Type") ?? headers.get("content-type") ?? "";
+  if (typeof init.body === "string" && (!contentType || contentType.includes("application/json"))) {
+    try {
+      return JSON.parse(init.body);
+    } catch {
+      return init.body;
+    }
+  }
+  return init.body;
 }
 
 export async function authRequest<T = void>(
@@ -79,44 +91,29 @@ export async function authRequest<T = void>(
   init: RequestInit = {},
   options: AuthRequestOptions = {},
 ): Promise<T> {
-  const method = (init.method ?? "GET").toUpperCase();
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (isJsonBody(init.body) && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (method !== "GET" && method !== "HEAD" && csrfToken) {
-    headers.set("X-CSRF-Token", csrfToken);
-  }
-
-  let response: Response;
+  const method = init.method ?? "GET";
+  const client = new HttpClient({
+    getCsrfToken,
+    onUnauthorized: options.notifyUnauthorized === false ? undefined : notifyUnauthorized,
+  });
   try {
-    response = await fetch(path, {
-      ...init,
-      credentials: "include",
-      headers,
+    return await client.json<T>(path, {
+      body: requestBody(init),
+      headers: init.headers,
+      method,
+      signal: init.signal,
     });
-  } catch {
-    throw new AuthRequestError("network", "Unable to reach the service.");
-  }
-
-  if (!response.ok) {
-    if (response.status === 401 && options.notifyUnauthorized !== false) {
-      notifyAuthUnauthorized();
+  } catch (error) {
+    if (error instanceof ApiError) {
+      if (error.code === "invalid_response") {
+        throw new AuthRequestError(
+          "invalid_response",
+          "The service returned an invalid response.",
+          error.status,
+        );
+      }
+      throw errorForStatus(error.status);
     }
-    throw errorForStatus(response.status);
-  }
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  try {
-    return await response.json() as T;
-  } catch {
-    throw new AuthRequestError(
-      "invalid_response",
-      "The service returned an invalid response.",
-      response.status,
-    );
+    throw error;
   }
 }

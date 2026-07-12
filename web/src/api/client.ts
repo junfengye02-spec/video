@@ -15,36 +15,26 @@ import type {
   ShotRegenerateRequest,
   ShotSaveRequest,
 } from "../domain/types";
+import {
+  HttpClient,
+  getCsrfToken,
+  notifyUnauthorized,
+  type JsonRequestInit,
+} from "../platform/http/HttpClient";
 
 export { authRequest } from "../auth/api";
 
 async function requestJson<T>(
   path: string,
-  init: RequestInit,
+  init: JsonRequestInit,
   fetcher: typeof fetch = fetch,
 ): Promise<T> {
-  const response = await fetcher(path, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
-    },
-    ...init,
+  const client = new HttpClient({
+    fetcher,
+    getCsrfToken,
+    onUnauthorized: notifyUnauthorized,
   });
-
-  if (!response.ok) {
-    let message = `Request failed with status ${response.status}`;
-    try {
-      const body = (await response.json()) as { detail?: string };
-      if (body.detail) {
-        message = body.detail;
-      }
-    } catch {
-      // Keep the status-based fallback when the backend returns non-JSON.
-    }
-    throw new Error(message);
-  }
-
-  return (await response.json()) as T;
+  return client.json<T>(path, init);
 }
 
 function postJson<T>(
@@ -56,7 +46,7 @@ function postJson<T>(
     path,
     {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     },
     fetcher,
   );
@@ -67,25 +57,12 @@ async function requestForm<T>(
   body: FormData,
   fetcher: typeof fetch = fetch,
 ): Promise<T> {
-  const response = await fetcher(path, {
-    method: "POST",
-    body,
+  const client = new HttpClient({
+    fetcher,
+    getCsrfToken,
+    onUnauthorized: notifyUnauthorized,
   });
-
-  if (!response.ok) {
-    let message = `Request failed with status ${response.status}`;
-    try {
-      const body = (await response.json()) as { detail?: string };
-      if (body.detail) {
-        message = body.detail;
-      }
-    } catch {
-      // Keep the status-based fallback when the backend returns non-JSON.
-    }
-    throw new Error(message);
-  }
-
-  return (await response.json()) as T;
+  return client.form<T>(path, { body });
 }
 
 export function mediaUrl(path: string | null | undefined, projectId?: string | null): string | null {
@@ -131,7 +108,7 @@ export function saveShot(
     `/api/projects/${projectId}/shots/${shotId}`,
     {
       method: "PATCH",
-      body: JSON.stringify(payload),
+      body: payload,
     },
     fetcher,
   );
@@ -175,7 +152,7 @@ export function saveContinuityPlan(
     `/api/projects/${projectId}/continuity`,
     {
       method: "PATCH",
-      body: JSON.stringify(payload),
+      body: payload,
     },
     fetcher,
   );
