@@ -1,5 +1,5 @@
 import { Boxes, Search, Upload } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { AssetDetailDrawer } from "../components/resources/AssetDetailDrawer";
 import { AssetGrid } from "../components/resources/AssetGrid";
 import { AssetUploadDrawer } from "../components/resources/AssetUploadDrawer";
@@ -48,7 +48,6 @@ export function ResourceLibraryPage({
   const [uploadPending, setUploadPending] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const panelOpenerRef = useRef<HTMLElement | null>(null);
-  const previousPanelModeRef = useRef<ResourcePanelState["mode"]>("closed");
   const operationPending = binding || uploadPending || uploading;
 
   const filteredAssets = useMemo(
@@ -62,13 +61,6 @@ export function ResourceLibraryPage({
   const selectedAsset = panel.mode === "detail"
     ? supportedAssets.find((asset) => asset.id === panel.assetId) ?? null
     : null;
-
-  useEffect(() => {
-    if (panel.mode === "closed" && previousPanelModeRef.current !== "closed") {
-      panelOpenerRef.current?.focus();
-    }
-    previousPanelModeRef.current = panel.mode;
-  }, [panel.mode]);
 
   const openDetail = (assetId: string, opener: HTMLButtonElement) => {
     if (operationPending) {
@@ -198,6 +190,7 @@ export function ResourceLibraryPage({
           consistencyReport={consistencyReport}
           currentShotId={currentShotId}
           panelLocked={operationPending}
+          returnFocusRef={panelOpenerRef}
           shots={shots}
           strings={strings}
           onBind={(bind) => void handleBind(bind)}
@@ -209,6 +202,7 @@ export function ResourceLibraryPage({
         <AssetUploadDrawer
           busy={operationPending}
           error={uploadError}
+          returnFocusRef={panelOpenerRef}
           strings={strings}
           onClose={closePanel}
           onSubmit={handleUpload}

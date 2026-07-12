@@ -1,11 +1,13 @@
 import { Upload, X } from "lucide-react";
-import { useState, type FormEvent, type KeyboardEvent } from "react";
+import { useState, type FormEvent, type RefObject } from "react";
 import type { ReferenceImageUploadRequest } from "../../domain/types";
 import { getStrings, type UIStrings } from "../../i18n";
+import { useModalFocus } from "../accessibility/useModalFocus";
 
 export interface AssetUploadDrawerProps {
   busy: boolean;
   error: string | null;
+  returnFocusRef: RefObject<HTMLElement | null>;
   strings?: UIStrings["resources"];
   onClose: () => void;
   onSubmit: (payload: ReferenceImageUploadRequest) => Promise<void>;
@@ -14,6 +16,7 @@ export interface AssetUploadDrawerProps {
 export function AssetUploadDrawer({
   busy,
   error,
+  returnFocusRef,
   strings = getStrings("zh").resources,
   onClose,
   onSubmit,
@@ -40,17 +43,17 @@ export function AssetUploadDrawer({
     void onSubmit(payload);
   };
 
-  const handleKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      if (!busy) {
-        onClose();
-      }
-    }
-  };
+  const { panelRef, onKeyDown } = useModalFocus<HTMLDialogElement>({
+    open: true,
+    onEscape: () => {
+      if (!busy) onClose();
+    },
+    returnFocusRef,
+  });
 
   return (
     <dialog
+      ref={panelRef}
       open
       aria-modal="true"
       aria-labelledby="resource-upload-title"
@@ -60,13 +63,12 @@ export function AssetUploadDrawer({
           onClose();
         }
       }}
-      onKeyDown={handleKeyDown}
+      onKeyDown={onKeyDown}
     >
       <div className="section-heading">
         <h2 id="resource-upload-title">{strings.uploadDialogTitle}</h2>
         <button
           type="button"
-          autoFocus
           title={strings.closeUploadAction}
           aria-label={strings.closeUploadAction}
           disabled={busy}

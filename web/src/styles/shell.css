@@ -39,7 +39,9 @@
   gap: 8px;
 }
 
-.workbench-topbar-actions button {
+.workbench-topbar-actions a,
+.workbench-topbar-actions button,
+.workbench-account {
   display: inline-flex;
   min-height: 34px;
   align-items: center;
@@ -50,10 +52,16 @@
   border-radius: var(--om-radius);
   background: var(--om-surface);
   color: var(--om-text);
-  cursor: pointer;
   font: inherit;
+  text-decoration: none;
 }
 
+.workbench-topbar-actions a,
+.workbench-topbar-actions button {
+  cursor: pointer;
+}
+
+.workbench-topbar-actions a:hover,
 .workbench-topbar-actions button:hover {
   border-color: var(--om-primary);
   color: var(--om-primary-hover);
@@ -107,6 +115,28 @@
 
 .workbench-content:only-child {
   grid-column: 1 / -1;
+}
+
+.workbench-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 16px;
+  color: var(--om-text-muted);
+  font-size: 13px;
+}
+
+.workbench-breadcrumb a {
+  color: var(--om-primary);
+  text-decoration: none;
+}
+
+.workbench-breadcrumb span:not(:last-child)::after,
+.workbench-breadcrumb a::after {
+  margin-left: 6px;
+  color: var(--om-text-muted);
+  content: "/";
 }
 
 .drawer-layer {

@@ -156,6 +156,13 @@ describe("StoryboardPage", () => {
     await waitFor(() => {
       expect(firstControl).toHaveFocus();
     });
+    const modalControls = within(dialog).getAllByRole("button");
+    const lastControl = modalControls[modalControls.length - 1];
+    lastControl.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(firstControl).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(lastControl).toHaveFocus();
 
     fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
 
@@ -180,6 +187,13 @@ describe("StoryboardPage", () => {
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     const firstControl = within(dialog).getByLabelText("分镜提示词");
     await waitFor(() => expect(firstControl).toHaveFocus());
+    const modalControls = within(dialog).getAllByRole("button");
+    const lastControl = modalControls[modalControls.length - 1];
+    lastControl.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(firstControl).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(lastControl).toHaveFocus();
 
     fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
 

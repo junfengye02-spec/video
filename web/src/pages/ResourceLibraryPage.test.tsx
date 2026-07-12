@@ -67,6 +67,13 @@ describe("ResourceLibraryPage", () => {
     const closeDetail = within(detail).getByRole("button", { name: "关闭资源详情" });
     expect(closeDetail).toHaveAttribute("title", "关闭资源详情");
     await waitFor(() => expect(closeDetail).toHaveFocus());
+    const detailButtons = within(detail).getAllByRole("button");
+    const lastDetailButton = detailButtons[detailButtons.length - 1];
+    lastDetailButton.focus();
+    fireEvent.keyDown(detail, { key: "Tab" });
+    expect(closeDetail).toHaveFocus();
+    fireEvent.keyDown(detail, { key: "Tab", shiftKey: true });
+    expect(lastDetailButton).toHaveFocus();
 
     fireEvent.keyDown(detail, { key: "Escape" });
 
@@ -79,6 +86,12 @@ describe("ResourceLibraryPage", () => {
     const closeUpload = within(upload).getByRole("button", { name: "关闭上传资源" });
     expect(closeUpload).toHaveAttribute("title", "关闭上传资源");
     await waitFor(() => expect(closeUpload).toHaveFocus());
+    const lastUploadControl = within(upload).getByLabelText("参考图");
+    lastUploadControl.focus();
+    fireEvent.keyDown(upload, { key: "Tab" });
+    expect(closeUpload).toHaveFocus();
+    fireEvent.keyDown(upload, { key: "Tab", shiftKey: true });
+    expect(lastUploadControl).toHaveFocus();
 
     fireEvent.keyDown(upload, { key: "Escape" });
 

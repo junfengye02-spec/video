@@ -17,7 +17,10 @@ describe("AppShell", () => {
       onBeforeNavigate,
     } as ComponentProps<typeof AppShell>;
     render(
-      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <MemoryRouter
+        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+        initialEntries={["/projects/p1/storyboard"]}
+      >
         <AppShell {...props}>
           <div>页面内容</div>
         </AppShell>
@@ -31,6 +34,26 @@ describe("AppShell", () => {
     fireEvent.click(screen.getByRole("link", { name: "制作与成片" }));
 
     expect(onBeforeNavigate).toHaveBeenCalledTimes(5);
+    expect(screen.getByRole("navigation", { name: "面包屑" })).toHaveTextContent(
+      "项目列表雨夜来信分镜编辑",
+    );
+  });
+
+  it("derives the breadcrumb section from the current workbench route", () => {
+    render(
+      <MemoryRouter
+        future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+        initialEntries={["/projects/pending/resources"]}
+      >
+        <AppShell project={{ id: "pending", title: "Pending Relatives", mode: "short_drama" }}>
+          <div>页面内容</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("navigation", { name: "面包屑" })).toHaveTextContent(
+      "项目列表Pending Relatives资源库",
+    );
   });
 
   it("navigates the wallet action and removes provider configuration controls", async () => {

@@ -1,7 +1,8 @@
 import { AlertTriangle, Link2, Unlink, X } from "lucide-react";
-import type { KeyboardEvent } from "react";
+import type { RefObject } from "react";
 import type { AssetRecord, ConsistencyReport, Shot } from "../../domain/types";
 import { getStrings, type UIStrings } from "../../i18n";
+import { useModalFocus } from "../accessibility/useModalFocus";
 import { countLinkedShots } from "./assetLibrary";
 
 export interface AssetDetailDrawerProps {
@@ -11,6 +12,7 @@ export interface AssetDetailDrawerProps {
   consistencyReport: ConsistencyReport | null;
   currentShotId: string | null;
   panelLocked: boolean;
+  returnFocusRef: RefObject<HTMLElement | null>;
   shots: Shot[];
   strings?: UIStrings["resources"];
   onBind: (bind: boolean) => void;
@@ -28,6 +30,7 @@ export function AssetDetailDrawer({
   consistencyReport,
   currentShotId,
   panelLocked,
+  returnFocusRef,
   shots,
   strings = getStrings("zh").resources,
   onBind,
@@ -41,18 +44,17 @@ export function AssetDetailDrawer({
   const relevantIssues = consistencyReport?.issues.filter(
     (issue) => Boolean(issue.shot_id && linkedShotIds.has(issue.shot_id)),
   ) ?? [];
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      if (!panelLocked) {
-        onClose();
-      }
-    }
-  };
+  const { panelRef, onKeyDown } = useModalFocus<HTMLDialogElement>({
+    open: true,
+    onEscape: () => {
+      if (!panelLocked) onClose();
+    },
+    returnFocusRef,
+  });
 
   return (
     <dialog
+      ref={panelRef}
       open
       aria-modal="true"
       aria-labelledby="resource-detail-title"
@@ -62,13 +64,12 @@ export function AssetDetailDrawer({
           onClose();
         }
       }}
-      onKeyDown={handleKeyDown}
+      onKeyDown={onKeyDown}
     >
       <div className="section-heading">
         <h2 id="resource-detail-title">{strings.detailDialogTitle}</h2>
         <button
           type="button"
-          autoFocus
           title={strings.closeDetailAction}
           aria-label={strings.closeDetailAction}
           disabled={panelLocked}

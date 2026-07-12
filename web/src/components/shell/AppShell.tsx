@@ -1,6 +1,6 @@
 import { CreditCard, LogOut, ReceiptText, ShieldCheck, UserCircle } from "lucide-react";
 import type { MouseEvent, ReactNode } from "react";
-import { Link, NavLink } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import { projectRoutes } from "../../app/routes";
 import type { Project } from "../../domain/types";
 
@@ -20,6 +20,13 @@ function walletLabel(value: number | null | undefined, loading: boolean): string
   return `钱包 ${value.toLocaleString("zh-CN")}`;
 }
 
+function projectSectionLabel(projectId: string, pathname: string): string {
+  if (pathname === projectRoutes.settings(projectId)) return "全局设定";
+  if (pathname === projectRoutes.resources(projectId)) return "资源库";
+  if (pathname === projectRoutes.production(projectId)) return "制作与成片";
+  return "分镜编辑";
+}
+
 export function AppShell({
   children,
   project,
@@ -30,6 +37,7 @@ export function AppShell({
   onBeforeNavigate,
   onLogout,
 }: AppShellProps) {
+  const location = useLocation();
   const handleNavigate = (event: MouseEvent<HTMLAnchorElement>) => {
     if (onBeforeNavigate && !onBeforeNavigate()) {
       event.preventDefault();
@@ -44,6 +52,7 @@ export function AppShell({
         ["制作与成片", projectRoutes.production(project.id)],
       ]
     : [];
+  const breadcrumbSection = project ? projectSectionLabel(project.id, location.pathname) : null;
 
   return (
     <div className="workbench-shell">
@@ -89,7 +98,16 @@ export function AppShell({
             ))}
           </aside>
         ) : null}
-        <main className="workbench-content">{children}</main>
+        <main className="workbench-content">
+          {project && breadcrumbSection ? (
+            <nav className="workbench-breadcrumb" aria-label="面包屑">
+              <Link to={projectRoutes.list} onClick={handleNavigate}>项目列表</Link>
+              <span>{project.title}</span>
+              <span>{breadcrumbSection}</span>
+            </nav>
+          ) : null}
+          {children}
+        </main>
       </div>
     </div>
   );

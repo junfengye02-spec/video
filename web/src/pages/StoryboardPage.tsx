@@ -1,6 +1,7 @@
 import { List, PanelRight } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ShotEditor } from "../components/ShotEditor";
+import { useModalFocus } from "../components/accessibility/useModalFocus";
 import { ShotList } from "../components/storyboard/ShotList";
 import { ShotOrderStrip } from "../components/storyboard/ShotOrderStrip";
 import { ShotPreview } from "../components/storyboard/ShotPreview";
@@ -33,14 +34,6 @@ export interface StoryboardPageProps {
 
 type StoryboardView = "list" | "preview" | "inspector";
 const TABLET_MEDIA_QUERY = "(min-width: 768px) and (max-width: 1179px)";
-const FOCUSABLE_CONTROL_SELECTOR = [
-  "button:not(:disabled)",
-  "input:not(:disabled)",
-  "select:not(:disabled)",
-  "textarea:not(:disabled)",
-  "[href]",
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
 
 function useTabletViewport(): boolean {
   const [matches, setMatches] = useState(() => (
@@ -84,10 +77,20 @@ export function StoryboardPage({
   const [dirty, setDirty] = useState(false);
   const [activeView, setActiveView] = useState<StoryboardView>("preview");
   const isTabletViewport = useTabletViewport();
-  const listPanelRef = useRef<HTMLElement>(null);
-  const inspectorPanelRef = useRef<HTMLElement>(null);
   const listOpenerRef = useRef<HTMLButtonElement>(null);
   const inspectorOpenerRef = useRef<HTMLButtonElement>(null);
+  const listModalOpen = isTabletViewport && activeView === "list";
+  const inspectorModalOpen = isTabletViewport && activeView === "inspector";
+  const listModalFocus = useModalFocus<HTMLElement>({
+    open: listModalOpen,
+    onEscape: () => setActiveView("preview"),
+    returnFocusRef: listOpenerRef,
+  });
+  const inspectorModalFocus = useModalFocus<HTMLElement>({
+    open: inspectorModalOpen,
+    onEscape: () => setActiveView("preview"),
+    returnFocusRef: inspectorOpenerRef,
+  });
 
   const handleDirtyChange = useCallback((nextDirty: boolean) => {
     setDirty(nextDirty);
@@ -109,21 +112,6 @@ export function StoryboardPage({
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [dirty]);
 
-  useEffect(() => {
-    if (!isTabletViewport || activeView === "preview") return;
-
-    let cancelled = false;
-    window.queueMicrotask(() => {
-      if (cancelled) return;
-      const panel = activeView === "list" ? listPanelRef.current : inspectorPanelRef.current;
-      const firstControl = panel?.querySelector<HTMLElement>(FOCUSABLE_CONTROL_SELECTOR);
-      (firstControl ?? panel)?.focus();
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeView, isTabletViewport]);
-
   const selectShot = (shotId: string) => {
     if (shotId === selectedShot?.id) {
       return;
@@ -136,18 +124,6 @@ export function StoryboardPage({
 
   const toggleTabletPanel = (view: Exclude<StoryboardView, "preview">) => {
     setActiveView((current) => current === view ? "preview" : view);
-  };
-
-  const handleTabletPanelKeyDown = (
-    event: KeyboardEvent<HTMLElement>,
-    view: Exclude<StoryboardView, "preview">,
-  ) => {
-    if (!isTabletViewport || activeView !== view || event.key !== "Escape") return;
-
-    event.preventDefault();
-    setActiveView("preview");
-    const openerRef = view === "list" ? listOpenerRef : inspectorOpenerRef;
-    window.queueMicrotask(() => openerRef.current?.focus());
   };
 
   return (
@@ -209,13 +185,13 @@ export function StoryboardPage({
 
       <div className={`storyboard-list-panel${activeView === "list" ? " is-panel-open" : ""}`}>
         <ShotList
-          modal={isTabletViewport && activeView === "list"}
-          panelRef={listPanelRef}
+          modal={listModalOpen}
+          panelRef={listModalFocus.panelRef}
           shots={ordered}
           selectedShotId={selectedShot?.id ?? null}
           resolveShotMedia={resolveShotMedia}
           onSelect={selectShot}
-          onPanelKeyDown={(event) => handleTabletPanelKeyDown(event, "list")}
+          onPanelKeyDown={listModalFocus.onKeyDown}
         />
       </div>
       <div className={`storyboard-stage${activeView === "preview" ? " is-panel-open" : ""}`}>
@@ -233,9 +209,9 @@ export function StoryboardPage({
         <ShotEditor
           assets={assets}
           characters={characters}
-          modal={isTabletViewport && activeView === "inspector"}
+          modal={inspectorModalOpen}
           optimizing={optimizingShotId === selectedShot?.id}
-          panelRef={inspectorPanelRef}
+          panelRef={inspectorModalFocus.panelRef}
           regenerating={regeneratingShotId === selectedShot?.id}
           saving={savingShotId === selectedShot?.id}
           shot={selectedShot}
@@ -244,7 +220,7 @@ export function StoryboardPage({
             regionLabel: strings.storyboardPage.inspectorLabel,
           }}
           onDirtyChange={handleDirtyChange}
-          onPanelKeyDown={(event) => handleTabletPanelKeyDown(event, "inspector")}
+          onPanelKeyDown={inspectorModalFocus.onKeyDown}
           onOptimizePrompt={onOptimizePrompt}
           onSaveShot={onSaveShot}
           onRegenerateShot={onRegenerateShot}
