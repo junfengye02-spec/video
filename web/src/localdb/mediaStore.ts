@@ -1113,9 +1113,9 @@ export function startMediaRecoveryController(
     if (disposed) return Promise.resolve(0);
     if (inFlight) return inFlight;
     clearTimer();
-    inFlight = runMediaRecovery(options).finally(() => {
+    inFlight = runMediaRecovery(options).finally(async () => {
       inFlight = null;
-      void schedule().catch(() => undefined);
+      await schedule().catch(() => undefined);
     });
     return inFlight;
   };
