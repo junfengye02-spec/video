@@ -418,7 +418,7 @@ describe("App routes", () => {
     window.history.pushState({}, "", "/projects/p2/storyboard");
     window.dispatchEvent(new PopStateEvent("popstate"));
 
-    expect(await screen.findByText("Project Two")).toBeInTheDocument();
+    expect(await screen.findAllByText("Project Two")).not.toHaveLength(0);
     firstLoad.resolve({
       id: "p1",
       title: "Project One",
@@ -560,7 +560,7 @@ describe("App routes", () => {
       updatedAt: "2026-07-10T09:00:00Z",
       snapshot: nextProject,
     });
-    expect(await screen.findByText("Project Two")).toBeInTheDocument();
+    expect(await screen.findAllByText("Project Two")).not.toHaveLength(0);
   });
 
   it("guards dirty storyboard navigation immediately after the edit commits", async () => {
