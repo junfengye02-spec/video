@@ -1796,7 +1796,7 @@ def test_postgres_same_old_quote_allows_one_concurrent_replacement(
         try:
             with Session(postgres_engine, expire_on_commit=False) as db:
                 outcome = BillingService(
-                    db, service_settings(), artifacts.inspect
+                    db, service_settings(), artifacts.inspect, now=lambda: NOW
                 ).replace_job_quote(
                     child_id,
                     fresh_quotes[index],
@@ -1923,7 +1923,7 @@ def test_postgres_same_fresh_quote_race_maps_unique_loser_to_domain_error(
         try:
             with Session(postgres_engine, expire_on_commit=False) as db:
                 outcome = BillingService(
-                    db, service_settings(), artifacts.inspect
+                    db, service_settings(), artifacts.inspect, now=lambda: NOW
                 ).replace_job_quote(
                     job_ids[index],
                     fresh,
@@ -2001,7 +2001,9 @@ def test_postgres_concurrent_same_parent_operation_returns_one_child(
 
     def reserve(index: int):
         with Session(postgres_engine, expire_on_commit=False) as db:
-            service = BillingService(db, service_settings(), lambda _locator: None)
+            service = BillingService(
+                db, service_settings(), lambda _locator: None, now=lambda: NOW
+            )
             try:
                 child = service.reserve_provider_call(
                     user_id=user_id,
