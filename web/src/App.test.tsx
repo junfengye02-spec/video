@@ -36,7 +36,11 @@ const apiMocks = vi.hoisted(() => ({
 
 const authMocks = vi.hoisted(() => ({
   value: {
-    user: { id: "user-1", email: "user@example.com", role: "user" },
+    user: { id: "user-1", email: "user@example.com", role: "user" } as {
+      id: string;
+      email: string;
+      role: string;
+    } | null,
     loading: false,
     login: vi.fn(),
     register: vi.fn(),
@@ -77,6 +81,9 @@ const localMediaStoreMocks = vi.hoisted(() => ({
 const localExportMocks = vi.hoisted(() => ({
   exportProjectBackup: vi.fn(),
   importProjectBackup: vi.fn(),
+  importProjectBackupDirectory: vi.fn(),
+  prepareProjectBackupDirectoryImport: vi.fn(),
+  prepareProjectBackupImport: vi.fn(),
 }));
 
 const localStorageEstimateMocks = vi.hoisted(() => ({
@@ -90,6 +97,30 @@ const localMediaUrlMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./api/client", () => apiMocks);
+vi.mock("./features/generation/GenerationService", () => ({
+  generationService: {
+    optimize: vi.fn((projectId: string, shotId: string, sourceText: string) => (
+      apiMocks.optimizePrompt(projectId, {
+        target: "shot",
+        target_id: shotId,
+        source_text: sourceText,
+        mode: "shot_json",
+      })
+    )),
+    saveShot: vi.fn((projectId: string, shotId: string, payload: unknown) => (
+      apiMocks.saveShot(projectId, shotId, payload)
+    )),
+    regenerate: vi.fn((projectId: string, shotId: string) => (
+      apiMocks.regenerateShot(projectId, shotId, {})
+    )),
+    render: vi.fn((projectId: string) => (
+      apiMocks.renderProject(projectId, { render_runtime: "ffmpeg" })
+    )),
+    subscribe: vi.fn((projectId: string, onEvent: (event: JobEvent) => void) => (
+      apiMocks.subscribeProjectEvents(projectId, onEvent)
+    )),
+  },
+}));
 vi.mock("./auth/AuthProvider", () => ({
   AuthProvider: ({ children }: { children: ReactNode }) => children,
   useAuth: () => authMocks.value,

@@ -13,12 +13,7 @@ import {
   createShortDramaProject,
   loadProject,
   mediaUrl,
-  optimizePrompt,
-  regenerateShot,
-  renderProject,
   saveContinuityPlan,
-  saveShot,
-  subscribeProjectEvents,
   uploadReferenceImage,
 } from "../../api/client";
 import type {
@@ -34,6 +29,7 @@ import type {
   ShotSaveRequest,
   Storyboard,
 } from "../../domain/types";
+import { generationService } from "../../features/generation/GenerationService";
 import { detectLocale, getStrings } from "../../i18n";
 import {
   cacheRemoteMedia,
@@ -600,7 +596,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     const projectId = snapshot?.project.id;
     if (!projectId) return;
     try {
-      return subscribeProjectEvents(projectId, (event) => {
+      return generationService.subscribe(projectId, (event) => {
         if (snapshotRef.current?.project.id !== projectId) return;
         setEvents((current) => appendUniqueEvent(current, event));
       });
@@ -716,12 +712,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       setBusyValue("optimizingShotId", shot.id);
       setError(null);
       try {
-        return await optimizePrompt(current.project.id, {
-          target: "shot",
-          target_id: shot.id,
-          source_text: sourceText,
-          mode: "shot_json",
-        });
+        return await generationService.optimize(current.project.id, shot.id, sourceText);
       } catch (optimizationError) {
         const message = errorMessage(optimizationError, strings.errors.optimizeShotFallback);
         if (isProjectOperationCurrent(token)) setError(message);
@@ -748,7 +739,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       setBusyValue("savingShotId", shotId);
       setError(null);
       try {
-        const result = await saveShot(projectId, shotId, payload);
+        const result = await generationService.saveShot(projectId, shotId, payload);
         if (!isCurrent()) return result.shot;
         const latest = snapshotRef.current;
         if (!latest) return result.shot;
@@ -792,7 +783,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
       setBusyValue("regeneratingShotId", shot.id);
       setError(null);
       try {
-        const result = await regenerateShot(projectId, shot.id, {});
+        const result = await generationService.regenerate(projectId, shot.id);
         if (!isCurrent()) return;
         const latest = snapshotRef.current;
         if (!latest) return;
@@ -1000,9 +991,7 @@ export function WorkbenchProvider({ children }: { children: ReactNode }) {
     setError(null);
     const responseBaseRevision = snapshotRevisionRef.current;
     try {
-      const result = await renderProject(projectId, {
-        render_runtime: "ffmpeg",
-      });
+      const result = await generationService.render(projectId);
       if (!isCurrent()) return;
       const latest = snapshotRef.current;
       if (!latest) return;

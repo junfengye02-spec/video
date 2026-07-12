@@ -23,6 +23,10 @@ import {
 } from "../platform/http/HttpClient";
 
 export { authRequest } from "../auth/api";
+export type {
+  GenerationService,
+  ShotSaveResponse,
+} from "../features/generation/GenerationService";
 
 async function requestJson<T>(
   path: string,
