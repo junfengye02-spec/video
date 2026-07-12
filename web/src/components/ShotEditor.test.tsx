@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import type { PromptOptimizeResponse, Shot, ShotSaveRequest } from "../domain/types";
 import { getStrings } from "../i18n";
 import { createShot } from "../test/fixtures";
@@ -248,6 +249,68 @@ describe("ShotEditor", () => {
 
     await waitFor(() => expect(screen.getByRole("button", { name: "重新生成" })).toBeEnabled());
     expect(screen.queryByRole("button", { name: "撤销优化" })).not.toBeInTheDocument();
+  });
+
+  it("shows wallet recovery for payment-required regeneration", async () => {
+    const strings = getStrings("zh").shotEditor;
+    const onRegenerateShot = vi.fn().mockRejectedValue({
+      code: "payment_required",
+      required_units: 1200,
+      status: 402,
+    });
+    const props: ShotEditorProps = {
+      assets: [],
+      characters: [],
+      optimizing: false,
+      regenerating: false,
+      saving: false,
+      shot: sampleShot,
+      strings,
+      onOptimizePrompt: vi.fn().mockResolvedValue(optimizedResponse),
+      onRegenerateShot,
+      onSaveShot: vi.fn().mockImplementation(async (_shotId, payload) => savedShotFromPayload(payload)),
+      walletAvailableUnits: 800,
+    };
+
+    render(
+      <MemoryRouter>
+        <ShotEditor {...props} />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: strings.regenerateAction }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("\u4f59\u989d\u4e0d\u8db3");
+    expect(alert).toHaveTextContent("\u53ef\u7528\u4f59\u989d 800");
+    expect(alert).toHaveTextContent("\u672c\u6b21\u6700\u591a\u9700\u8981 1,200");
+    expect(screen.getByRole("link", { name: "\u524d\u5f80\u94b1\u5305" })).toHaveAttribute("href", "/wallet");
+  });
+
+  it("hands unauthorized save failures to session recovery", async () => {
+    const onSessionExpired = vi.fn();
+    const onSaveShot = vi.fn().mockRejectedValue({ code: "unauthorized", status: 401 });
+    renderEditor({ onSaveShot, onSessionExpired });
+
+    fireEvent.click(screen.getByRole("button", { name: "\u4fdd\u5b58\u4fee\u6539" }));
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("clears transient save errors after retry succeeds", async () => {
+    const onSaveShot = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary save failed"))
+      .mockImplementationOnce(async (_shotId, payload) => savedShotFromPayload(payload));
+    renderEditor({ onSaveShot });
+
+    fireEvent.click(screen.getByRole("button", { name: "\u4fdd\u5b58\u4fee\u6539" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("temporary save failed");
+
+    fireEvent.click(screen.getByRole("button", { name: "\u4fdd\u5b58\u4fee\u6539" }));
+
+    await waitFor(() => expect(onSaveShot).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
   });
 
   it("keeps the draft dirty when save fails", async () => {

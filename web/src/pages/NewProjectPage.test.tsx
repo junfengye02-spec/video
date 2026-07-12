@@ -100,6 +100,46 @@ describe("NewProjectPage", () => {
     );
   });
 
+  it("shows wallet recovery details for payment-required creation", async () => {
+    const strings = getStrings("zh").newProjectPage;
+    const onCreate = vi.fn().mockRejectedValue({
+      code: "payment_required",
+      required_units: 1200,
+      status: 402,
+    });
+    renderPage({
+      onCreate,
+      onCreated: vi.fn(),
+      walletAvailableUnits: 800,
+    });
+
+    fireEvent.change(screen.getByLabelText(strings.promptLabel), {
+      target: { value: "\u9700\u8981\u751f\u6210\u7684\u6545\u4e8b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: strings.createAction }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("\u4f59\u989d\u4e0d\u8db3");
+    expect(alert).toHaveTextContent("\u53ef\u7528\u4f59\u989d 800");
+    expect(alert).toHaveTextContent("\u672c\u6b21\u6700\u591a\u9700\u8981 1,200");
+    expect(screen.getByRole("link", { name: "\u524d\u5f80\u94b1\u5305" })).toHaveAttribute("href", "/wallet");
+  });
+
+  it("hands unauthorized creation failures to session recovery", async () => {
+    const strings = getStrings("zh").newProjectPage;
+    const onSessionExpired = vi.fn();
+    const onCreate = vi.fn().mockRejectedValue({ code: "unauthorized", status: 401 });
+    renderPage({ onCreate, onCreated: vi.fn(), onSessionExpired });
+
+    fireEvent.change(screen.getByLabelText(strings.promptLabel), {
+      target: { value: "\u9700\u8981\u767b\u5f55\u7684\u6545\u4e8b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: strings.createAction }));
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("shows creation progress and recovers from a rejected request", async () => {
     let rejectCreate: (reason: unknown) => void = () => undefined;
     const onCreate = vi.fn().mockReturnValue(new Promise((_, reject) => {

@@ -3,21 +3,26 @@ import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { projectRoutes } from "../app/routes";
 import type { CreateProjectInput } from "../app/workbench/types";
+import {
+  CommandErrorNotice,
+  commandErrorFrom,
+  type CommandError,
+} from "../components/feedback/DomainErrorBoundary";
 import type { ProjectType, ShortDramaProjectResponse } from "../domain/types";
 import { getStrings } from "../i18n";
 
 export interface NewProjectPageProps {
   onCreate: (input: CreateProjectInput) => Promise<ShortDramaProjectResponse>;
   onCreated: (projectId: string, shotCount: number) => void;
-}
-
-function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  onSessionExpired?: () => void;
+  walletAvailableUnits?: number | null;
 }
 
 export function NewProjectPage({
   onCreate,
   onCreated,
+  onSessionExpired,
+  walletAvailableUnits = null,
 }: NewProjectPageProps) {
   const uiStrings = getStrings("zh");
   const strings = uiStrings.newProjectPage;
@@ -25,13 +30,13 @@ export function NewProjectPage({
   const [prompt, setPrompt] = useState("");
   const [projectType, setProjectType] = useState<ProjectType>("single_video");
   const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CommandError | null>(null);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const normalizedPrompt = prompt.trim();
     if (!normalizedPrompt) {
-      setError(uiStrings.errors.createStoryboardRequiresPrompt);
+      setError({ kind: "message", message: uiStrings.errors.createStoryboardRequiresPrompt });
       return;
     }
     setCreating(true);
@@ -46,7 +51,11 @@ export function NewProjectPage({
       const result = await onCreate(input);
       onCreated(result.project.id, result.storyboard.shots.length);
     } catch (requestError) {
-      setError(errorMessage(requestError, strings.createError));
+      setError(commandErrorFrom(requestError, {
+        fallback: strings.createError,
+        onSessionExpired,
+        walletAvailableUnits,
+      }));
     } finally {
       setCreating(false);
     }
@@ -95,7 +104,7 @@ export function NewProjectPage({
           />
         </label>
 
-        {error ? <p role="alert">{error}</p> : null}
+        <CommandErrorNotice error={error} />
 
         <button className="async-action" type="submit" disabled={creating}>
           <Sparkles aria-hidden="true" size={16} />

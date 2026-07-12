@@ -12,8 +12,10 @@ import {
   useParams,
 } from "react-router-dom";
 import { RequireAuth } from "../../auth/RequireAuth";
+import { useBilling } from "../../billing/BillingProvider";
+import { DomainErrorBoundary } from "../../components/feedback/DomainErrorBoundary";
 import { AppShell } from "../../components/shell/AppShell";
-import type { AssetRecord } from "../../domain/types";
+import type { AssetRecord, Shot, ShotSaveRequest } from "../../domain/types";
 import { AccountShellAction } from "../../features/account/AccountShellAction";
 import { BillingShellAction } from "../../features/billing/BillingShellAction";
 import { getStrings } from "../../i18n";
@@ -51,6 +53,36 @@ type ProjectLoadState = {
   projectId: string | null;
   status: "error" | "loading" | "missing" | "ready";
 };
+
+function useSessionExpiredNavigation() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return useCallback(() => {
+    navigate("/login", {
+      replace: true,
+      state: {
+        from: {
+          hash: location.hash,
+          pathname: location.pathname,
+          search: location.search,
+        },
+      },
+    });
+  }, [location.hash, location.pathname, location.search, navigate]);
+}
+
+function useWorkbenchCommandRecovery() {
+  const { clearError } = useWorkbench();
+  const billing = useBilling();
+  const onSessionExpired = useSessionExpiredNavigation();
+  const claimCommandError = useCallback(() => clearError(), [clearError]);
+
+  return {
+    claimCommandError,
+    onSessionExpired,
+    walletAvailableUnits: billing.wallet?.available_units ?? null,
+  };
+}
 
 function ErrorSurface() {
   const { clearError, error } = useWorkbench();
@@ -146,6 +178,7 @@ function WorkbenchProviderLayout() {
 }
 
 function RootLayout() {
+  const location = useLocation();
   return (
     <AppShell
       project={null}
@@ -154,7 +187,9 @@ function RootLayout() {
       billingAction={<BillingShellAction />}
     >
       <ErrorSurface />
-      <Outlet />
+      <DomainErrorBoundary resetKeys={[location.pathname]}>
+        <Outlet />
+      </DomainErrorBoundary>
     </AppShell>
   );
 }
@@ -299,7 +334,9 @@ function ProjectLayout() {
     >
       <ErrorSurface />
       <LocalBackupStatusSurface />
-      {content}
+      <DomainErrorBoundary resetKeys={[projectId, location.pathname]}>
+        {content}
+      </DomainErrorBoundary>
     </AppShell>
   );
 }
@@ -307,13 +344,28 @@ function ProjectLayout() {
 function NewProjectRoute() {
   const navigate = useNavigate();
   const { createProject } = useWorkbench();
+  const {
+    claimCommandError,
+    onSessionExpired,
+    walletAvailableUnits,
+  } = useWorkbenchCommandRecovery();
+  const handleCreate = useCallback(async (...args: Parameters<typeof createProject>) => {
+    try {
+      return await createProject(...args);
+    } catch (error) {
+      claimCommandError();
+      throw error;
+    }
+  }, [claimCommandError, createProject]);
 
   return (
     <NewProjectPage
-      onCreate={createProject}
+      onCreate={handleCreate}
       onCreated={(projectId, plannedShotCount) => {
         navigate(projectRoutes.storyboard(projectId), { state: { plannedShotCount } });
       }}
+      onSessionExpired={onSessionExpired}
+      walletAvailableUnits={walletAvailableUnits}
     />
   );
 }
@@ -377,10 +429,31 @@ function StoryboardRoute() {
     selectedShotId,
     snapshot,
   } = useWorkbench();
+  const {
+    claimCommandError,
+    onSessionExpired,
+    walletAvailableUnits,
+  } = useWorkbenchCommandRecovery();
   const plannedShotCount = typeof location.state?.plannedShotCount === "number"
     ? location.state.plannedShotCount
     : null;
   if (!snapshot) return null;
+
+  const handleOptimizePrompt = (shot: Shot, sourceText: string) =>
+    optimizeShotPrompt(shot, sourceText).catch((error: unknown) => {
+      claimCommandError();
+      throw error;
+    });
+  const handleSaveShot = (shotId: string, payload: ShotSaveRequest) =>
+    saveShotChanges(shotId, payload).catch((error: unknown) => {
+      claimCommandError();
+      throw error;
+    });
+  const handleRegenerateShot = (shot: Shot) =>
+    regenerateSelectedShot(shot).catch((error: unknown) => {
+      claimCommandError();
+      throw error;
+    });
 
   return (
     <StoryboardPage
@@ -395,9 +468,11 @@ function StoryboardRoute() {
       resolveShotMedia={resolveShotMedia}
       onSelectShot={selectShot}
       onDirtyChange={onDirtyChange}
-      onOptimizePrompt={optimizeShotPrompt}
-      onSaveShot={saveShotChanges}
-      onRegenerateShot={regenerateSelectedShot}
+      onOptimizePrompt={handleOptimizePrompt}
+      onSaveShot={handleSaveShot}
+      onRegenerateShot={handleRegenerateShot}
+      onSessionExpired={onSessionExpired}
+      walletAvailableUnits={walletAvailableUnits}
     />
   );
 }
@@ -462,7 +537,18 @@ function ProductionRoute() {
     renderFinal,
     snapshot,
   } = useWorkbench();
+  const {
+    claimCommandError,
+    onSessionExpired,
+    walletAvailableUnits,
+  } = useWorkbenchCommandRecovery();
   if (!snapshot) return null;
+
+  const handleRender = () =>
+    renderFinal().catch((error: unknown) => {
+      claimCommandError();
+      throw error;
+    });
 
   return (
     <ProductionPage
@@ -475,7 +561,9 @@ function ProductionRoute() {
       shotCount={snapshot.storyboard.shots.length}
       workflowArtifacts={snapshot.workflow_artifacts ?? []}
       onDownload={downloadFinal}
-      onRender={renderFinal}
+      onRender={handleRender}
+      onSessionExpired={onSessionExpired}
+      walletAvailableUnits={walletAvailableUnits}
     />
   );
 }

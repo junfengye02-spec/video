@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { ConsistencyPanel } from "../components/ConsistencyPanel";
 import { JobProgress } from "../components/JobProgress";
 import type { JobEvent, WorkflowArtifactStatus } from "../domain/types";
@@ -270,6 +271,57 @@ describe("ProductionPage", () => {
     expect(screen.getByText("No active jobs.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Consistency check" })).toBeInTheDocument();
     expect(screen.getByText("No issues found")).toBeInTheDocument();
+  });
+
+  it("shows wallet recovery for payment-required render", async () => {
+    const onRender = vi.fn().mockRejectedValue({
+      code: "payment_required",
+      required_units: 1200,
+      status: 402,
+    });
+    const onDownload = vi.fn().mockResolvedValue(undefined);
+    render(
+      <MemoryRouter>
+        <ProductionPage
+          {...productionProps}
+          onDownload={onDownload}
+          onRender={onRender}
+          walletAvailableUnits={800}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: zh.renderAction }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("\u4f59\u989d\u4e0d\u8db3");
+    expect(alert).toHaveTextContent("\u53ef\u7528\u4f59\u989d 800");
+    expect(alert).toHaveTextContent("\u672c\u6b21\u6700\u591a\u9700\u8981 1,200");
+    expect(screen.getByRole("link", { name: "\u524d\u5f80\u94b1\u5305" })).toHaveAttribute("href", "/wallet");
+    expect(onDownload).not.toHaveBeenCalled();
+  });
+
+  it("clears transient render errors after retry succeeds", async () => {
+    const onRender = vi.fn()
+      .mockRejectedValueOnce(new Error("render failed once"))
+      .mockResolvedValueOnce(undefined);
+    const onDownload = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProductionPage
+        {...productionProps}
+        onDownload={onDownload}
+        onRender={onRender}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: zh.renderAction }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("render failed once");
+
+    fireEvent.click(screen.getByRole("button", { name: zh.renderAction }));
+
+    await waitFor(() => expect(onRender).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(onDownload).not.toHaveBeenCalled();
   });
 
   it("does not chain a rejected render callback into download", async () => {

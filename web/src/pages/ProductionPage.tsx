@@ -1,6 +1,11 @@
 import { Film } from "lucide-react";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { ConsistencyPanel } from "../components/ConsistencyPanel";
+import {
+  CommandErrorNotice,
+  commandErrorFrom,
+  type CommandError,
+} from "../components/feedback/DomainErrorBoundary";
 import { JobProgress } from "../components/JobProgress";
 import { FinalRenderPanel } from "../components/production/FinalRenderPanel";
 import { WorkflowArtifacts } from "../components/production/WorkflowArtifacts";
@@ -22,6 +27,8 @@ export interface ProductionPageProps {
   workflowArtifacts: WorkflowArtifactStatus[];
   onDownload: () => Promise<void>;
   onRender: () => Promise<void>;
+  onSessionExpired?: () => void;
+  walletAvailableUnits?: number | null;
 }
 
 export function ProductionPage({
@@ -35,8 +42,12 @@ export function ProductionPage({
   workflowArtifacts,
   onDownload,
   onRender,
+  onSessionExpired,
+  walletAvailableUnits = null,
 }: ProductionPageProps) {
   const strings = getStrings("zh").production;
+  const errorStrings = getStrings("zh").errors;
+  const [commandError, setCommandError] = useState<CommandError | null>(null);
   const renderDisabled = shotCount === 0 || rendering;
   const renderInFlightRef = useRef(false);
 
@@ -46,9 +57,14 @@ export function ProductionPage({
     }
     renderInFlightRef.current = true;
     try {
+      setCommandError(null);
       await onRender();
-    } catch {
-      // The callback owner publishes operation errors.
+    } catch (renderError) {
+      setCommandError(commandErrorFrom(renderError, {
+        fallback: errorStrings.renderFallback,
+        onSessionExpired,
+        walletAvailableUnits,
+      }));
     } finally {
       renderInFlightRef.current = false;
     }
@@ -68,6 +84,7 @@ export function ProductionPage({
           onDownload={onDownload}
         />
       </div>
+      <CommandErrorNotice error={commandError} />
       <button
         className="render-button async-action"
         type="button"

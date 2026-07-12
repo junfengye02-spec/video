@@ -40,6 +40,29 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.command-error,
+.domain-error-boundary {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #f2b8b5;
+  border-radius: var(--om-radius);
+  background: #fff5f5;
+  color: #7f1d1d;
+  line-height: 1.4;
+}
+
+.command-error p,
+.domain-error-boundary p {
+  margin: 0;
+}
+
+.command-error a,
+.domain-error-boundary button {
+  justify-self: start;
+}
+
 .status-pill,
 .workflow-ok,
 .workflow-missing,

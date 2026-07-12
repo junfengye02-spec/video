@@ -30,6 +30,8 @@ export interface StoryboardPageProps {
   onOptimizePrompt: (shot: Shot, sourceText: string) => Promise<PromptOptimizeResponse>;
   onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<Shot>;
   onRegenerateShot: (shot: Shot) => Promise<void>;
+  onSessionExpired?: () => void;
+  walletAvailableUnits?: number | null;
 }
 
 type StoryboardView = "list" | "preview" | "inspector";
@@ -70,6 +72,8 @@ export function StoryboardPage({
   onOptimizePrompt,
   onSaveShot,
   onRegenerateShot,
+  onSessionExpired,
+  walletAvailableUnits = null,
 }: StoryboardPageProps) {
   const strings = getStrings("zh");
   const ordered = useMemo(() => orderedShots(shots), [shots]);
@@ -224,6 +228,8 @@ export function StoryboardPage({
           onOptimizePrompt={onOptimizePrompt}
           onSaveShot={onSaveShot}
           onRegenerateShot={onRegenerateShot}
+          onSessionExpired={onSessionExpired}
+          walletAvailableUnits={walletAvailableUnits}
         />
       </div>
     </section>

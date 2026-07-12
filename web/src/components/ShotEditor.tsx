@@ -1,7 +1,12 @@
 import { Check, Images, RefreshCw, Sparkles, Undo2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEventHandler, type Ref } from "react";
 import type { AssetRecord, Character, PromptOptimizeResponse, Shot, ShotLanguage, ShotSaveRequest } from "../domain/types";
-import type { UIStrings } from "../i18n";
+import { getStrings, type UIStrings } from "../i18n";
+import {
+  CommandErrorNotice,
+  commandErrorFrom,
+  type CommandError,
+} from "./feedback/DomainErrorBoundary";
 import {
   applyPromptOptimization,
   createShotDraftState,
@@ -26,6 +31,8 @@ export interface ShotEditorProps {
   onSaveShot: (shotId: string, payload: ShotSaveRequest) => Promise<Shot>;
   onDirtyChange?: (dirty: boolean) => void;
   onPanelKeyDown?: KeyboardEventHandler<HTMLElement>;
+  onSessionExpired?: () => void;
+  walletAvailableUnits?: number | null;
 }
 
 const SHOT_SIZES = [
@@ -92,14 +99,19 @@ export function ShotEditor({
   onOptimizePrompt,
   onRegenerateShot,
   onSaveShot,
+  onSessionExpired,
+  walletAvailableUnits = null,
 }: ShotEditorProps) {
   const [draftState, setDraftState] = useState(() => createShotDraftState(shot));
+  const [commandError, setCommandError] = useState<CommandError | null>(null);
   const optimizationRevisionRef = useRef(0);
   const selectionRevisionRef = useRef(0);
+  const errorStrings = getStrings("zh").errors;
 
   useEffect(() => {
     selectionRevisionRef.current += 1;
     setDraftState(createShotDraftState(shot));
+    setCommandError(null);
   }, [shot?.id]);
 
   function updateDraft(update: (draft: ShotDraftFields) => ShotDraftFields) {
@@ -368,6 +380,7 @@ export function ShotEditor({
         <Images aria-hidden="true" size={16} />
         <span>{generationModeLabel}</span>
       </div>
+      <CommandErrorNotice error={commandError} />
       <div className="chat-actions">
         <button
           className="primary-button async-action"
@@ -379,6 +392,7 @@ export function ShotEditor({
             }
             const selectionRevision = selectionRevisionRef.current;
             try {
+              setCommandError(null);
               const optimized = await onOptimizePrompt(shot, draftState.draft.prompt);
               if (selectionRevisionRef.current !== selectionRevision) {
                 return;
@@ -387,8 +401,14 @@ export function ShotEditor({
               setDraftState((current) => (
                 current.shotId === shot.id ? applyPromptOptimization(current, optimized) : current
               ));
-            } catch {
-              // App owns the error banner.
+            } catch (optimizationError) {
+              if (selectionRevisionRef.current === selectionRevision) {
+                setCommandError(commandErrorFrom(optimizationError, {
+                  fallback: errorStrings.optimizeShotFallback,
+                  onSessionExpired,
+                  walletAvailableUnits,
+                }));
+              }
             }
           }}
         >
@@ -422,6 +442,7 @@ export function ShotEditor({
             const optimizationRevision = optimizationRevisionRef.current;
             const selectionRevision = selectionRevisionRef.current;
             try {
+              setCommandError(null);
               const savedShot = await onSaveShot(shot.id, payload);
               const savedState = createShotDraftState(savedShot);
               setDraftState((current) => {
@@ -438,8 +459,14 @@ export function ShotEditor({
                     }
                   : savedState;
               });
-            } catch {
-              // App owns the error banner; the unsaved draft stays intact.
+            } catch (saveError) {
+              if (selectionRevisionRef.current === selectionRevision) {
+                setCommandError(commandErrorFrom(saveError, {
+                  fallback: errorStrings.saveShotFallback,
+                  onSessionExpired,
+                  walletAvailableUnits,
+                }));
+              }
             }
           }}
         >
@@ -450,9 +477,22 @@ export function ShotEditor({
           className="primary-button async-action"
           type="button"
           disabled={!shot || saving || regenerating || draftIsDirty}
-          onClick={() => {
-            if (shot) {
-              void onRegenerateShot(shot).catch(() => undefined);
+          onClick={async () => {
+            if (!shot) {
+              return;
+            }
+            const selectionRevision = selectionRevisionRef.current;
+            try {
+              setCommandError(null);
+              await onRegenerateShot(shot);
+            } catch (regenerationError) {
+              if (selectionRevisionRef.current === selectionRevision) {
+                setCommandError(commandErrorFrom(regenerationError, {
+                  fallback: errorStrings.regenerateShotFallback(shot.id),
+                  onSessionExpired,
+                  walletAvailableUnits,
+                }));
+              }
             }
           }}
         >
