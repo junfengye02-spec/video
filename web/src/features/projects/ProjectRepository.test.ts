@@ -94,18 +94,19 @@ function repository(options: {
   prepareImport?: (file: File) => Promise<PreparedBackupImport>;
 } = {}) {
   const responses = [...(options.responses ?? [])];
+  const json = vi.fn(async <T,>() => {
+    const next = responses.shift();
+    if (next instanceof Error) throw next;
+    return next as T;
+  });
   const http = {
-    json: vi.fn(async () => {
-      const next = responses.shift();
-      if (next instanceof Error) throw next;
-      return next;
-    }),
+    json,
   };
   return {
     http,
     repo: new ServerProjectRepository({
       cache: options.cache ?? fakeCache().cache,
-      http,
+      http: http as NonNullable<ConstructorParameters<typeof ServerProjectRepository>[0]>["http"],
       prepareImport: options.prepareImport,
     }),
   };

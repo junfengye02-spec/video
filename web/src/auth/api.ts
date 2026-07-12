@@ -101,7 +101,7 @@ export async function authRequest<T = void>(
       body: requestBody(init),
       headers: init.headers,
       method,
-      signal: init.signal,
+      signal: init.signal ?? undefined,
     });
   } catch (error) {
     if (error instanceof ApiError) {

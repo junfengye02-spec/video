@@ -9,7 +9,8 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 function requestHeaders(): Headers {
-  const init = vi.mocked(fetch).mock.calls.at(-1)?.[1] as RequestInit | undefined;
+  const calls = vi.mocked(fetch).mock.calls;
+  const init = calls[calls.length - 1]?.[1] as RequestInit | undefined;
   return new Headers(init?.headers);
 }
 
