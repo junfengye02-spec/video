@@ -1,6 +1,6 @@
 # OpenMontage Six-Session Closure Design
 
-**Status:** Approved in conversation; awaiting written-spec review
+**Status:** Approved for implementation planning
 
 ## 1. Objective
 
@@ -18,16 +18,17 @@ One session would mix unrelated repositories and exceed a reliable review contex
 
 ## 3. Sequencing Rules
 
-The sessions run strictly in order. A later session must inspect the current repository state and verify its start gate instead of trusting plan checkboxes or earlier conversation summaries.
+The sessions run in five dependency waves. Every session must inspect the current repository state and verify its start gate instead of trusting plan checkboxes or earlier conversation summaries.
 
-1. Session 1 repairs NewAPI usage-quote refund correctness.
-2. Session 2 closes OpenMontage billing administration backend work.
-3. Session 3 delivers the authenticated wallet, orders, and billing administration frontend.
-4. Session 4 closes frontend, LocalDB, billing E2E, browser, and operations acceptance.
-5. Session 5 builds frontend architecture foundations after all product behavior is green.
-6. Session 6 completes frontend composition migration and final architecture acceptance.
+1. **Wave 1:** Session 1 repairs NewAPI usage-quote refund correctness while Session 2 closes OpenMontage billing administration backend work. They may run in parallel because they modify different repositories and do not change their shared HTTP quote contract.
+2. **Wave 2:** Session 3 delivers the authenticated wallet, orders, and billing administration frontend after Session 2 is green.
+3. **Wave 3:** Session 4 begins only after Sessions 1-3 are green, then closes frontend, LocalDB, billing E2E, browser, and operations acceptance.
+4. **Wave 4:** Session 5 builds frontend architecture foundations after Session 4's code, automated, and browser gates are green.
+5. **Wave 5:** Session 6 completes frontend composition migration and final architecture acceptance after Session 5 is green.
 
-Sessions 2 and 3 must not begin with a red Session 1 integration contract. Sessions 5 and 6 must not begin until Sessions 1-4 are green. The sessions are not parallelizable.
+Session 4 is the integration join for both Wave 1 branches. Sessions 3 and 4 must not overlap because they modify the same frontend routes, shell, billing components, and acceptance tests. Sessions 5 and 6 must not overlap with product-acceptance work because the architecture migration relies on a frozen green behavior baseline.
+
+If Session 4's only incomplete item is an unavailable Alipay sandbox credential or external notification-delivery check, Session 5 may begin after every code, database, automated, and browser gate is green. The external sandbox item remains explicitly open and is never reported as passed.
 
 ## 4. Session Designs
 
