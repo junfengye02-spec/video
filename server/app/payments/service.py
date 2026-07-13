@@ -10,12 +10,13 @@ from sqlalchemy.orm import Session
 
 from server.app.core.config import AppSettings
 from server.app.payments.epay import parse_epay_money_to_fen, sign_epay, verify_epay
-from server.app.payments.models import PaymentOrder, TopupProduct
+from server.app.payments.models import PaymentOrder
 from server.app.wallet.service import credit
 
 
-class ProductUnavailable(RuntimeError):
-    pass
+CREDIT_UNITS_PER_CNY_FEN = 10_000
+LEGACY_DIRECT_TOPUP_PRODUCT_ID = "direct"
+DIRECT_TOPUP_DESCRIPTION = "Balance top-up"
 
 
 class EpayNotConfigured(RuntimeError):
@@ -60,27 +61,21 @@ def create_epay_order(
     db: Session,
     *,
     user_id: str,
-    product_id: str,
+    amount_cny_fen: int,
     settings: AppSettings,
     now: datetime | None = None,
 ) -> tuple[PaymentOrder, str, dict[str, str]]:
     action_url, merchant_id, merchant_key = _epay_credentials(settings)
-    product = db.scalar(
-        select(TopupProduct)
-        .where(TopupProduct.id == product_id, TopupProduct.enabled.is_(True))
-        .with_for_update()
-    )
-    if product is None:
-        raise ProductUnavailable("top-up product is unavailable")
 
     created_at = now or utcnow()
     order = PaymentOrder(
         id=uuid.uuid4().hex,
         user_id=user_id,
-        product_id=product.id,
-        product_title=product.title,
-        price_cny_fen=product.price_cny_fen,
-        credit_units=product.credit_units,
+        # Keep deployed snapshot columns populated for schema compatibility.
+        product_id=LEGACY_DIRECT_TOPUP_PRODUCT_ID,
+        product_title=DIRECT_TOPUP_DESCRIPTION,
+        price_cny_fen=amount_cny_fen,
+        credit_units=amount_cny_fen * CREDIT_UNITS_PER_CNY_FEN,
         merchant_order_no=f"OM{secrets.token_hex(20)}",
         payment_provider="epay",
         payment_method="alipay",
@@ -123,26 +118,6 @@ def payment_order_payload(order: PaymentOrder) -> dict[str, object]:
         "paid_at": order.paid_at,
         "created_at": order.created_at,
         "updated_at": order.updated_at,
-    }
-
-
-def list_enabled_products(db: Session) -> list[TopupProduct]:
-    return list(
-        db.scalars(
-            select(TopupProduct)
-            .where(TopupProduct.enabled.is_(True))
-            .order_by(TopupProduct.sort_order, TopupProduct.id)
-        )
-    )
-
-
-def topup_product_payload(product: TopupProduct) -> dict[str, object]:
-    return {
-        "id": product.id,
-        "title": product.title,
-        "price_cny_fen": product.price_cny_fen,
-        "credit_units": product.credit_units,
-        "sort_order": product.sort_order,
     }
 
 

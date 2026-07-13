@@ -16,14 +16,6 @@ export interface WalletEntryView {
   created_at: string;
 }
 
-export interface TopupProductView {
-  id: string;
-  title: string;
-  price_cny_fen: number;
-  credit_units: number;
-  active: boolean;
-}
-
 export interface PaymentOrderView {
   id: string;
   merchant_order_masked: string;
@@ -43,17 +35,6 @@ export interface PaymentGatewayAction {
 export interface BillingSettingsView {
   multiplier_bps: number;
   version: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface TopupProductAdminView {
-  id: string;
-  title: string;
-  price_cny_fen: number;
-  credit_units: number;
-  enabled: boolean;
-  sort_order: number;
   created_at: string;
   updated_at: string;
 }
@@ -99,7 +80,6 @@ export interface BillingReconciliationView {
 
 export interface BillingAdminSnapshot {
   settings: BillingSettingsView;
-  products: TopupProductAdminView[];
   orders: PaymentOrderAdminView[];
   wallet_entries: WalletEntryAdminView[];
   reconciliations: BillingReconciliationView[];
@@ -108,31 +88,6 @@ export interface BillingAdminSnapshot {
 export interface UpdateMultiplierRequest {
   multiplier_bps: number;
   reason: string;
-}
-
-export interface CreateTopupProductRequest {
-  id: string;
-  title: string;
-  price_cny_fen: number;
-  credit_units: number;
-  enabled: boolean;
-  sort_order: number;
-  reason: string;
-}
-
-export interface UpdateTopupProductRequest {
-  title?: string;
-  price_cny_fen?: number;
-  credit_units?: number;
-  enabled?: boolean;
-  sort_order?: number;
-  reason: string;
-}
-
-export interface DeleteTopupProductResponse {
-  id: string;
-  deleted: boolean;
-  enabled: boolean;
 }
 
 export interface ReconciliationRetryResponse {

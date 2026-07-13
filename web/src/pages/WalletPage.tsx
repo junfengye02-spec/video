@@ -1,16 +1,14 @@
 import { CreditCard, History, WalletCards } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   createPaymentOrder,
   getPaymentOrder,
-  listTopupProducts,
   listWalletEntries,
 } from "../billing/api";
 import { useBilling } from "../billing/BillingProvider";
 import type {
   PaymentOrderView,
-  TopupProductView,
   WalletEntryView,
 } from "../billing/types";
 import { getStrings } from "../i18n";
@@ -41,17 +39,18 @@ export interface WalletPageProps {
   submitGatewayForm?: SubmitGatewayForm;
 }
 
-function formatFen(value: number): string {
-  return `¥${(value / 100).toFixed(2)}`;
+const MAX_TOPUP_AMOUNT_CNY_FEN = 10_000_000;
+
+function parseYuanAmountToFen(value: string): number | null {
+  const match = /^(0|[1-9]\d{0,5})(?:\.(\d{1,2}))?$/.exec(value.trim());
+  if (!match) return null;
+  const amount = Number(match[1]) * 100 + Number((match[2] ?? "").padEnd(2, "0"));
+  return amount >= 1 && amount <= MAX_TOPUP_AMOUNT_CNY_FEN ? amount : null;
 }
 
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN");
-}
-
-function statusClass(status: PaymentOrderView["status"]): string {
-  return status === "paid" ? "status-complete" : status === "failed" ? "status-failed" : "status-pending";
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -65,11 +64,10 @@ function WalletPageView({
   const location = useLocation();
   const billing = useBilling();
   const refreshWallet = billing.refreshWallet;
-  const [products, setProducts] = useState<TopupProductView[]>([]);
   const [entries, setEntries] = useState<WalletEntryView[]>([]);
-  const [loadingProducts, setLoadingProducts] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [creatingProductId, setCreatingProductId] = useState<string | null>(null);
+  const [amountYuan, setAmountYuan] = useState("");
+  const [creatingOrder, setCreatingOrder] = useState(false);
   const [returnOrder, setReturnOrder] = useState<PaymentOrderView | null>(null);
   const pollingRef = useRef<number | null>(null);
   const returnParams = new URLSearchParams(location.search);
@@ -78,19 +76,14 @@ function WalletPageView({
 
   useEffect(() => {
     let active = true;
-    setLoadingProducts(true);
     setError(null);
-    void Promise.all([listTopupProducts(), listWalletEntries()])
-      .then(([nextProducts, nextEntries]) => {
+    void listWalletEntries()
+      .then((nextEntries) => {
         if (!active) return;
-        setProducts(nextProducts.filter((product) => product.active));
         setEntries(nextEntries);
       })
       .catch((loadError) => {
         if (active) setError(errorMessage(loadError, strings.loadError));
-      })
-      .finally(() => {
-        if (active) setLoadingProducts(false);
       });
     return () => {
       active = false;
@@ -127,17 +120,23 @@ function WalletPageView({
     };
   }, [refreshWallet, returnOrderId, strings.loadError]);
 
-  const handleCreateOrder = async (product: TopupProductView) => {
-    if (creatingProductId) return;
-    setCreatingProductId(product.id);
+  const handleCreateOrder = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (creatingOrder) return;
+    const amountCnyFen = parseYuanAmountToFen(amountYuan);
+    if (amountCnyFen === null) {
+      setError(strings.invalidTopupAmount);
+      return;
+    }
+    setCreatingOrder(true);
     setError(null);
     try {
-      const action = await createPaymentOrder(product.id);
+      const action = await createPaymentOrder(amountCnyFen);
       submitForm(action.action_url, action.form_fields);
     } catch (createError) {
       setError(errorMessage(createError, strings.createOrderError));
     } finally {
-      setCreatingProductId(null);
+      setCreatingOrder(false);
     }
   };
 
@@ -181,33 +180,40 @@ function WalletPageView({
         </p>
       ) : null}
 
-      <section className="billing-section" aria-labelledby="topup-products-title">
+      <section className="billing-section" aria-labelledby="topup-title">
         <div className="section-heading">
           <WalletCards aria-hidden="true" size={18} />
-          <h2 id="topup-products-title">{strings.productsTitle}</h2>
+          <h2 id="topup-title">{strings.topupTitle}</h2>
         </div>
-        {loadingProducts ? <p>{strings.loading}</p> : null}
-        {!loadingProducts && products.length === 0 ? <p>{strings.noProducts}</p> : null}
-        <div className="billing-card-grid">
-          {products.map((product) => (
-            <article key={product.id} className="billing-card">
-              <h3>{product.title}</h3>
-              <p>{formatFen(product.price_cny_fen)}</p>
-              <p>{product.credit_units}</p>
-              <button
-                className="primary-button async-action"
-                type="button"
-                disabled={creatingProductId !== null}
-                onClick={() => void handleCreateOrder(product)}
-              >
-                <CreditCard aria-hidden="true" size={16} />
-                {creatingProductId === product.id
-                  ? strings.creatingOrder
-                  : strings.rechargeButton(product.title)}
-              </button>
-            </article>
-          ))}
-        </div>
+        <form className="billing-topup-form" onSubmit={(event) => void handleCreateOrder(event)}>
+          <label className="field-label" htmlFor="topup-amount">
+            {strings.topupAmountLabel}
+          </label>
+          <div className="billing-topup-row">
+            <div className="billing-amount-input">
+              <span aria-hidden="true">\u00a5</span>
+              <input
+                id="topup-amount"
+                type="number"
+                inputMode="decimal"
+                min="0.01"
+                max={MAX_TOPUP_AMOUNT_CNY_FEN / 100}
+                step="0.01"
+                value={amountYuan}
+                disabled={creatingOrder}
+                onChange={(event) => setAmountYuan(event.target.value)}
+              />
+            </div>
+            <button
+              className="primary-button async-action"
+              type="submit"
+              disabled={creatingOrder}
+            >
+              <CreditCard aria-hidden="true" size={16} />
+              {creatingOrder ? strings.creatingOrder : strings.rechargeButton}
+            </button>
+          </div>
+        </form>
       </section>
 
       <section className="billing-section" aria-labelledby="wallet-entries-title">

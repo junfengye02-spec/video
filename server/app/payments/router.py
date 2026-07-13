@@ -19,15 +19,12 @@ from server.app.payments.epay import (
 from server.app.payments.service import (
     EpayNotConfigured,
     PaymentOrderNotFound,
-    ProductUnavailable,
     create_epay_order,
     epay_return_state,
     get_user_order,
-    list_enabled_products,
     list_user_orders,
     payment_order_payload,
     settle_epay_notify,
-    topup_product_payload,
 )
 
 
@@ -37,7 +34,7 @@ router = APIRouter()
 class CreatePaymentOrderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    product_id: str = Field(min_length=1, max_length=32)
+    amount_cny_fen: int = Field(strict=True, gt=0, le=10_000_000)
 
 
 async def _read_epay_fields(request: Request) -> dict[str, str] | None:
@@ -89,14 +86,6 @@ async def _read_epay_fields(request: Request) -> dict[str, str] | None:
     return bounded_epay_fields(items, encoded_size=len(body))
 
 
-@router.get("/api/topup-products")
-def get_topup_products(
-    _current: CurrentUser = Depends(require_user),
-    db: Session = Depends(get_db),
-) -> list[dict[str, object]]:
-    return [topup_product_payload(product) for product in list_enabled_products(db)]
-
-
 @router.post("/api/payment-orders", status_code=status.HTTP_201_CREATED)
 def create_payment_order(
     body: CreatePaymentOrderRequest,
@@ -108,13 +97,10 @@ def create_payment_order(
         order, action_url, fields = create_epay_order(
             db,
             user_id=current.id,
-            product_id=body.product_id,
+            amount_cny_fen=body.amount_cny_fen,
             settings=settings,
         )
         db.commit()
-    except ProductUnavailable as exc:
-        db.rollback()
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except EpayNotConfigured as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc

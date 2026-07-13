@@ -22,7 +22,7 @@ from server.app.core.config import AppSettings, get_settings
 from server.app.db.base import Base
 from server.app.db.session import get_db
 from server.app.main import create_app
-from server.app.payments.models import PaymentOrder, TopupProduct
+from server.app.payments.models import PaymentOrder
 from server.app.projects.models import ProjectRecord
 from server.app.wallet.models import WalletAccount, WalletEntry
 
@@ -79,14 +79,6 @@ def db():
                     user_id=USER.id,
                     balance_units=10_000_000,
                     held_units=0,
-                ),
-                TopupProduct(
-                    id="prod_basic",
-                    title="Starter credits",
-                    price_cny_fen=1_200,
-                    credit_units=50_000,
-                    enabled=True,
-                    sort_order=10,
                 ),
             ]
         )
@@ -177,7 +169,6 @@ def seeded_billing(db):
         secret="merchant_key",
         child_id="gj000000000000000000000000000001",
         reconciliation_id="br000000000000000000000000000001",
-        product_id="prod_basic",
         order_id="po000000000000000000000000000001",
     )
 
@@ -262,7 +253,6 @@ def utc_now() -> datetime:
     "path",
     [
         "/api/admin/billing/settings",
-        "/api/admin/topup-products",
         "/api/admin/payment-orders",
         "/api/admin/wallet-entries",
         "/api/admin/billing-reconciliations",
@@ -270,6 +260,11 @@ def utc_now() -> datetime:
 )
 def test_admin_billing_reads_require_admin(user_client, path):
     assert user_client.get(path).status_code == 403
+
+
+def test_topup_product_admin_routes_are_not_exposed(admin_client):
+    assert admin_client.get("/api/admin/topup-products").status_code == 404
+    assert admin_client.post("/api/admin/topup-products", json={}).status_code == 404
 
 
 def test_admin_billing_reads_order_and_reconciliation_payloads_are_redacted(
@@ -336,118 +331,6 @@ def test_multiplier_update_rejects_missing_reason_and_bounds(
 ):
     response = admin_client.put("/api/admin/billing/settings", json=payload)
     assert response.status_code == 422
-
-
-def test_product_create_is_audited(admin_client, db):
-    response = admin_client.post(
-        "/api/admin/topup-products",
-        json={
-            "id": "prod_plus",
-            "title": "Plus credits",
-            "price_cny_fen": 2_500,
-            "credit_units": 120_000,
-            "enabled": True,
-            "sort_order": 20,
-            "reason": "launch",
-        },
-    )
-
-    assert response.status_code == 201
-    assert db.get(TopupProduct, "prod_plus") is not None
-    audit = latest_audit(db, "billing.product.create")
-    assert audit.before_json is None
-    assert json.loads(audit.after_json)["id"] == "prod_plus"
-
-
-def test_product_create_rejects_duplicate_product_ids(admin_client):
-    response = admin_client.post(
-        "/api/admin/topup-products",
-        json={
-            "id": "prod_basic",
-            "title": "Duplicate",
-            "price_cny_fen": 1_000,
-            "credit_units": 10_000,
-            "reason": "duplicate",
-        },
-    )
-    assert response.status_code == 409
-
-
-def test_product_update_audits_and_preserves_active_order_snapshots(
-    admin_client, db, seeded_billing
-):
-    order = db.get(PaymentOrder, seeded_billing.order_id)
-    assert order is not None
-
-    response = admin_client.put(
-        f"/api/admin/topup-products/{seeded_billing.product_id}",
-        json={
-            "title": "Updated credits",
-            "price_cny_fen": 2_400,
-            "credit_units": 75_000,
-            "enabled": False,
-            "sort_order": 30,
-            "reason": "catalog refresh",
-        },
-    )
-
-    assert response.status_code == 200
-    db.refresh(order)
-    assert order.product_title == "Starter snapshot"
-    assert order.price_cny_fen == 1_200
-    assert order.credit_units == 50_000
-    product = db.get(TopupProduct, seeded_billing.product_id)
-    assert product is not None
-    assert product.title == "Updated credits"
-    assert product.enabled is False
-    audit = latest_audit(db, "billing.product.update")
-    rendered = audit.before_json + audit.after_json
-    assert "provider_trade_no" not in rendered
-    assert "MERCHANT-SECRET-123456" not in rendered
-
-
-def test_product_delete_deactivates_products_with_orders_and_deletes_unused(
-    admin_client, db, seeded_billing
-):
-    response = admin_client.request(
-        "DELETE",
-        f"/api/admin/topup-products/{seeded_billing.product_id}",
-        json={"reason": "retire"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "id": seeded_billing.product_id,
-        "deleted": False,
-        "enabled": False,
-    }
-    product = db.get(TopupProduct, seeded_billing.product_id)
-    assert product is not None and product.enabled is False
-
-    db.add(
-        TopupProduct(
-            id="prod_unused",
-            title="Unused",
-            price_cny_fen=900,
-            credit_units=9_000,
-            enabled=True,
-            sort_order=99,
-        )
-    )
-    db.commit()
-    unused = admin_client.request(
-        "DELETE",
-        "/api/admin/topup-products/prod_unused",
-        json={"reason": "remove unused"},
-    )
-
-    assert unused.status_code == 200
-    assert unused.json() == {
-        "id": "prod_unused",
-        "deleted": True,
-        "enabled": False,
-    }
-    assert db.get(TopupProduct, "prod_unused") is None
 
 
 def test_reconciliation_retry_missing_returns_404(admin_client):

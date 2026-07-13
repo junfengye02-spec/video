@@ -1,28 +1,14 @@
-import { RefreshCcw, Save, Settings, ShoppingBag } from "lucide-react";
+import { RefreshCcw, Save, Settings } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
-  createTopupProduct,
-  deleteTopupProduct,
   getBillingAdmin,
   retryReconciliation,
   updateMultiplier,
-  updateTopupProduct,
 } from "../../billing/api";
 import type {
   BillingAdminSnapshot,
   BillingReconciliationView,
-  TopupProductAdminView,
 } from "../../billing/types";
-
-const emptyProductForm = {
-  id: "",
-  title: "",
-  price_cny_fen: "1000",
-  credit_units: "10000000",
-  enabled: true,
-  sort_order: "0",
-  reason: "",
-};
 
 export function multiplierTextToBps(value: string): number | null {
   const match = /^(\d{1,2})(?:\.(\d{1,4}))?$/.exec(value.trim());
@@ -55,7 +41,6 @@ export function BillingAdminPage() {
   const [snapshot, setSnapshot] = useState<BillingAdminSnapshot | null>(null);
   const [multiplierText, setMultiplierText] = useState("1.000");
   const [reason, setReason] = useState("");
-  const [productForm, setProductForm] = useState(emptyProductForm);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
@@ -113,66 +98,6 @@ export function BillingAdminPage() {
     }
   };
 
-  const handleCreateProduct = async () => {
-    const trimmedReason = productForm.reason.trim();
-    if (!productForm.id.trim() || !productForm.title.trim() || !trimmedReason) {
-      setError("请填写产品、标题和调整原因");
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      await createTopupProduct({
-        id: productForm.id.trim(),
-        title: productForm.title.trim(),
-        price_cny_fen: Number(productForm.price_cny_fen),
-        credit_units: Number(productForm.credit_units),
-        enabled: productForm.enabled,
-        sort_order: Number(productForm.sort_order),
-        reason: trimmedReason,
-      });
-      setProductForm(emptyProductForm);
-      await reload();
-    } catch (productError) {
-      setError(errorMessage(productError, "无法保存充值产品。"));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleToggleProduct = async (product: TopupProductAdminView) => {
-    const reasonText = window.prompt("请输入调整原因")?.trim();
-    if (!reasonText) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await updateTopupProduct(product.id, {
-        enabled: !product.enabled,
-        reason: reasonText,
-      });
-      await reload();
-    } catch (productError) {
-      setError(errorMessage(productError, "无法更新充值产品。"));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleDeleteProduct = async (product: TopupProductAdminView) => {
-    const reasonText = window.prompt("请输入调整原因")?.trim();
-    if (!reasonText) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await deleteTopupProduct(product.id, reasonText);
-      await reload();
-    } catch (productError) {
-      setError(errorMessage(productError, "无法删除充值产品。"));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleRetry = async (reconciliation: BillingReconciliationView) => {
     setRetryingId(reconciliation.id);
     setError(null);
@@ -195,7 +120,7 @@ export function BillingAdminPage() {
       <div className="page-heading">
         <div>
           <h1 id="billing-admin-title">计费管理</h1>
-          <p>倍率、充值产品、订单和对账任务均来自管理员 API。</p>
+          <p>倍率、订单和对账任务均来自管理员 API。</p>
         </div>
       </div>
 
@@ -232,91 +157,6 @@ export function BillingAdminPage() {
             保存倍率
           </button>
         </div>
-      </section>
-
-      <section className="review-section" aria-labelledby="admin-products-title">
-        <div className="section-heading">
-          <ShoppingBag aria-hidden="true" size={18} />
-          <h2 id="admin-products-title">充值产品</h2>
-        </div>
-        <div className="prompt-grid">
-          <label>
-            产品 ID
-            <input
-              value={productForm.id}
-              onChange={(event) => setProductForm((current) => ({ ...current, id: event.target.value }))}
-            />
-          </label>
-          <label>
-            标题
-            <input
-              value={productForm.title}
-              onChange={(event) => setProductForm((current) => ({ ...current, title: event.target.value }))}
-            />
-          </label>
-          <label>
-            价格分
-            <input
-              inputMode="numeric"
-              value={productForm.price_cny_fen}
-              onChange={(event) => setProductForm((current) => ({ ...current, price_cny_fen: event.target.value }))}
-            />
-          </label>
-          <label>
-            额度单位
-            <input
-              inputMode="numeric"
-              value={productForm.credit_units}
-              onChange={(event) => setProductForm((current) => ({ ...current, credit_units: event.target.value }))}
-            />
-          </label>
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={productForm.enabled}
-              onChange={(event) => setProductForm((current) => ({ ...current, enabled: event.target.checked }))}
-            />
-            启用
-          </label>
-          <label>
-            排序
-            <input
-              inputMode="numeric"
-              value={productForm.sort_order}
-              onChange={(event) => setProductForm((current) => ({ ...current, sort_order: event.target.value }))}
-            />
-          </label>
-          <label>
-            产品调整原因
-            <input
-              value={productForm.reason}
-              onChange={(event) => setProductForm((current) => ({ ...current, reason: event.target.value }))}
-            />
-          </label>
-          <button
-            className="primary-button async-action"
-            type="button"
-            disabled={saving}
-            onClick={() => void handleCreateProduct()}
-          >
-            新增产品
-          </button>
-        </div>
-        <ul className="billing-list">
-          {(snapshot?.products ?? []).map((product) => (
-            <li key={product.id}>
-              <strong>{product.title}</strong>
-              <span>{formatFen(product.price_cny_fen)} / {product.credit_units}</span>
-              <span>{product.enabled ? "启用" : "停用"}</span>
-              <button type="button" disabled={saving} onClick={() => void handleToggleProduct(product)}>
-                {product.enabled ? "停用" : "启用"}
-              </button>
-              <button type="button" disabled={saving} onClick={() => void handleDeleteProduct(product)}>
-                删除
-              </button>
-            </li>
-          ))}
-        </ul>
       </section>
 
       <section className="review-section" aria-labelledby="admin-orders-title">

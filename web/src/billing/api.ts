@@ -3,17 +3,12 @@ import type {
   BillingAdminSnapshot,
   BillingReconciliationView,
   BillingSettingsView,
-  CreateTopupProductRequest,
-  DeleteTopupProductResponse,
   PaymentGatewayAction,
   PaymentOrderAdminView,
   PaymentOrderStatus,
   PaymentOrderView,
   ReconciliationRetryResponse,
-  TopupProductAdminView,
-  TopupProductView,
   UpdateMultiplierRequest,
-  UpdateTopupProductRequest,
   WalletEntryAdminView,
   WalletEntryView,
   WalletSummary,
@@ -46,11 +41,6 @@ function nullableStringField(record: ObjectRecord, field: string): string | null
 function numberField(record: ObjectRecord, field: string): number {
   const value = record[field];
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function booleanField(record: ObjectRecord, field: string, fallback = false): boolean {
-  const value = record[field];
-  return typeof value === "boolean" ? value : fallback;
 }
 
 function statusField(record: ObjectRecord): PaymentOrderStatus {
@@ -87,17 +77,6 @@ function paymentOrderView(value: unknown): PaymentOrderView {
   };
 }
 
-function topupProductView(value: unknown): TopupProductView {
-  const record = asObject(value);
-  return {
-    id: stringField(record, "id"),
-    title: stringField(record, "title"),
-    price_cny_fen: numberField(record, "price_cny_fen"),
-    credit_units: numberField(record, "credit_units"),
-    active: booleanField(record, "active", booleanField(record, "enabled", true)),
-  };
-}
-
 function walletSummary(value: unknown): WalletSummary {
   const record = asObject(value);
   return {
@@ -125,20 +104,6 @@ function adminSettings(value: unknown): BillingSettingsView {
   return {
     multiplier_bps: numberField(record, "multiplier_bps"),
     version: numberField(record, "version"),
-    created_at: stringField(record, "created_at"),
-    updated_at: stringField(record, "updated_at"),
-  };
-}
-
-function adminProduct(value: unknown): TopupProductAdminView {
-  const record = asObject(value);
-  return {
-    id: stringField(record, "id"),
-    title: stringField(record, "title"),
-    price_cny_fen: numberField(record, "price_cny_fen"),
-    credit_units: numberField(record, "credit_units"),
-    enabled: booleanField(record, "enabled"),
-    sort_order: numberField(record, "sort_order"),
     created_at: stringField(record, "created_at"),
     updated_at: stringField(record, "updated_at"),
   };
@@ -201,15 +166,10 @@ export async function listWalletEntries(limit = 50): Promise<WalletEntryView[]> 
     .map(walletEntryView);
 }
 
-export async function listTopupProducts(): Promise<TopupProductView[]> {
-  return asArray(await authRequest("/api/topup-products"))
-    .map(topupProductView);
-}
-
-export async function createPaymentOrder(productId: string): Promise<PaymentGatewayAction> {
+export async function createPaymentOrder(amountCnyFen: number): Promise<PaymentGatewayAction> {
   const response = asObject(await authRequest("/api/payment-orders", {
     method: "POST",
-    body: postBody({ product_id: productId }),
+    body: postBody({ amount_cny_fen: amountCnyFen }),
   }));
   const orderSource = response.order ?? response;
   return {
@@ -233,13 +193,11 @@ export async function getPaymentOrder(orderId: string): Promise<PaymentOrderView
 export async function getBillingAdmin(): Promise<BillingAdminSnapshot> {
   const [
     settings,
-    products,
     orders,
     walletEntries,
     reconciliations,
   ] = await Promise.all([
     authRequest("/api/admin/billing/settings"),
-    authRequest("/api/admin/topup-products?limit=50"),
     authRequest("/api/admin/payment-orders?limit=50"),
     authRequest("/api/admin/wallet-entries?limit=50"),
     authRequest("/api/admin/billing-reconciliations?limit=50"),
@@ -247,7 +205,6 @@ export async function getBillingAdmin(): Promise<BillingAdminSnapshot> {
 
   return {
     settings: adminSettings(settings),
-    products: asArray(products).map(adminProduct),
     orders: asArray(orders).map(adminOrder),
     wallet_entries: asArray(walletEntries).map(adminWalletEntry),
     reconciliations: asArray(reconciliations).map(adminReconciliation),
@@ -261,41 +218,6 @@ export async function updateMultiplier(
     method: "PUT",
     body: postBody(payload),
   }));
-}
-
-export async function createTopupProduct(
-  payload: CreateTopupProductRequest,
-): Promise<TopupProductAdminView> {
-  return adminProduct(await authRequest("/api/admin/topup-products", {
-    method: "POST",
-    body: postBody(payload),
-  }));
-}
-
-export async function updateTopupProduct(
-  productId: string,
-  payload: UpdateTopupProductRequest,
-): Promise<TopupProductAdminView> {
-  return adminProduct(await authRequest(
-    `/api/admin/topup-products/${encodeURIComponent(productId)}`,
-    {
-      method: "PUT",
-      body: postBody(payload),
-    },
-  ));
-}
-
-export async function deleteTopupProduct(
-  productId: string,
-  reason: string,
-): Promise<DeleteTopupProductResponse> {
-  return asObject(await authRequest(
-    `/api/admin/topup-products/${encodeURIComponent(productId)}`,
-    {
-      method: "DELETE",
-      body: postBody({ reason }),
-    },
-  )) as unknown as DeleteTopupProductResponse;
 }
 
 export async function retryReconciliation(

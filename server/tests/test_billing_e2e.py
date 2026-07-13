@@ -26,7 +26,7 @@ from server.app.billing.reconciliation import reconcile_due_jobs
 from server.app.billing.service import BillingService
 from server.app.db.base import Base
 from server.app.payments.epay import sign_epay
-from server.app.payments.models import PaymentOrder, TopupProduct
+from server.app.payments.models import PaymentOrder
 from server.app.payments.service import create_epay_order, settle_epay_notify
 from server.app.projects.models import ProjectRecord
 from server.app.provider.newapi import (
@@ -311,11 +311,11 @@ class BillingE2E:
             {"model": "image-model", "prompt": "billing e2e image"},
         )
 
-    def create_and_notify_topup(self, product_id: str) -> PaymentOrder:
+    def create_and_notify_topup(self, amount_cny_fen: int) -> PaymentOrder:
         order, _action_url, _fields = create_epay_order(
             self.db,
             user_id=USER_ID,
-            product_id=product_id,
+            amount_cny_fen=amount_cny_fen,
             settings=self.settings,
             now=NOW,
         )
@@ -495,14 +495,6 @@ def e2e(tmp_path) -> BillingE2E:
                     held_units=0,
                 ),
                 BillingSetting(id=1, multiplier_bps=15_000, version=0),
-                TopupProduct(
-                    id="prod10",
-                    title="10 yuan test pack",
-                    price_cny_fen=1_000,
-                    credit_units=10_000_000,
-                    enabled=True,
-                    sort_order=1,
-                ),
             ]
         )
         db.commit()
@@ -511,7 +503,7 @@ def e2e(tmp_path) -> BillingE2E:
 
 
 def test_recharge_then_successful_video_charge(e2e: BillingE2E) -> None:
-    order = e2e.create_and_notify_topup(product_id="prod10")
+    order = e2e.create_and_notify_topup(amount_cny_fen=1_000)
     before = e2e.wallet()
     result = e2e.generate_video(status="SUCCESS", quota=1_449_000)
     after = e2e.wallet()
@@ -543,7 +535,7 @@ def test_duplicate_payment_notify_credits_topup_once(e2e: BillingE2E) -> None:
     order, _action_url, _fields = create_epay_order(
         e2e.db,
         user_id=USER_ID,
-        product_id="prod10",
+        amount_cny_fen=1_000,
         settings=e2e.settings,
         now=NOW,
     )

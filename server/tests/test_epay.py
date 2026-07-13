@@ -38,7 +38,7 @@ from server.app.payments.epay import (
     sign_epay,
     verify_epay,
 )
-from server.app.payments.models import PaymentOrder, TopupProduct
+from server.app.payments.models import PaymentOrder
 from server.app.payments.router import router as payments_router
 from server.app.payments.service import (
     create_epay_order,
@@ -153,22 +153,6 @@ def db_session() -> Session:
                     balance_units=0,
                     held_units=0,
                 ),
-                TopupProduct(
-                    id="tp_basic",
-                    title="Starter credits",
-                    price_cny_fen=1_234,
-                    credit_units=50_000,
-                    enabled=True,
-                    sort_order=10,
-                ),
-                TopupProduct(
-                    id="tp_disabled",
-                    title="Disabled credits",
-                    price_cny_fen=1,
-                    credit_units=999_999,
-                    enabled=False,
-                    sort_order=1,
-                ),
             ]
         )
         db.commit()
@@ -254,7 +238,6 @@ def seed_postgres_order(
     settings: AppSettings,
     *,
     suffix: str,
-    create_product: bool,
 ) -> dict[str, object]:
     user_id = f"u{suffix}"
     with Session(engine, expire_on_commit=False) as db:
@@ -276,22 +259,11 @@ def seed_postgres_order(
                 held_units=0,
             )
         )
-        if create_product:
-            db.add(
-                TopupProduct(
-                    id="tp_postgres",
-                    title="PostgreSQL credits",
-                    price_cny_fen=2_500,
-                    credit_units=75_000,
-                    enabled=True,
-                    sort_order=1,
-                )
-            )
         db.flush()
         order, _action_url, _fields = create_epay_order(
             db,
             user_id=user_id,
-            product_id="tp_postgres",
+            amount_cny_fen=2_500,
             settings=settings,
         )
         db.commit()
@@ -606,7 +578,9 @@ def test_epay_configuration_is_optional_complete_and_secret_safe() -> None:
             _env_file=None,
             environment="test",
             auth_hmac_secret="x" * 32,
+            epay_pay_address="",
             epay_id="1001",
+            epay_key="",
         )
 
 
@@ -628,6 +602,8 @@ def test_incomplete_epay_configuration_error_never_exposes_key() -> None:
             _env_file=None,
             environment="test",
             auth_hmac_secret="x" * 32,
+            epay_pay_address="",
+            epay_id="",
             epay_key=sentinel,
         )
 
@@ -661,21 +637,24 @@ def test_unrelated_production_validation_error_never_exposes_epay_key() -> None:
     assert_validation_error_hides(caught.value, sentinel)
 
 
-def test_create_order_snapshots_enabled_server_owned_product(
+def test_create_order_snapshots_requested_amount_as_wallet_credit(
     client: TestClient, db_session: Session
 ) -> None:
-    response = client.post("/api/payment-orders", json={"product_id": "tp_basic"})
+    response = client.post(
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
+    )
 
     assert response.status_code == 201
     payload = response.json()
-    assert payload["product_id"] == "tp_basic"
-    assert payload["product_title"] == "Starter credits"
+    assert payload["product_id"] == "direct"
+    assert payload["product_title"] == "Balance top-up"
     assert payload["price_cny_fen"] == 1_234
-    assert payload["credit_units"] == 50_000
+    assert payload["credit_units"] == 12_340_000
     assert payload["status"] == "pending"
     assert payload["action_url"] == "https://pay.example.com/submit.php"
     assert payload["form"]["pid"] == "1001"
     assert payload["form"]["type"] == "alipay"
+    assert payload["form"]["name"] == "Balance top-up"
     assert payload["form"]["money"] == "12.34"
     assert payload["form"]["sign_type"] == "MD5"
     assert verify_epay(payload["form"], "merchant-secret") is True
@@ -684,25 +663,31 @@ def test_create_order_snapshots_enabled_server_owned_product(
         select(PaymentOrder).where(PaymentOrder.id == payload["id"])
     )
     assert order is not None
-    assert (order.price_cny_fen, order.credit_units) == (1_234, 50_000)
+    assert (order.price_cny_fen, order.credit_units) == (1_234, 12_340_000)
     assert order.expires_at > datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def test_create_order_accepts_only_enabled_product_id_and_uses_opaque_order_no(
+def test_create_order_accepts_only_bounded_amount_and_uses_opaque_order_no(
     client: TestClient,
 ) -> None:
     extra = client.post(
         "/api/payment-orders",
-        json={"product_id": "tp_basic", "price_cny_fen": 1},
+        json={"amount_cny_fen": 1_234, "product_id": "tp_basic"},
     )
-    disabled = client.post(
-        "/api/payment-orders", json={"product_id": "tp_disabled"}
+    zero = client.post("/api/payment-orders", json={"amount_cny_fen": 0})
+    oversized = client.post(
+        "/api/payment-orders", json={"amount_cny_fen": 10_000_001}
     )
-    first = client.post("/api/payment-orders", json={"product_id": "tp_basic"})
-    second = client.post("/api/payment-orders", json={"product_id": "tp_basic"})
+    boolean = client.post("/api/payment-orders", json={"amount_cny_fen": True})
+    decimal = client.post("/api/payment-orders", json={"amount_cny_fen": 1_234.0})
+    first = client.post("/api/payment-orders", json={"amount_cny_fen": 1_234})
+    second = client.post("/api/payment-orders", json={"amount_cny_fen": 1_234})
 
     assert extra.status_code == 422
-    assert disabled.status_code == 404
+    assert zero.status_code == 422
+    assert oversized.status_code == 422
+    assert boolean.status_code == 422
+    assert decimal.status_code == 422
     merchant_numbers = {
         first.json()["merchant_order_no"],
         second.json()["merchant_order_no"],
@@ -712,11 +697,11 @@ def test_create_order_accepts_only_enabled_product_id_and_uses_opaque_order_no(
     assert all(TEST_USER.id not in number for number in merchant_numbers)
 
 
-def test_product_and_order_reads_are_enabled_current_user_scoped_and_expire(
+def test_order_reads_are_current_user_scoped_and_expire(
     client: TestClient, db_session: Session
 ) -> None:
     created = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
     own = db_session.get(PaymentOrder, created["id"])
     assert own is not None
@@ -737,12 +722,9 @@ def test_product_and_order_reads_are_enabled_current_user_scoped_and_expire(
     db_session.add(other)
     db_session.commit()
 
-    products = client.get("/api/topup-products")
     orders = client.get("/api/payment-orders")
     hidden = client.get(f"/api/payment-orders/{other.id}")
 
-    assert products.status_code == 200
-    assert [product["id"] for product in products.json()] == ["tp_basic"]
     assert orders.status_code == 200
     assert [order["id"] for order in orders.json()] == [own.id]
     assert orders.json()[0]["status"] == "expired"
@@ -787,7 +769,7 @@ def test_browser_return_routes_display_state_without_crediting(
     client: TestClient, db_session: Session
 ) -> None:
     order = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
     valid = client.get(
         "/api/payments/epay/return",
@@ -816,7 +798,7 @@ def test_notify_post_settles_once_and_get_duplicate_is_success(
     client: TestClient, db_session: Session
 ) -> None:
     order_payload = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
     fields = signed_callback(order_payload)
 
@@ -833,7 +815,7 @@ def test_notify_post_settles_once_and_get_duplicate_is_success(
     assert order is not None
     assert (order.status, order.provider_trade_no) == ("paid", "EPAY-TRADE-1")
     assert order.paid_at is not None
-    assert wallet is not None and wallet.balance_units == 50_000
+    assert wallet is not None and wallet.balance_units == 12_340_000
     assert db_session.scalar(select(func.count(WalletEntry.id))) == 1
     entry = db_session.scalar(select(WalletEntry))
     assert entry is not None
@@ -861,7 +843,7 @@ def test_signed_notify_rejects_tampered_callback_fields_without_mutation(
     value: str,
 ) -> None:
     order_payload = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
 
     response = client.post(
@@ -884,7 +866,7 @@ def test_notify_rejects_invalid_signature_and_bounded_malformed_inputs(
     client: TestClient, db_session: Session
 ) -> None:
     order = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
     invalid_signature = signed_callback(order)
     invalid_signature["money"] = "0.01"
@@ -919,7 +901,7 @@ def test_notify_rejects_order_with_tampered_payment_provider(
     client: TestClient, db_session: Session
 ) -> None:
     order = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
     db_session.execute(text("PRAGMA ignore_check_constraints = ON"))
     db_session.execute(
@@ -942,10 +924,10 @@ def test_provider_trade_number_cannot_settle_two_orders(
     client: TestClient, db_session: Session
 ) -> None:
     first = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
     second = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
 
     first_response = client.post(
@@ -972,7 +954,7 @@ def test_notify_commit_failure_returns_fail_and_rolls_back_everything(
     monkeypatch,
 ) -> None:
     order = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
 
     def fail_commit() -> None:
@@ -998,7 +980,7 @@ def test_paid_order_rejects_different_provider_trade_number_without_recredit(
     client: TestClient, db_session: Session
 ) -> None:
     order = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
     first = client.post(
         "/api/payments/epay/notify",
@@ -1013,7 +995,7 @@ def test_paid_order_rejects_different_provider_trade_number_without_recredit(
         select(WalletAccount).where(WalletAccount.user_id == TEST_USER.id)
     )
     assert (first.text, tampered.text) == ("success", "fail")
-    assert wallet is not None and wallet.balance_units == 50_000
+    assert wallet is not None and wallet.balance_units == 12_340_000
     assert db_session.scalar(select(func.count(WalletEntry.id))) == 1
 
 
@@ -1021,7 +1003,7 @@ def test_expired_order_rejects_valid_notify_without_credit(
     client: TestClient, db_session: Session
 ) -> None:
     order = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     ).json()
     record = db_session.get(PaymentOrder, order["id"])
     assert record is not None
@@ -1045,7 +1027,7 @@ def test_merchant_secret_is_absent_from_payment_responses_and_openapi(
     client: TestClient, app: FastAPI
 ) -> None:
     response = client.post(
-        "/api/payment-orders", json={"product_id": "tp_basic"}
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
     )
     serialized = response.text + str(app.openapi())
 
@@ -1064,7 +1046,6 @@ def test_postgres_eight_concurrent_duplicate_notifies_credit_once(
         postgres_engine,
         epay_settings,
         suffix=suffix,
-        create_product=True,
     )
     fields = signed_callback(order, trade_no="EPAY-PG-DUPLICATE")
 
@@ -1098,13 +1079,11 @@ def test_postgres_concurrent_orders_cannot_share_provider_trade_number(
         postgres_engine,
         epay_settings,
         suffix=first_suffix,
-        create_product=True,
     )
     second = seed_postgres_order(
         postgres_engine,
         epay_settings,
         suffix=second_suffix,
-        create_product=False,
     )
     orders = (first, second)
     lookup_barrier = Barrier(2)
@@ -1162,7 +1141,6 @@ def test_postgres_notify_holding_order_lock_wins_over_later_expiry_scan(
         postgres_engine,
         epay_settings,
         suffix=suffix,
-        create_product=True,
     )
     before_expiry = datetime(2035, 1, 1, tzinfo=timezone.utc)
     after_expiry = before_expiry + timedelta(seconds=2)

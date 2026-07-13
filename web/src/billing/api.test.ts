@@ -33,16 +33,6 @@ const adminFixture: BillingAdminSnapshot = {
     created_at: "2026-07-12T08:00:00Z",
     updated_at: "2026-07-12T08:00:00Z",
   },
-  products: [{
-    id: "prod10",
-    title: "10 yuan credits",
-    price_cny_fen: 1000,
-    credit_units: 10_000_000,
-    enabled: true,
-    sort_order: 10,
-    created_at: "2026-07-12T08:00:00Z",
-    updated_at: "2026-07-12T08:00:00Z",
-  }],
   orders: [{
     id: "order-1",
     user_id: "user-1",
@@ -86,14 +76,14 @@ beforeEach(() => {
 });
 
 describe("billing API transport", () => {
-  it("creates an order from a product id with authenticated CSRF transport", async () => {
+  it("creates an order from an amount with authenticated CSRF transport", async () => {
     authRequestMock.mockResolvedValue({
       order: orderFixture,
       action_url: "https://pay.example/submit.php",
       form_fields: { pid: "1", sign: "signed" },
     });
 
-    await expect(createPaymentOrder("prod10")).resolves.toEqual({
+    await expect(createPaymentOrder(1234)).resolves.toEqual({
       order: orderFixture,
       action_url: "https://pay.example/submit.php",
       form_fields: { pid: "1", sign: "signed" },
@@ -101,7 +91,7 @@ describe("billing API transport", () => {
 
     expect(authRequestMock).toHaveBeenCalledWith("/api/payment-orders", {
       method: "POST",
-      body: JSON.stringify({ product_id: "prod10" }),
+      body: JSON.stringify({ amount_cny_fen: 1234 }),
     });
   });
 
@@ -114,7 +104,6 @@ describe("billing API transport", () => {
   it("loads the administrator billing dashboard from redacted admin endpoints", async () => {
     authRequestMock
       .mockResolvedValueOnce(adminFixture.settings)
-      .mockResolvedValueOnce(adminFixture.products)
       .mockResolvedValueOnce(adminFixture.orders)
       .mockResolvedValueOnce(adminFixture.wallet_entries)
       .mockResolvedValueOnce(adminFixture.reconciliations);
@@ -123,7 +112,6 @@ describe("billing API transport", () => {
 
     expect(authRequestMock.mock.calls.map(([path]) => path)).toEqual([
       "/api/admin/billing/settings",
-      "/api/admin/topup-products?limit=50",
       "/api/admin/payment-orders?limit=50",
       "/api/admin/wallet-entries?limit=50",
       "/api/admin/billing-reconciliations?limit=50",

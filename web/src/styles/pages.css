@@ -782,3 +782,43 @@ dialog[aria-labelledby="resource-upload-title"] .resource-form {
   background: var(--om-primary);
   color: #ffffff;
 }
+
+.billing-topup-form {
+  display: grid;
+  max-width: 520px;
+  gap: 8px;
+}
+
+.billing-topup-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.billing-amount-input {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-height: 42px;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--om-border-strong, var(--om-border));
+  border-radius: 6px;
+  background: var(--om-surface);
+  color: var(--om-text-muted);
+}
+
+.billing-amount-input:focus-within {
+  border-color: var(--om-brand, var(--om-primary));
+  box-shadow: 0 0 0 3px var(--om-brand-soft, rgb(37 99 235 / 12%));
+}
+
+.billing-amount-input input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--om-text);
+  font: inherit;
+}

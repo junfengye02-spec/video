@@ -364,3 +364,9 @@
     justify-self: start;
   }
 }
+
+@media (max-width: 767px) {
+  .billing-topup-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -4,14 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createPaymentOrder,
   getPaymentOrder,
-  listTopupProducts,
   listWalletEntries,
 } from "../billing/api";
 import { useBilling } from "../billing/BillingProvider";
 import type {
   PaymentGatewayAction,
   PaymentOrderView,
-  TopupProductView,
   WalletSummary,
 } from "../billing/types";
 import { WalletPage } from "./WalletPage";
@@ -19,7 +17,6 @@ import { WalletPage } from "./WalletPage";
 vi.mock("../billing/api", () => ({
   createPaymentOrder: vi.fn(),
   getPaymentOrder: vi.fn(),
-  listTopupProducts: vi.fn(),
   listWalletEntries: vi.fn(),
 }));
 
@@ -29,7 +26,6 @@ vi.mock("../billing/BillingProvider", () => ({
 
 const createPaymentOrderMock = vi.mocked(createPaymentOrder);
 const getPaymentOrderMock = vi.mocked(getPaymentOrder);
-const listTopupProductsMock = vi.mocked(listTopupProducts);
 const listWalletEntriesMock = vi.mocked(listWalletEntries);
 const useBillingMock = vi.mocked(useBilling);
 
@@ -39,20 +35,12 @@ const wallet: WalletSummary = {
   available_units: 800,
 };
 
-const product: TopupProductView = {
-  id: "prod10",
-  title: "10\u5143\u989d\u5ea6",
-  price_cny_fen: 1000,
-  credit_units: 10_000_000,
-  active: true,
-};
-
 const orderFixture: PaymentOrderView = {
   id: "order-1",
   merchant_order_masked: "****1001",
-  product_title: "10\u5143\u989d\u5ea6",
-  amount_cny_fen: 1000,
-  credit_units: 10_000_000,
+  product_title: "\u4f59\u989d\u5145\u503c",
+  amount_cny_fen: 1234,
+  credit_units: 12_340_000,
   status: "pending",
   created_at: "2026-07-12T08:00:00Z",
 };
@@ -75,7 +63,6 @@ function renderWallet(
     error: null,
     refreshWallet: vi.fn(),
   });
-  listTopupProductsMock.mockResolvedValue([product]);
   listWalletEntriesMock.mockResolvedValue([]);
   return {
     submitGatewayForm,
@@ -93,7 +80,6 @@ function renderWallet(
 beforeEach(() => {
   createPaymentOrderMock.mockReset();
   getPaymentOrderMock.mockReset();
-  listTopupProductsMock.mockReset();
   listWalletEntriesMock.mockReset();
   useBillingMock.mockReset();
 });
@@ -108,11 +94,14 @@ describe("WalletPage", () => {
     createPaymentOrderMock.mockResolvedValue(actionFixture());
     const { submitGatewayForm } = renderWallet();
 
-    fireEvent.click(await screen.findByRole("button", {
-      name: "\u652f\u4ed8\u5b9d\u5145\u503c10\u5143\u989d\u5ea6",
+    fireEvent.change(await screen.findByRole("spinbutton", {
+      name: "\u5145\u503c\u91d1\u989d\uff08\u5143\uff09",
+    }), { target: { value: "12.34" } });
+    fireEvent.click(screen.getByRole("button", {
+      name: "\u652f\u4ed8\u5b9d\u5145\u503c",
     }));
 
-    expect(createPaymentOrderMock).toHaveBeenCalledWith("prod10");
+    expect(createPaymentOrderMock).toHaveBeenCalledWith(1234);
     await waitFor(() => expect(submitGatewayForm).toHaveBeenCalledWith(
       "https://pay.example/submit.php",
       { pid: "1", sign: "signed" },

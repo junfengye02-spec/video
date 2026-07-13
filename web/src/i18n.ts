@@ -327,16 +327,17 @@ export interface UIStrings {
     balanceLabel: string;
     heldLabel: string;
     availableLabel: string;
-    productsTitle: string;
+    topupTitle: string;
     walletEntriesTitle: string;
     ordersLink: string;
     loading: string;
-    noProducts: string;
     noWalletEntries: string;
     emptyOrders: string;
-    rechargeButton: (title: string) => string;
+    rechargeButton: string;
     creatingOrder: string;
     createOrderError: string;
+    topupAmountLabel: string;
+    invalidTopupAmount: string;
     loadError: string;
     paymentReturnTrusted: string;
     amountLabel: string;
@@ -744,16 +745,17 @@ const STRINGS: Record<Locale, UIStrings> = {
       balanceLabel: "Balance",
       heldLabel: "Estimated maximum hold",
       availableLabel: "Available balance",
-      productsTitle: "Top-up products",
+      topupTitle: "Top up balance",
       walletEntriesTitle: "Wallet entries",
       ordersLink: "Orders",
       loading: "Loading...",
-      noProducts: "No active top-up products.",
       noWalletEntries: "No wallet entries yet.",
       emptyOrders: "No top-up orders yet.",
-      rechargeButton: (title) => `Alipay top up ${title}`,
+      rechargeButton: "Top up with Alipay",
       creatingOrder: "Creating order",
       createOrderError: "Unable to create the payment order.",
+      topupAmountLabel: "Top-up amount (CNY)",
+      invalidTopupAmount: "Enter an amount from CNY 0.01 to CNY 100,000.00.",
       loadError: "Unable to load billing data.",
       paymentReturnTrusted: "Balance follows the server order status.",
       amountLabel: "Amount",
@@ -1167,16 +1169,17 @@ const STRINGS: Record<Locale, UIStrings> = {
       balanceLabel: "\u4f59\u989d",
       heldLabel: "\u9884\u8ba1\u6700\u591a\u6d88\u8017",
       availableLabel: "\u53ef\u7528\u4f59\u989d",
-      productsTitle: "\u5145\u503c\u5957\u9910",
+      topupTitle: "\u4f59\u989d\u5145\u503c",
       walletEntriesTitle: "\u94b1\u5305\u660e\u7ec6",
       ordersLink: "\u5145\u503c\u8ba2\u5355",
       loading: "\u6b63\u5728\u52a0\u8f7d...",
-      noProducts: "\u6682\u65e0\u53ef\u7528\u5145\u503c\u5957\u9910\u3002",
       noWalletEntries: "\u6682\u65e0\u94b1\u5305\u660e\u7ec6\u3002",
       emptyOrders: "\u6682\u65e0\u5145\u503c\u8ba2\u5355\u3002",
-      rechargeButton: (title) => `\u652f\u4ed8\u5b9d\u5145\u503c${title}`,
+      rechargeButton: "\u652f\u4ed8\u5b9d\u5145\u503c",
       creatingOrder: "\u6b63\u5728\u521b\u5efa\u8ba2\u5355",
       createOrderError: "\u65e0\u6cd5\u521b\u5efa\u652f\u4ed8\u8ba2\u5355\u3002",
+      topupAmountLabel: "\u5145\u503c\u91d1\u989d\uff08\u5143\uff09",
+      invalidTopupAmount: "\u8bf7\u8f93\u5165 0.01 \u5143\u81f3 100000.00 \u5143\u7684\u5145\u503c\u91d1\u989d\u3002",
       loadError: "\u65e0\u6cd5\u52a0\u8f7d\u8ba1\u8d39\u6570\u636e\u3002",
       paymentReturnTrusted: "\u4f59\u989d\u4ee5\u670d\u52a1\u5668\u8ba2\u5355\u72b6\u6001\u4e3a\u51c6",
       amountLabel: "\u91d1\u989d",

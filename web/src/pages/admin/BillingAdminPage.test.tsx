@@ -9,12 +9,9 @@ import type { BillingAdminSnapshot } from "../../billing/types";
 import { BillingAdminPage, multiplierTextToBps } from "./BillingAdminPage";
 
 vi.mock("../../billing/api", () => ({
-  createTopupProduct: vi.fn(),
-  deleteTopupProduct: vi.fn(),
   getBillingAdmin: vi.fn(),
   retryReconciliation: vi.fn(),
   updateMultiplier: vi.fn(),
-  updateTopupProduct: vi.fn(),
 }));
 
 const getBillingAdminMock = vi.mocked(getBillingAdmin);
@@ -28,16 +25,6 @@ const snapshot: BillingAdminSnapshot = {
     created_at: "2026-07-12T08:00:00Z",
     updated_at: "2026-07-12T08:00:00Z",
   },
-  products: [{
-    id: "prod10",
-    title: "10\u5143\u989d\u5ea6",
-    price_cny_fen: 1000,
-    credit_units: 10_000_000,
-    enabled: true,
-    sort_order: 10,
-    created_at: "2026-07-12T08:00:00Z",
-    updated_at: "2026-07-12T08:00:00Z",
-  }],
   orders: [{
     id: "order-1",
     user_id: "user-1",
@@ -95,6 +82,13 @@ describe("multiplierTextToBps", () => {
 });
 
 describe("BillingAdminPage", () => {
+  it("does not expose top-up product management", async () => {
+    render(<BillingAdminPage />);
+
+    await screen.findByLabelText("\u8ba1\u8d39\u500d\u7387");
+    expect(screen.queryByText("\u5145\u503c\u5546\u54c1")).not.toBeInTheDocument();
+  });
+
   it("saves a decimal multiplier as basis points with a reason", async () => {
     render(<BillingAdminPage />);
 
