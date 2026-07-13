@@ -228,7 +228,7 @@ Provider billing is alias based. Configure `NEWAPI_TEXT_TOKEN_KEYS_JSON`, `NEWAP
 
 Set `BILLING_REFERENCE_RECOVERY_SECONDS`, `BILLING_RECEIPT_DEADLINE_SECONDS`, and `BILLING_HOLD_TIMEOUT_SECONDS` to the operator-approved recovery windows. NewAPI quote IDs, token aliases, quote billing fingerprints, and staged receipt metadata are retained so accepted provider calls can be recovered without replaying the accepted quote. If a provider accepted a request but the response was lost, do not submit the quote again; run the reconciliation worker and let the reference/receipt recovery path resolve the original job. Receipts with `refund_pending` mean the provider has not completed the refund; keep the wallet hold/reconciliation open until a later receipt reports `refunded` or the incident is manually resolved with audit notes.
 
-Configure EPay/Alipay with `EPAY_PAY_ADDRESS`, `EPAY_ID`, and `EPAY_KEY`. `PUBLIC_ORIGIN` must be the public HTTPS origin because it derives the callback URLs sent to EPay: `/api/payments/epay/notify` and `/api/payments/epay/return`. Only a signed notify may credit a wallet. A signed return URL is display-only and must never credit a pending order by itself.
+Configure EPay/Alipay with the NewAPI-compatible base `EPAY_PAY_ADDRESS`, `EPAY_ID`, and `EPAY_KEY`; OpenMontage appends `/submit.php` to the configured base before submitting the signed payment form. `PUBLIC_ORIGIN` must be the public HTTPS origin because it derives the callback URLs sent to EPay: `/api/payments/epay/notify` and `/api/payments/epay/return`. Only a signed notify may credit a wallet. A signed return URL is display-only and must never credit a pending order by itself.
 
 Run exactly one supervised billing reconciliation worker per environment:
 

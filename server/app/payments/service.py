@@ -4,6 +4,8 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from posixpath import join as join_url_path
+from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -47,10 +49,15 @@ def _epay_credentials(settings: AppSettings) -> tuple[str, str, str]:
     ):
         raise EpayNotConfigured("EPay is not configured")
     return (
-        settings.epay_pay_address,
+        _epay_submit_url(settings.epay_pay_address),
         settings.epay_id,
         settings.epay_key.get_secret_value(),
     )
+
+
+def _epay_submit_url(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    return urlunparse(parsed._replace(path=join_url_path(parsed.path, "submit.php")))
 
 
 def _valid_provider_trade_no(value: str | None) -> bool:

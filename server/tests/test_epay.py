@@ -167,7 +167,7 @@ def epay_settings() -> AppSettings:
         environment="test",
         auth_hmac_secret="x" * 32,
         public_origin="https://studio.example.com",
-        epay_pay_address="https://pay.example.com/submit.php",
+        epay_pay_address="https://pay.example.com/api",
         epay_id="1001",
         epay_key="merchant-secret",
     )
@@ -651,7 +651,7 @@ def test_create_order_snapshots_requested_amount_as_wallet_credit(
     assert payload["price_cny_fen"] == 1_234
     assert payload["credit_units"] == 12_340_000
     assert payload["status"] == "pending"
-    assert payload["action_url"] == "https://pay.example.com/submit.php"
+    assert payload["action_url"] == "https://pay.example.com/api/submit.php"
     assert payload["form"]["pid"] == "1001"
     assert payload["form"]["type"] == "alipay"
     assert payload["form"]["name"] == "Balance top-up"
