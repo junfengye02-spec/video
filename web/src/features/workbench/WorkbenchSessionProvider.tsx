@@ -1160,5 +1160,3 @@ export function WorkbenchSessionProvider({
     </WorkbenchContext.Provider>
   );
 }
-
-
