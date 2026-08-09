@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 // @ts-expect-error The Vitest runtime provides Node built-ins, but the browser tsconfig omits them.
 import { readFileSync } from "node:fs";
 import { MemoryRouter } from "react-router-dom";
@@ -10,7 +10,7 @@ afterEach(() => {
 });
 
 describe("AppShell", () => {
-  it("renders supplied shell slots and places project navigation and breadcrumb", () => {
+  it("renders supplied shell slots and places project navigation in the topbar", () => {
     render(
       <MemoryRouter
         future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
@@ -28,10 +28,10 @@ describe("AppShell", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole("navigation", { name: "面包屑" })).toHaveTextContent(
+    expect(screen.getByRole("navigation", { name: "项目位置" })).toHaveTextContent(
       "项目列表Rain Alley",
     );
-    expect(screen.getByRole("complementary", { name: "项目导航" })).toHaveTextContent("分镜编辑");
+    expect(screen.getByRole("link", { name: "分镜编辑" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "账户动作" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "钱包 1,234" })).toBeInTheDocument();
   });
@@ -52,7 +52,7 @@ describe("AppShell", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(screen.getByRole("link", { name: "OpenMontage" }));
+    fireEvent.click(screen.getByRole("link", { name: "mise studio" }));
 
     expect(onBeforeNavigate).toHaveBeenCalledTimes(1);
   });
@@ -73,12 +73,30 @@ describe("AppShell", () => {
     expect(source).not.toMatch(providerConfigPattern);
   });
 
-  it("keeps action slots wrapped in the mobile shell", () => {
-    const responsiveStyles = readFileSync("src/styles/responsive.css", "utf8");
+  it("opens an accessible narrow-screen menu without losing supplied slots", () => {
+    render(
+      <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <AppShell
+          project={null}
+          breadcrumb={null}
+          accountAction={<button type="button">账户动作</button>}
+          billingAction={<a href="/wallet">额度 1,234</a>}
+        >
+          <div>项目列表</div>
+        </AppShell>
+      </MemoryRouter>,
+    );
 
-    expect(responsiveStyles).toMatch(/@media \(max-width: 767px\)/);
-    expect(responsiveStyles).toMatch(/\.workbench-topbar-actions\s*\{[\s\S]*flex-wrap:\s*wrap/);
-    expect(responsiveStyles).toMatch(/\.workbench-account\s*\{[\s\S]*text-overflow:\s*ellipsis/);
-    expect(responsiveStyles).toMatch(/\.workbench-topbar-actions button\s*\{[\s\S]*flex:\s*0 0 auto/);
+    const menuButton = screen.getByRole("button", { name: "打开导航菜单" });
+    expect(menuButton).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(menuButton);
+
+    const menu = screen.getByRole("region", { name: "移动端导航菜单" });
+    expect(screen.getByRole("button", { name: "关闭导航菜单" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(within(menu).getByRole("link", { name: "额度 1,234" })).toBeInTheDocument();
+    expect(within(menu).getByRole("button", { name: "账户动作" })).toBeInTheDocument();
   });
 });

@@ -1,9 +1,63 @@
 import type {
   ContinuityPlan,
+  GenerateImagesResponse,
   ProjectType,
   ShortDramaProjectResponse,
   Shot,
 } from "../domain/types";
+
+export function createAcceptedImageTask(
+  taskId = "image-task-1",
+  targetEntityId: string | null = null,
+): GenerateImagesResponse {
+  const itemId = `${taskId}-item`;
+  return {
+    task_id: taskId,
+    status: "queued",
+    deduplicated: false,
+    task: {
+      id: taskId,
+      project_id: "p1",
+      task_type: "resource_image.generate",
+      status: "queued",
+      idempotency_key: `key-${taskId}`,
+      progress: 0,
+      total_items: 1,
+      completed_items: 0,
+      failed_items: 0,
+      error_code: null,
+      error_message: null,
+      created_at: "2026-07-21T00:00:00Z",
+      updated_at: "2026-07-21T00:00:00Z",
+      items: [{
+        id: itemId,
+        batch_id: taskId,
+        position: 0,
+        task_type: "resource_image.generate",
+        status: "queued",
+        idempotency_key: `item-${taskId}`,
+        input: {},
+        target_entity_type: targetEntityId ? "resource_asset" : null,
+        target_entity_id: targetEntityId,
+        target_entity_version: targetEntityId ? 1 : null,
+        attempt_count: 0,
+        max_attempts: 3,
+        progress: 0,
+        retryable: true,
+        error_code: null,
+        error_message: null,
+        result: null,
+        billing_job_id: null,
+        provider_wait_started_at: null,
+        provider_next_poll_at: null,
+        provider_poll_count: 0,
+        dependencies: [],
+        created_at: "2026-07-21T00:00:00Z",
+        updated_at: "2026-07-21T00:00:00Z",
+      }],
+    },
+  };
+}
 
 export function createShot(overrides: Partial<Shot> = {}): Shot {
   return {
@@ -62,6 +116,21 @@ export function createContinuityPlan(projectType: ProjectType): ContinuityPlan {
       prop_state: ["信封尚未拆开"],
       character_status: ["玛拉保持警惕"],
       current_locations: ["雨巷"],
+    },
+    sound: {
+      narration: "克制的第三人称旁白",
+      dialogue: "对白自然，避免解释性台词",
+      ambience: "雨声与远处车流",
+      music_direction: "稀疏钢琴与低频氛围",
+      prompt: "近距离雨夜悬疑声音场",
+      storyboard_prompt_integration: true,
+    },
+    generation_preferences: {
+      image_model: "gpt-image-2",
+      video_model: "omni_flash-10s",
+      image_size: "1024x1024",
+      image_quality: "standard",
+      aspect_ratio: "16:9",
     },
   };
 }

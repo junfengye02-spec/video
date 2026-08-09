@@ -150,6 +150,10 @@ That's it. The agent researches your topic with live web search, generates AI im
 
 The local web workbench is a key-only MVP for SYAPI users. It does not create OpenMontage accounts, store raw gateway keys, or manage billing. The workbench now creates storyboard shots through the selected text model, preserves structured shot language, validates supplied provider keys, streams live production progress, and restores the latest render state when a project is reloaded. Shot regeneration uses the chosen video model with bound character, scene, and prop references so the generated prompt stays asset-aware.
 
+### Browser-local MVP storage
+
+The public MVP stores each user's project draft in that browser. Project metadata and the recent project pointer live in IndexedDB, while generated media is cached in browser storage when possible. The backend does not expose a global latest project in public mode, and backend media files are temporary with a 3-day retention window. Export project backups and download final videos before clearing browser data.
+
 ### Short Drama Workbench Production Contract
 
 The short-drama Workbench generates structured storyboard shots through the selected text model, with shot intent and shot language including shot size, camera movement, lens, depth of field, lighting, and color temperature. Shot saves update metadata and refresh workflow artifacts; shot regeneration is a separate video-generation action that calls the selected video model and includes bound character, scene, and prop references in the generation prompt. Provider key checks validate the requested models, the Production panel streams job progress and restores the latest render report on reload, and consistency checks cover shot-language and asset-binding integrity.
@@ -175,6 +179,37 @@ Make a 60-second urban reversal short drama: a woman discovers the truth behind 
 ```
 
 Workbench artifacts are stored locally in SQLite plus `projects/<project-id>/artifacts/`. Generated frontend build files and local workbench data are ignored by git.
+
+### mise studio frontend validation
+
+Run the account-backed local studio from the repository root with the backend and frontend in separate terminals:
+
+```powershell
+.venv\Scripts\python.exe -m uvicorn server.app.main:create_app --factory --host 127.0.0.1 --port 8787
+cd web
+npm.cmd install
+npm.cmd run dev -- --host 127.0.0.1 --port 5173
+```
+
+The Phase 13 verification commands are:
+
+```powershell
+cd web
+npm.cmd test -- --run
+npm.cmd run build
+cd ..
+.venv\Scripts\python.exe -m pytest server\tests
+.venv\Scripts\python.exe -m pytest server\tests\test_api.py server\tests\test_project_ownership.py
+git diff --check
+```
+
+Browser acceptance covers the public account pages, project creation, inspiration and intent confirmation, all six blueprint approvals and final approval, storyboard, global settings, resource library, production recovery and quote confirmation, wallet, orders, and billing administration. It also covers expected account, workflow revision, resource fallback, permission, payment, and administrator confirmation failures; keyboard and dialog focus behavior; ARIA labelling; reduced motion; and the five target viewports from `1600x1000` through `390x844`.
+
+The 13 final `1600x1000` product screenshots are in [`output/mise-studio-frontend-final/`](output/mise-studio-frontend-final/). The labelled 4x4 overview is [`00-contact-sheet.png`](output/mise-studio-frontend-final/00-contact-sheet.png). These files are the final delivery and do not replace earlier design drafts elsewhere under `output/`.
+
+Known non-blocking verification warnings are the Vite main JavaScript chunk exceeding 500 kB, React Router future-flag notices in a small number of isolated `MemoryRouter` tests, and a Windows `EPERM` message when Lighthouse removes its temporary browser profile after writing a valid report.
+
+Acceptance fixtures use an isolated temporary database and fake provider and payment boundaries. Verification must not use real provider credentials, create real media, submit a real payment, recharge or refund an account, start a real render, download production media, or adjust administrator balances. Do not put passwords, cookies, tokens, provider keys, or temporary absolute paths in the screenshots or this README.
 
 ## Production account deployment
 
@@ -216,15 +251,58 @@ python -m alembic current
 python -m alembic check
 ```
 
-Revision `003` refuses to run while any unowned project remains. Authentication reserves migration revisions `001-009`; billing owns `010-019`.
+Revision `003` refuses to run while any unowned project remains. Authentication reserves migration revisions `001-009`; the previous billing/task deployment handoff covered `010-019`, with video-model duration settings at `019`; generation-unit segment coverage extends the current chain through `020`.
 
 For a phase-two database rollback, stop application writes, deploy the matching older application, and run `python -m alembic downgrade 002`. Restore the pre-migration PostgreSQL/SQLite/artifact backups if the ownership import itself must be reversed. Do not downgrade only the database while newer application instances are still serving traffic.
+
+### Generation units contract 2 rollout
+
+`GENERATION_UNITS_V2` is a fail-closed rollout gate. Contract 2 requests are accepted only when the flag is enabled, the client sends contract version `2`, Alembic reports revision `020` or newer, and the required `019`/`020` tables and columns are present. A missing or half-applied schema returns `generation_units_schema_not_ready`; an old or mixed client returns `generation_units_contract_incompatible`.
+
+Use a maintenance window or an atomic application rollout so the contract-2 web bundle is not served while the flag is still disabled. Back up the database and project artifacts, then apply this order to each isolated environment:
+
+```bash
+# 1. Keep GENERATION_UNITS_V2=false while deploying the contract-2 server.
+python -m alembic upgrade 020
+python -m alembic current
+python -m alembic check
+
+# 2. Deploy the matching contract-2 web bundle, then enable the gate and restart.
+# GENERATION_UNITS_V2=true
+```
+
+Verify one authenticated plan preview sends `contract_version: 2` before reopening paid submission traffic. Old clients that omit the version are deliberately rejected instead of entering the new planner. The legacy shot endpoint remains a server-side adapter for compatible single-shot plans, while a project that has submitted in v1 or v2 mode cannot silently switch modes.
+
+For application rollback, disable `GENERATION_UNITS_V2` first and restore the matching server and web bundles. Do not downgrade `020` while generation-unit tasks are queued or running, and do not rewrite `profile_json`, `profile_revision`, billing records, or published media: those frozen snapshots remain authoritative. Leave the additive schema in place unless a separately rehearsed database rollback is required after all v2 activity has stopped.
+
+### Head-compatible legacy project and asset recovery
+
+The Wave 2 recovery commands run against the current database head and do not require a downgrade to revision `002`. Before using them, stop application writes and independently back up PostgreSQL, `workbench.sqlite3`, and the complete `projects/` tree. Keep the backups until project ownership, asset counts, and media downloads have been verified.
+
+Run the read-only audit first:
+
+```bash
+python -m server.manage audit-legacy-assets --sqlite-path workbench.sqlite3 --projects-root projects
+```
+
+The JSON report contains the SQLite project count, project-directory count, pending and conflicting project IDs, primary `asset_library.json` and fallback `series_bible.assets` record counts, deduplicated resources, ready and missing files, source classifications, and rejected unsafe paths. The audit opens SQLite in read-only mode and does not write PostgreSQL or the project tree.
+
+Every restore requires an explicit active owner account. Preview all projects or one project before allowing writes:
+
+```bash
+python -m server.manage restore-legacy-assets --sqlite-path workbench.sqlite3 --projects-root projects --owner-email owner@example.com --dry-run
+python -m server.manage restore-legacy-assets --sqlite-path workbench.sqlite3 --projects-root projects --owner-email owner@example.com --project-id <project-id> --dry-run
+```
+
+Only after the backups and dry-run report have been reviewed, omit `--dry-run` to apply the transaction. The command refuses to transfer a project owned by another user, preserves same-owner projects, and is idempotent by project and safe project-relative resource path. It writes metadata only: an existing regular file is marked `ready`, an absent file is marked `missing`, and no media file is copied or fabricated. Absolute paths, traversal paths, and link or junction escapes are rejected. Resources with unknown provenance remain reported and are not mislabeled as uploads.
+
+Revision `014` adds a dedicated internal recovery identity for legacy AI resources that predate `generation_jobs`. The restore command keeps them classified as `ai_generated`, preserves any legacy prompt and model metadata, and makes repeated restores idempotent without exposing the recovery key through the API. New AI generations still require a valid billed and visible generation job. Deleted binary files cannot be reconstructed; their recovered metadata remains visible with `status=missing`.
 
 Password reset, account bans, and administrator role changes revoke affected sessions. Operational account changes must call `SessionStore.revoke_all(user.id)` after the database commit; deleting browser cookies alone is not server-side revocation. Rotating `AUTH_HMAC_SECRET` invalidates verification material and should be treated as a coordinated incident operation, not routine session cleanup.
 
 ### Billing and payment operations
 
-Provider billing is alias based. Configure `NEWAPI_TEXT_TOKEN_KEYS_JSON`, `NEWAPI_IMAGE_TOKEN_KEYS_JSON`, and `NEWAPI_VIDEO_TOKEN_KEYS_JSON` as JSON objects whose keys are non-secret aliases and whose values come from the secret store. Point `NEWAPI_TEXT_CURRENT_TOKEN_ALIAS`, `NEWAPI_IMAGE_CURRENT_TOKEN_ALIAS`, and `NEWAPI_VIDEO_CURRENT_TOKEN_ALIAS` at the active alias for each capability. During rotation, add the new alias, switch the current alias, and keep old aliases until no `generation_jobs`, receipts, or open reconciliations reference them. Do not put raw NewAPI tokens in README, `.env.example`, browser storage, project exports, responses, or logs.
+Provider billing is alias based. Configure `NEWAPI_TEXT_TOKEN_KEYS_JSON`, `NEWAPI_IMAGE_TOKEN_KEYS_JSON`, and `NEWAPI_VIDEO_TOKEN_KEYS_JSON` as JSON objects whose keys are non-secret aliases and whose values come from the secret store. Point `NEWAPI_TEXT_CURRENT_TOKEN_ALIAS`, `NEWAPI_IMAGE_CURRENT_TOKEN_ALIAS`, and `NEWAPI_VIDEO_CURRENT_TOKEN_ALIAS` at the active alias for each capability. Set `NEWAPI_TEXT_FIXED_GROUP`, `NEWAPI_IMAGE_FIXED_GROUP`, and `NEWAPI_VIDEO_FIXED_GROUP` to the exact fixed groups returned by quotes for those tokens; mismatches fail closed before any provider call. During rotation, add the new alias, switch the current alias, and keep old aliases until no `generation_jobs`, receipts, or open reconciliations reference them. Do not put raw NewAPI tokens in README, `.env.example`, browser storage, project exports, responses, or logs.
 
 Set `BILLING_REFERENCE_RECOVERY_SECONDS`, `BILLING_RECEIPT_DEADLINE_SECONDS`, and `BILLING_HOLD_TIMEOUT_SECONDS` to the operator-approved recovery windows. NewAPI quote IDs, token aliases, quote billing fingerprints, and staged receipt metadata are retained so accepted provider calls can be recovered without replaying the accepted quote. If a provider accepted a request but the response was lost, do not submit the quote again; run the reconciliation worker and let the reference/receipt recovery path resolve the original job. Receipts with `refund_pending` mean the provider has not completed the refund; keep the wallet hold/reconciliation open until a later receipt reports `refunded` or the incident is manually resolved with audit notes.
 
@@ -235,6 +313,13 @@ Run exactly one supervised billing reconciliation worker per environment:
 ```bash
 python -m server.billing_worker
 ```
+
+The worker owns a database heartbeat lease controlled by
+`BILLING_WORKER_HEARTBEAT_TTL_SECONDS` (15 seconds by default). Video task
+submission fails closed with `503 billing_reconciliation_unavailable` before a
+quote or provider request whenever that lease is missing or stale. A second
+worker exits instead of taking over a live lease; supervisors should restart a
+worker only after the previous lease expires.
 
 For operator recovery, a one-shot run is also available:
 

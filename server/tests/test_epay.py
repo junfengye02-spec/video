@@ -38,7 +38,7 @@ from server.app.payments.epay import (
     sign_epay,
     verify_epay,
 )
-from server.app.payments.models import PaymentOrder
+from server.app.payments.models import PaymentOrder, TopupProduct
 from server.app.payments.router import router as payments_router
 from server.app.payments.service import (
     create_epay_order,
@@ -66,15 +66,15 @@ OTHER_USER = CurrentUser(
 
 
 def signed_callback(order: dict[str, object], **overrides: str) -> dict[str, str]:
+    action = order.get("form")
+    signed_action = action if isinstance(action, dict) else {}
     fields = {
         "pid": "1001",
         "type": "alipay",
-        "out_trade_no": str(order["merchant_order_no"]),
+        "out_trade_no": str(signed_action.get("out_trade_no", "")),
         "trade_no": "EPAY-TRADE-1",
-        "name": str(order["product_title"]),
-        "money": format(
-            Decimal(int(order["price_cny_fen"])) / Decimal(100), ".2f"
-        ),
+        "name": str(signed_action.get("name", order["product_title"])),
+        "money": str(signed_action.get("money", "0.00")),
         "trade_status": "TRADE_SUCCESS",
     }
     fields.update(overrides)
@@ -646,9 +646,8 @@ def test_create_order_snapshots_requested_amount_as_wallet_credit(
 
     assert response.status_code == 201
     payload = response.json()
-    assert payload["product_id"] == "direct"
     assert payload["product_title"] == "Balance top-up"
-    assert payload["price_cny_fen"] == 1_234
+    assert payload["amount_cny_fen"] == 1_234
     assert payload["credit_units"] == 12_340_000
     assert payload["status"] == "pending"
     assert payload["action_url"] == "https://pay.example.com/api/submit.php"
@@ -689,8 +688,8 @@ def test_create_order_accepts_only_bounded_amount_and_uses_opaque_order_no(
     assert boolean.status_code == 422
     assert decimal.status_code == 422
     merchant_numbers = {
-        first.json()["merchant_order_no"],
-        second.json()["merchant_order_no"],
+        first.json()["form"]["out_trade_no"],
+        second.json()["form"]["out_trade_no"],
     }
     assert len(merchant_numbers) == 2
     assert all(re.fullmatch(r"OM[0-9a-f]{40}", number) for number in merchant_numbers)
@@ -728,7 +727,96 @@ def test_order_reads_are_current_user_scoped_and_expire(
     assert orders.status_code == 200
     assert [order["id"] for order in orders.json()] == [own.id]
     assert orders.json()[0]["status"] == "expired"
+    assert "merchant_order_no" not in orders.text
+    assert "provider_trade_no" not in orders.text
     assert hidden.status_code == 404
+
+
+def test_order_reads_support_bounded_search_status_and_offset_pagination(
+    client: TestClient, db_session: Session
+) -> None:
+    created = [
+        client.post("/api/payment-orders", json={"amount_cny_fen": amount}).json()
+        for amount in (100, 200, 300)
+    ]
+    paid = db_session.get(PaymentOrder, created[1]["id"])
+    assert paid is not None
+    paid.status = "paid"
+    paid.paid_at = datetime.now(timezone.utc)
+    db_session.commit()
+
+    by_status = client.get("/api/payment-orders?status=paid&limit=10&offset=0")
+    by_id = client.get(
+        "/api/payment-orders",
+        params={"search": created[0]["id"][-8:], "limit": 10, "offset": 0},
+    )
+    page = client.get("/api/payment-orders?limit=1&offset=1")
+
+    assert [order["id"] for order in by_status.json()] == [created[1]["id"]]
+    assert [order["id"] for order in by_id.json()] == [created[0]["id"]]
+    assert len(page.json()) == 1
+
+
+def test_wallet_entry_reads_support_offset_pagination(
+    client: TestClient, db_session: Session
+) -> None:
+    for index in range(3):
+        credit(
+            db_session,
+            TEST_USER.id,
+            index + 1,
+            kind="topup",
+            source_id=f"paged-order-{index}",
+            idempotency_key=f"topup:paged-order-{index}",
+        )
+    db_session.commit()
+
+    first = client.get("/api/wallet/entries?limit=1&offset=0").json()
+    second = client.get("/api/wallet/entries?limit=1&offset=1").json()
+
+    assert len(first) == len(second) == 1
+    assert first[0]["id"] != second[0]["id"]
+
+
+def test_topup_products_are_server_owned_and_only_enabled_products_can_create_orders(
+    client: TestClient, db_session: Session
+) -> None:
+    db_session.add_all([
+        TopupProduct(
+            id="starter",
+            title="Starter package",
+            price_cny_fen=1_000,
+            credit_units=12_000_000,
+            enabled=True,
+            sort_order=1,
+        ),
+        TopupProduct(
+            id="disabled",
+            title="Disabled package",
+            price_cny_fen=2_000,
+            credit_units=24_000_000,
+            enabled=False,
+            sort_order=0,
+        ),
+    ])
+    db_session.commit()
+
+    products = client.get("/api/topup-products")
+    created = client.post("/api/payment-orders", json={"product_id": "starter"})
+    disabled = client.post("/api/payment-orders", json={"product_id": "disabled"})
+
+    assert products.status_code == 200
+    assert products.json() == [{
+        "id": "starter",
+        "title": "Starter package",
+        "price_cny_fen": 1_000,
+        "credit_units": 12_000_000,
+    }]
+    assert created.status_code == 201
+    assert created.json()["product_title"] == "Starter package"
+    assert created.json()["amount_cny_fen"] == 1_000
+    assert created.json()["credit_units"] == 12_000_000
+    assert disabled.status_code == 404
 
 
 def test_wallet_and_entries_are_always_current_user_scoped(
@@ -757,11 +845,13 @@ def test_wallet_and_entries_are_always_current_user_scoped(
     oversized = client.get("/api/wallet/entries", params={"limit": 101})
 
     assert wallet.status_code == 200
-    assert wallet.json()["user_id"] == TEST_USER.id
     assert wallet.json()["balance_units"] == 123
+    assert set(wallet.json()) == {"balance_units", "held_units", "available_units"}
     assert entries.status_code == 200
-    assert [entry["user_id"] for entry in entries.json()] == [TEST_USER.id]
-    assert entries.json()[0]["idempotency_key"] == "topup:own-order"
+    assert entries.json()[0]["source_id"] == "own-order"
+    assert "user_id" not in entries.text
+    assert "wallet_id" not in entries.text
+    assert "idempotency_key" not in entries.text
     assert oversized.status_code == 422
 
 
@@ -788,10 +878,42 @@ def test_browser_return_routes_display_state_without_crediting(
         select(WalletAccount).where(WalletAccount.user_id == TEST_USER.id)
     )
     assert valid.status_code == 303
-    assert valid.headers["location"].endswith("/recharge?payment=pending")
+    assert valid.headers["location"].endswith(
+        f"/wallet?payment=pending&order_id={order['id']}"
+    )
     assert invalid.status_code == 303
-    assert invalid.headers["location"].endswith("/recharge?payment=failed")
+    assert invalid.headers["location"].endswith(
+        f"/wallet?payment=pending&order_id={order['id']}"
+    )
     assert wallet is not None and wallet.balance_units == 0
+
+
+def test_browser_return_uses_paid_order_state_when_notify_already_settled(
+    client: TestClient, db_session: Session
+) -> None:
+    order = client.post(
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
+    ).json()
+    notify = client.post(
+        "/api/payments/epay/notify", data=signed_callback(order)
+    )
+    tampered_return = signed_callback(order)
+    tampered_return["money"] = "0.01"
+    returned = client.get(
+        "/api/payments/epay/return",
+        params=tampered_return,
+        follow_redirects=False,
+    )
+
+    wallet = db_session.scalar(
+        select(WalletAccount).where(WalletAccount.user_id == TEST_USER.id)
+    )
+    assert notify.text == "success"
+    assert returned.status_code == 303
+    assert returned.headers["location"].endswith(
+        f"/wallet?payment=paid&order_id={order['id']}"
+    )
+    assert wallet is not None and wallet.balance_units == 12_340_000
 
 
 def test_notify_post_settles_once_and_get_duplicate_is_success(
@@ -821,6 +943,30 @@ def test_notify_post_settles_once_and_get_duplicate_is_success(
     assert entry is not None
     assert entry.idempotency_key == f"topup:{order.id}"
     assert entry.source_type == "payment_order"
+
+
+def test_notify_accepts_signed_channel_order_number_and_credits_wallet(
+    client: TestClient, db_session: Session
+) -> None:
+    order_payload = client.post(
+        "/api/payment-orders", json={"amount_cny_fen": 1_234}
+    ).json()
+    fields = signed_callback(
+        order_payload,
+        channel_order_no="2026071322001481241449734914",
+    )
+
+    response = client.get("/api/payments/epay/notify", params=fields)
+
+    db_session.expire_all()
+    order = db_session.get(PaymentOrder, order_payload["id"])
+    wallet = db_session.scalar(
+        select(WalletAccount).where(WalletAccount.user_id == TEST_USER.id)
+    )
+    assert response.text == "success"
+    assert order is not None and order.status == "paid"
+    assert wallet is not None and wallet.balance_units == 12_340_000
+    assert db_session.scalar(select(func.count(WalletEntry.id))) == 1
 
 
 @pytest.mark.parametrize(

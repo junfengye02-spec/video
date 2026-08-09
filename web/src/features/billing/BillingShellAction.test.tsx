@@ -5,7 +5,7 @@ import { BillingShellAction } from "./BillingShellAction";
 
 const billingMocks = vi.hoisted(() => ({
   value: {
-    wallet: { balance_units: 1500, held_units: 0, available_units: 1234 },
+    wallet: { balance_units: 1_500_000_000, held_units: 0, available_units: 1_234_000_000 },
     loading: false,
     error: null,
     refreshWallet: vi.fn(),
@@ -19,7 +19,7 @@ vi.mock("../../billing/BillingProvider", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   billingMocks.value = {
-    wallet: { balance_units: 1500, held_units: 0, available_units: 1234 },
+    wallet: { balance_units: 1_500_000_000, held_units: 0, available_units: 1_234_000_000 },
     loading: false,
     error: null,
     refreshWallet: vi.fn(),
@@ -31,15 +31,15 @@ afterEach(() => {
 });
 
 describe("BillingShellAction", () => {
-  it("links to wallet and orders with the available balance", () => {
+  it("links to the wallet with the available balance", () => {
     render(
       <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
         <BillingShellAction />
       </MemoryRouter>,
     );
 
-    expect(screen.getByRole("link", { name: "钱包 1,234" })).toHaveAttribute("href", "/wallet");
-    expect(screen.getByRole("link", { name: "订单" })).toHaveAttribute("href", "/orders");
+    expect(screen.getByRole("link", { name: "钱包 ¥1,234.00" })).toHaveAttribute("href", "/wallet");
+    expect(screen.queryByRole("link", { name: "订单" })).not.toBeInTheDocument();
   });
 
   it("uses the guard for billing navigation and hides the balance while loading", () => {

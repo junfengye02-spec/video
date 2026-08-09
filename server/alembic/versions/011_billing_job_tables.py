@@ -88,13 +88,22 @@ def upgrade() -> None:
         ["user_id", "created_at"],
         unique=False,
     )
-    op.create_foreign_key(
-        "fk_wallet_holds_chargeable_job_owner",
-        "wallet_holds",
-        "generation_jobs",
-        ["job_id", "user_id", "job_chargeable"],
-        ["id", "user_id", "chargeable"],
-    )
+    if op.get_bind().dialect.name == "sqlite":
+        with op.batch_alter_table("wallet_holds") as batch_op:
+            batch_op.create_foreign_key(
+                "fk_wallet_holds_chargeable_job_owner",
+                "generation_jobs",
+                ["job_id", "user_id", "job_chargeable"],
+                ["id", "user_id", "chargeable"],
+            )
+    else:
+        op.create_foreign_key(
+            "fk_wallet_holds_chargeable_job_owner",
+            "wallet_holds",
+            "generation_jobs",
+            ["job_id", "user_id", "job_chargeable"],
+            ["id", "user_id", "chargeable"],
+        )
 
     op.create_table(
         "cost_receipts",
@@ -214,11 +223,17 @@ def downgrade() -> None:
     op.drop_table("billing_settings")
     op.drop_index("ix_cost_receipts_reference", table_name="cost_receipts")
     op.drop_table("cost_receipts")
-    op.drop_constraint(
-        "fk_wallet_holds_chargeable_job_owner",
-        "wallet_holds",
-        type_="foreignkey",
-    )
+    if op.get_bind().dialect.name == "sqlite":
+        with op.batch_alter_table("wallet_holds") as batch_op:
+            batch_op.drop_constraint(
+                "fk_wallet_holds_chargeable_job_owner", type_="foreignkey"
+            )
+    else:
+        op.drop_constraint(
+            "fk_wallet_holds_chargeable_job_owner",
+            "wallet_holds",
+            type_="foreignkey",
+        )
     op.drop_index("ix_generation_jobs_user_created", table_name="generation_jobs")
     op.drop_index("ix_generation_jobs_status_deadline", table_name="generation_jobs")
     op.drop_index("ix_generation_jobs_project_created", table_name="generation_jobs")

@@ -17,6 +17,11 @@ import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
 import { CollageBurst, CollageBurstProps } from "./CollageBurst";
 import { LyricOverlay, LyricOverlayProps } from "./LyricOverlay";
 import { ShuangwenManga } from "./ShuangwenManga";
+import {
+  WorkbenchRenderer,
+  WorkbenchRendererProps,
+  calculateWorkbenchMetadata,
+} from "./WorkbenchRenderer";
 
 // ---------------------------------------------------------------------------
 // Theme System — prevents every video from looking like dark fintech
@@ -136,6 +141,20 @@ const calculateMetadata: CalculateMetadataFunction<ExplainerProps> = async ({
 export const Root: React.FC = () => {
   return (
     <>
+      <Composition
+        id="WorkbenchRenderer"
+        component={WorkbenchRenderer}
+        durationInFrames={30}
+        fps={30}
+        width={1920}
+        height={1080}
+        defaultProps={{
+          total_duration_seconds: 1,
+          output: {width: 1920, height: 1080, fps: 30},
+          clips: [],
+        } as WorkbenchRendererProps}
+        calculateMetadata={calculateWorkbenchMetadata}
+      />
       <Composition
         id="Explainer"
         component={Explainer}

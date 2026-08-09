@@ -14,28 +14,20 @@ router = APIRouter()
 
 def _wallet_payload(wallet: WalletAccount) -> dict[str, object]:
     return {
-        "id": wallet.id,
-        "user_id": wallet.user_id,
         "balance_units": wallet.balance_units,
         "held_units": wallet.held_units,
         "available_units": wallet.balance_units - wallet.held_units,
-        "version": wallet.version,
-        "created_at": wallet.created_at,
-        "updated_at": wallet.updated_at,
     }
 
 
 def _entry_payload(entry: WalletEntry) -> dict[str, object]:
     return {
         "id": entry.id,
-        "wallet_id": entry.wallet_id,
-        "user_id": entry.user_id,
         "amount_units": entry.amount_units,
         "balance_after_units": entry.balance_after_units,
         "kind": entry.kind,
         "source_type": entry.source_type,
         "source_id": entry.source_id,
-        "idempotency_key": entry.idempotency_key,
         "created_at": entry.created_at,
     }
 
@@ -56,6 +48,7 @@ def get_wallet(
 @router.get("/api/wallet/entries")
 def get_wallet_entries(
     limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
     current: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
@@ -63,6 +56,7 @@ def get_wallet_entries(
         select(WalletEntry)
         .where(WalletEntry.user_id == current.id)
         .order_by(WalletEntry.created_at.desc(), WalletEntry.id.desc())
+        .offset(offset)
         .limit(limit)
     )
     return [_entry_payload(entry) for entry in entries]

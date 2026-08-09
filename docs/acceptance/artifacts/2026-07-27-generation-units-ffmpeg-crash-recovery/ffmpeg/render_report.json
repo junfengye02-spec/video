@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "outputs": [
+    {
+      "path": "C:\\Users\\zhuba\\Desktop\\OpenMontage\\videro\\tmp\\generation-units-real-ffmpeg-final\\test_real_ffmpeg_generation_un0\\real-ffmpeg-project\\renders\\final.mp4",
+      "format": "mp4",
+      "resolution": "320x180",
+      "duration_seconds": 3.0,
+      "file_size_bytes": 8063,
+      "target_duration_seconds": 4.0,
+      "duration_difference_seconds": -1.0,
+      "codec": "h264",
+      "audio_codec": "aac",
+      "fps": 30.0
+    }
+  ],
+  "warnings": [],
+  "verification_notes": [
+    "Rendered from a frozen frame-exact Render Plan with a centralized audio master."
+  ],
+  "render_grammar": "cinematic-trailer"
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from server.app.billing.service import (
 from server.app.db.base import Base
 from server.app.projects.models import ProjectRecord
 from server.app.provider.image_generation import (
+    _parse_image_payload,
     generate_billed_project_image,
     prepare_image_generation_request,
 )
@@ -198,11 +200,57 @@ def test_prepare_image_generation_request_is_exact_immutable_provider_payload():
     assert request.path == "/v1/images/generations"
     assert request.content == (
         b'{"model":"gpt-image-2","n":2,"prompt":"frame",'
+        b'"quality":"medium","size":"1024x1024"}'
+    )
+
+
+def test_prepare_image_generation_request_keeps_dalle_response_format():
+    request = prepare_image_generation_request(
+        model="dall-e-3",
+        prompt="frame",
+        count=1,
+        size="1024x1024",
+        quality="standard",
+    )
+
+    assert request.content == (
+        b'{"model":"dall-e-3","n":1,"prompt":"frame",'
         b'"quality":"standard","response_format":"b64_json","size":"1024x1024"}'
     )
     assert isinstance(request.content, bytes)
     assert b"key" not in request.content.lower()
     assert b"price" not in request.content.lower()
+
+
+def test_parse_image_payload_accepts_provider_https_url():
+    requested: list[str] = []
+
+    class ImageClient:
+        def download_image_content(self, url: str, *, max_bytes: int) -> bytes:
+            requested.append(url)
+            assert max_bytes > 0
+            return base64.b64decode(PNG_BASE64)
+
+    response = httpx.Response(
+        200,
+        json={"data": [{"url": "https://1.1.1.1/generated/image.png"}]},
+    )
+
+    parsed = _parse_image_payload(response, 1, image_client=ImageClient())
+
+    assert requested == ["https://1.1.1.1/generated/image.png"]
+    assert parsed == [(base64.b64decode(PNG_BASE64), ".png")]
+
+
+def test_parse_image_payload_accepts_base64_data_uri():
+    response = httpx.Response(
+        200,
+        json={"data": [{"b64_json": f"data:image/png;base64,{PNG_BASE64}"}]},
+    )
+
+    assert _parse_image_payload(response, 1) == [
+        (base64.b64decode(PNG_BASE64), ".png")
+    ]
 
 
 def test_quote_precedes_child_and_execution_reuses_exact_request(billing_context):

@@ -1,0 +1,316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/generation_plan",
+  "title": "Video Generation Plan",
+  "type": "object",
+  "required": [
+    "version",
+    "id",
+    "storyboard_revision",
+    "provider",
+    "model_id",
+    "shot_ids",
+    "storyboard_shot_count",
+    "generation_unit_count",
+    "protected_generation_unit_ids",
+    "pending_shot_ids",
+    "covered_shot_ids",
+    "covered_segment_ids",
+    "target_duration_seconds",
+    "native_total_duration_seconds",
+    "timeline_total_duration_seconds",
+    "duration_difference_seconds",
+    "compatible_with_target",
+    "requires_confirmation",
+    "can_generate",
+    "confirmed_strategy",
+    "issues",
+    "adaptation_options",
+    "generation_segments",
+    "generation_units"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "storyboard_revision": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "provider": { "type": "string", "minLength": 1 },
+    "model_id": { "type": "string", "minLength": 1 },
+    "shot_ids": { "$ref": "#/$defs/shotIds" },
+    "storyboard_shot_count": { "type": "integer", "minimum": 0 },
+    "generation_unit_count": { "type": "integer", "minimum": 0 },
+    "protected_generation_unit_ids": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "pending_shot_ids": { "$ref": "#/$defs/shotIds" },
+    "covered_shot_ids": { "$ref": "#/$defs/shotIds" },
+    "covered_segment_ids": { "$ref": "#/$defs/segmentIds" },
+    "target_duration_seconds": {
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0
+    },
+    "native_total_duration_seconds": {
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0
+    },
+    "timeline_total_duration_seconds": {
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0
+    },
+    "duration_difference_seconds": { "type": ["number", "null"] },
+    "compatible_with_target": { "type": "boolean" },
+    "requires_confirmation": { "type": "boolean" },
+    "can_generate": { "type": "boolean" },
+    "confirmed_strategy": {
+      "type": ["string", "null"],
+      "enum": ["accept_model_duration", "accept_longer_duration", null]
+    },
+    "issues": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/issue" }
+    },
+    "adaptation_options": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "generation_segments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/generationSegment" }
+    },
+    "generation_units": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/generationUnit" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "shotIds": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "segmentIds": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "issue": {
+      "type": "object",
+      "required": ["code", "message", "shot_id", "unit_id"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "shot_id": { "type": ["string", "null"] },
+        "unit_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "generationSegment": {
+      "type": "object",
+      "required": [
+        "id",
+        "source_shot_id",
+        "source_beat_id",
+        "sequence",
+        "segment_index",
+        "segment_count",
+        "recommended_content_duration_seconds",
+        "prompt",
+        "transition",
+        "continuity_requirements",
+        "start_state",
+        "action_progress",
+        "end_state"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "source_shot_id": { "type": "string", "minLength": 1 },
+        "source_beat_id": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "segment_index": { "type": "integer", "minimum": 1 },
+        "segment_count": { "type": "integer", "minimum": 1 },
+        "recommended_content_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "prompt": { "type": "string", "minLength": 1 },
+        "transition": {
+          "type": "string",
+          "enum": ["continuous", "cut", "match_cut"]
+        },
+        "continuity_requirements": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "start_state": { "type": "string", "minLength": 1 },
+        "action_progress": { "type": "string", "minLength": 1 },
+        "end_state": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "generationUnit": {
+      "type": "object",
+      "required": [
+        "id",
+        "revision",
+        "status",
+        "shot_ids",
+        "source_shot_ids",
+        "source_beat_ids",
+        "source_segment_ids",
+        "prompt_segments",
+        "provider",
+        "model_id",
+        "operation",
+        "requested_duration_seconds",
+        "source_duration_seconds",
+        "timeline_duration_seconds",
+        "output_asset_id",
+        "output_path",
+        "billing_job_id",
+        "task_item_id",
+        "replaces_unit_id",
+        "profile"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "status": {
+          "type": "string",
+          "enum": [
+            "planned",
+            "queued",
+            "running",
+            "waiting_provider",
+            "complete",
+            "failed",
+            "stale"
+          ]
+        },
+        "shot_ids": { "$ref": "#/$defs/shotIds" },
+        "source_shot_ids": { "$ref": "#/$defs/shotIds" },
+        "source_beat_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "source_segment_ids": { "$ref": "#/$defs/segmentIds" },
+        "prompt_segments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/generationSegment" },
+          "minItems": 1
+        },
+        "provider": { "type": "string", "minLength": 1 },
+        "model_id": { "type": "string", "minLength": 1 },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame_to_video",
+            "extend"
+          ]
+        },
+        "requested_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "source_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "timeline_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "output_asset_id": { "type": ["string", "null"] },
+        "output_path": { "type": ["string", "null"] },
+        "billing_job_id": { "type": ["string", "null"] },
+        "task_item_id": { "type": ["string", "null"] },
+        "replaces_unit_id": { "type": ["string", "null"] },
+        "profile": { "$ref": "#/$defs/profile" }
+      },
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "required": [
+        "provider",
+        "model_id",
+        "operation",
+        "duration_mode",
+        "fixed_duration_seconds",
+        "supported_duration_seconds",
+        "min_duration_seconds",
+        "max_duration_seconds",
+        "supports_start_frame",
+        "supports_end_frame",
+        "supports_extend",
+        "supports_sequential_beats",
+        "supports_multi_shot_prompt",
+        "max_narrative_beats_per_unit",
+        "max_reference_images",
+        "contract_source",
+        "profile_revision",
+        "duration_configuration_status"
+      ],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model_id": { "type": "string", "minLength": 1 },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame_to_video",
+            "extend"
+          ]
+        },
+        "duration_mode": {
+          "type": "string",
+          "enum": ["fixed", "supported_values", "flexible", "unknown"]
+        },
+        "fixed_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "supported_duration_seconds": {
+          "type": "array",
+          "items": { "type": "number", "exclusiveMinimum": 0 },
+          "uniqueItems": true
+        },
+        "min_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "max_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "supports_start_frame": { "type": "boolean" },
+        "supports_end_frame": { "type": "boolean" },
+        "supports_extend": { "type": "boolean" },
+        "supports_sequential_beats": { "type": "boolean" },
+        "supports_multi_shot_prompt": { "type": "boolean" },
+        "max_narrative_beats_per_unit": { "type": "integer", "minimum": 1 },
+        "max_reference_images": { "type": ["integer", "null"], "minimum": 1 },
+        "contract_source": {
+          "type": "string",
+          "enum": ["provider_catalog", "verified_override", "admin_configuration"]
+        },
+        "profile_revision": { "type": "string", "minLength": 1 },
+        "duration_configuration_status": {
+          "type": "string",
+          "enum": ["configured", "unconfigured"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

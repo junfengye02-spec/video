@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAuth } from "../auth/AuthProvider";
 import type { AuthContextValue } from "../auth/AuthProvider";
 import { getWallet } from "./api";
-import { BillingProvider, useBilling } from "./BillingProvider";
+import { BillingProvider, notifyBillingChanged, useBilling } from "./BillingProvider";
 import type { WalletSummary } from "./types";
 
 vi.mock("../auth/AuthProvider", () => ({
@@ -121,5 +121,20 @@ describe("BillingProvider", () => {
 
     expect(screen.getByTestId("balance")).toHaveTextContent("none");
     expect(screen.getByTestId("loading")).toHaveTextContent("false");
+  });
+
+  it("refreshes authoritative wallet facts after a billing invalidation", async () => {
+    useAuthMock.mockReturnValue(authValue());
+    getWalletMock
+      .mockResolvedValueOnce(wallet)
+      .mockResolvedValueOnce({ ...wallet, balance_units: 1400, available_units: 1200 });
+
+    render(<BillingProvider><BillingProbe /></BillingProvider>);
+    expect(await screen.findByTestId("balance")).toHaveTextContent("1000");
+
+    act(() => notifyBillingChanged());
+
+    expect(await screen.findByTestId("balance")).toHaveTextContent("1400");
+    expect(getWalletMock).toHaveBeenCalledTimes(2);
   });
 });

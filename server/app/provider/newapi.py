@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import socket
 import tempfile
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
-from urllib.parse import quote as url_quote
+from urllib.parse import quote as url_quote, urljoin, urlsplit
 
 import httpx
 from pydantic import (
@@ -24,6 +26,13 @@ from server.app.core.config import AppSettings
 TokenKind = Literal["text", "image", "video"]
 _MAX_CONTROL_RESPONSE_BYTES = 256 * 1024
 _MAX_EXECUTION_RESPONSE_BYTES = 64 * 1024 * 1024
+_DEFAULT_TIMEOUT_SECONDS = 30.0
+_TEXT_EXECUTION_READ_TIMEOUT_SECONDS = 600.0
+_IMAGE_EXECUTION_READ_TIMEOUT_SECONDS = 180.0
+_IMAGE_DOWNLOAD_REDIRECT_LIMIT = 3
+_IMAGE_DOWNLOAD_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_VIDEO_FALLBACK_STATUS_CODES = frozenset({500, 502, 503, 504})
+_SSE_CONTENT_TYPE = "text/event-stream"
 
 
 class NewApiError(RuntimeError):
@@ -363,6 +372,19 @@ class VideoTaskStatus(_StrictNewApiModel):
         repr=False,
         exclude=True,
     )
+    url: str | None = Field(default=None, max_length=2048, repr=False, exclude=True)
+    video_url: str | None = Field(
+        default=None,
+        max_length=2048,
+        repr=False,
+        exclude=True,
+    )
+    image_url: str | None = Field(
+        default=None,
+        max_length=2048,
+        repr=False,
+        exclude=True,
+    )
 
     @field_validator("id", "task_id")
     @classmethod
@@ -434,6 +456,65 @@ def _has_task_not_found_contract(response: httpx.Response) -> bool:
     }
 
 
+def _normalize_text_stream(content: bytes) -> bytes:
+    """Convert an OpenAI chat-completion SSE body into the normal JSON envelope.
+
+    The provider relay may stream long planning responses even though the rest of
+    the billing pipeline expects a completed JSON response. Keeping this
+    conversion here preserves the existing quote/receipt contract and prevents
+    callers from having to understand provider-specific SSE framing.
+    """
+    fragments: list[str] = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(b":"):
+            continue
+        if not line.startswith(b"data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == b"[DONE]":
+            continue
+        try:
+            event = _load_unique_json(payload)
+        except Exception:
+            raise InvalidNewApiResponse("invalid NewAPI response") from None
+        if not isinstance(event, dict):
+            raise InvalidNewApiResponse("invalid NewAPI response")
+        if "error" in event:
+            raise NewApiCallError("NewAPI request failed")
+        choices = event.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                value = delta.get("content")
+            else:
+                message = choice.get("message")
+                value = message.get("content") if isinstance(message, dict) else None
+            if isinstance(value, str):
+                fragments.append(value)
+            elif isinstance(value, list):
+                for part in value:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        fragments.append(part["text"])
+
+    if not fragments:
+        raise InvalidNewApiResponse("invalid NewAPI response")
+    return json.dumps(
+        {"choices": [{"message": {"content": "".join(fragments)}}]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _is_text_event_stream(headers: Mapping[str, str]) -> bool:
+    content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    return content_type == _SSE_CONTENT_TYPE
+
+
 class NewApiClient:
     def __init__(
         self,
@@ -452,7 +533,12 @@ class NewApiClient:
             "video": settings.newapi_video_current_token_alias,
         }
         self._max_video_bytes = settings.billing_max_video_bytes
-        self._client = httpx.Client(timeout=30, transport=transport)
+        self._video_download_host = settings.newapi_video_download_host
+        self._client = httpx.Client(
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            transport=transport,
+            trust_env=False,
+        )
 
     def close(self) -> None:
         self._client.close()
@@ -462,6 +548,42 @@ class NewApiClient:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
+
+    def list_models(
+        self,
+        kind: TokenKind,
+        token_alias: str | None = None,
+    ) -> list[str]:
+        alias = self._current_aliases[kind] if token_alias is None else token_alias
+        if alias is None:
+            raise NewApiCallError("NewAPI capability is not configured")
+        response = self._get_raw(
+            kind,
+            alias,
+            "/v1/models",
+            NewApiCallError,
+        )
+        try:
+            payload = _load_unique_json(response.content)
+        except Exception:
+            raise InvalidNewApiResponse("invalid NewAPI response") from None
+        if type(payload) is not dict or type(payload.get("data")) is not list:
+            raise InvalidNewApiResponse("invalid NewAPI response")
+
+        model_ids: set[str] = set()
+        for item in payload["data"]:
+            if type(item) is not dict:
+                raise InvalidNewApiResponse("invalid NewAPI response")
+            model_id = item.get("id")
+            if (
+                type(model_id) is not str
+                or not 1 <= len(model_id) <= 200
+                or model_id != model_id.strip()
+                or any(ord(character) < 32 for character in model_id)
+            ):
+                raise InvalidNewApiResponse("invalid NewAPI response")
+            model_ids.add(model_id)
+        return sorted(model_ids, key=lambda value: (value.casefold(), value))
 
     def quote(
         self,
@@ -617,12 +739,114 @@ class NewApiClient:
             raise InvalidNewApiResponse("invalid NewAPI response")
         return status
 
+    def download_image_content(self, url: str, *, max_bytes: int) -> bytes:
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError("image download limit must be positive")
+
+        current_url = url
+        for redirect_count in range(_IMAGE_DOWNLOAD_REDIRECT_LIMIT + 1):
+            validated_url = self._validated_image_download_url(current_url)
+            response: httpx.Response | None = None
+            try:
+                request = self._client.build_request(
+                    "GET",
+                    validated_url,
+                    headers={
+                        "Accept": "image/png,image/jpeg,image/webp",
+                        "Accept-Encoding": "identity",
+                    },
+                )
+                response = self._client.send(request, stream=True)
+                if response.status_code in _IMAGE_DOWNLOAD_REDIRECT_STATUSES:
+                    if redirect_count >= _IMAGE_DOWNLOAD_REDIRECT_LIMIT:
+                        raise InvalidNewApiResponse("invalid image download response")
+                    location = response.headers.get("Location")
+                    if type(location) is not str or not location:
+                        raise InvalidNewApiResponse("invalid image download response")
+                    current_url = urljoin(validated_url, location)
+                    continue
+                if response.status_code == 429:
+                    raise NewApiRateLimited("image download rate limited")
+                if response.status_code != 200:
+                    raise NewApiCallError("image download failed")
+
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > max_bytes:
+                            raise InvalidNewApiResponse(
+                                "invalid image download response"
+                            )
+                    except ValueError:
+                        pass
+
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    if len(content) + len(chunk) > max_bytes:
+                        raise InvalidNewApiResponse("invalid image download response")
+                    content.extend(chunk)
+                if not content:
+                    raise InvalidNewApiResponse("invalid image download response")
+                return bytes(content)
+            except NewApiError:
+                raise
+            except httpx.TransportError:
+                raise NewApiCallError("image download failed") from None
+            finally:
+                if response is not None:
+                    response.close()
+
+        raise InvalidNewApiResponse("invalid image download response")
+
+    @staticmethod
+    def _validated_image_download_url(value: str) -> str:
+        if type(value) is not str or not value or len(value) > 8192:
+            raise InvalidNewApiResponse("unsafe image download URL")
+        if any(ord(character) < 32 for character in value):
+            raise InvalidNewApiResponse("unsafe image download URL")
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError:
+            raise InvalidNewApiResponse("unsafe image download URL") from None
+        hostname = parsed.hostname
+        if (
+            parsed.scheme.lower() != "https"
+            or hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in {None, 443}
+            or not parsed.path.startswith("/")
+            or "\\" in parsed.netloc
+        ):
+            raise InvalidNewApiResponse("unsafe image download URL")
+
+        try:
+            addresses = {ipaddress.ip_address(hostname)}
+        except ValueError:
+            try:
+                resolved = socket.getaddrinfo(
+                    hostname,
+                    443,
+                    type=socket.SOCK_STREAM,
+                )
+                addresses = {
+                    ipaddress.ip_address(address[4][0].split("%", 1)[0])
+                    for address in resolved
+                }
+            except (OSError, ValueError):
+                raise InvalidNewApiResponse("unsafe image download URL") from None
+        if not addresses or any(not address.is_global for address in addresses):
+            raise InvalidNewApiResponse("unsafe image download URL")
+        return value
+
     def download_video_content(
         self,
         token_alias: str,
         task_id: str,
         destination: Path,
         *,
+        fallback_url: str | None = None,
         progress_callback: Callable[[], None] | None = None,
     ) -> None:
         expected_task_id = _validate_task_id(task_id)
@@ -651,6 +875,19 @@ class NewApiClient:
             raise NewApiCallError("NewAPI read failed") from None
 
         try:
+            if response.status_code in _VIDEO_FALLBACK_STATUS_CODES:
+                validated_fallback = self._validated_video_fallback_url(fallback_url)
+                if validated_fallback is not None:
+                    response.close()
+                    response = None
+                    try:
+                        fallback_request = self._client.build_request(
+                            "GET",
+                            validated_fallback,
+                        )
+                        response = self._client.send(fallback_request, stream=True)
+                    except httpx.TransportError:
+                        raise NewApiCallError("NewAPI read failed") from None
             if response.status_code == 404:
                 raise ProviderTaskNotFound("NewAPI resource was not found")
             if response.status_code == 429:
@@ -688,12 +925,36 @@ class NewApiClient:
             except OSError:
                 raise NewApiCallError("video content staging failed") from None
         finally:
-            response.close()
+            if response is not None:
+                response.close()
             if temporary_path is not None:
                 try:
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def _validated_video_fallback_url(self, value: str | None) -> str | None:
+        if self._video_download_host is None or type(value) is not str:
+            return None
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError:
+            return None
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != self._video_download_host
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in {None, 443}
+            or not parsed.path.startswith("/")
+            or not parsed.path.lower().endswith(".mp4")
+            or parsed.query
+            or parsed.fragment
+            or any(ord(character) < 32 for character in value)
+        ):
+            return None
+        return value
 
     def _get_model(
         self,
@@ -791,6 +1052,17 @@ class NewApiClient:
             )
         response: httpx.Response | None = None
         try:
+            request_options: dict[str, Any] = {}
+            if kind in {"text", "image"} and "X-OneAPI-Usage-Quote" in control_headers:
+                read_timeout = (
+                    _TEXT_EXECUTION_READ_TIMEOUT_SECONDS
+                    if kind == "text"
+                    else _IMAGE_EXECUTION_READ_TIMEOUT_SECONDS
+                )
+                request_options["timeout"] = httpx.Timeout(
+                    _DEFAULT_TIMEOUT_SECONDS,
+                    read=read_timeout,
+                )
             provider_request = self._client.build_request(
                 request.method,
                 self._base_url + request.path,
@@ -800,6 +1072,7 @@ class NewApiClient:
                     "Content-Type": request.content_type,
                     **control_headers,
                 },
+                **request_options,
             )
             response = self._client.send(provider_request, stream=True)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
@@ -850,6 +1123,26 @@ class NewApiClient:
                 headers=safe_headers,
                 content=bytes(content),
             )
+            if (
+                bounded.status_code == 200
+                and kind == "text"
+                and _is_text_event_stream(bounded.headers)
+            ):
+                try:
+                    normalized_content = _normalize_text_stream(bounded.content)
+                except InvalidNewApiResponse:
+                    if ambiguous_on_invalid_success:
+                        raise AmbiguousNewApiResult(
+                            "ambiguous NewAPI result"
+                        ) from None
+                    raise
+                normalized_headers = dict(safe_headers)
+                normalized_headers["content-type"] = "application/json"
+                bounded = httpx.Response(
+                    bounded.status_code,
+                    headers=normalized_headers,
+                    content=normalized_content,
+                )
             if bounded.status_code == 409:
                 if _has_quote_stale_contract(bounded):
                     raise QuoteStale("NewAPI quote is stale")

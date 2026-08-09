@@ -1,0 +1,15 @@
+{
+  "status": "blocked_before_crash_injection",
+  "date": "2026-07-27",
+  "test": "server/tests/test_generation_units_release_gate.py::test_generation_unit_worker_and_provider_process_crash_recovery",
+  "phase": "submit-crash project initialization",
+  "helper": "_create_project_with_fake_generator",
+  "expected_process_exit_code": 91,
+  "actual_process_exit_code": 1,
+  "http_status": 502,
+  "response": {"code": "provider_result_unavailable"},
+  "provider_quote_count": 0,
+  "provider_execute_count": 0,
+  "crash_injection_reached": false,
+  "crash_recovery_passed": false
+}

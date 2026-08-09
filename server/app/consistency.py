@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -40,7 +41,11 @@ def evaluate_storyboard_consistency(
                 continue
 
             visual_lock = str(character.get("visual_lock", "")).strip()
-            if character.get("locked") and visual_lock and visual_lock.lower() not in prompt.lower():
+            if (
+                character.get("locked")
+                and visual_lock
+                and not _prompt_carries_visual_lock(prompt, character, visual_lock)
+            ):
                 issues.append(
                     _issue(
                         shot_id,
@@ -130,6 +135,37 @@ def _issue(shot_id: str | None, severity: str, code: str, message: str) -> dict[
         "code": code,
         "message": message,
     }
+
+
+def _prompt_carries_visual_lock(
+    prompt: str,
+    character: dict[str, Any],
+    visual_lock: str,
+) -> bool:
+    normalized_prompt = prompt.casefold()
+    if visual_lock.casefold() in normalized_prompt:
+        return True
+
+    identity_anchors = {
+        str(character.get(key) or "").strip().casefold()
+        for key in ("id", "name")
+    } - {""}
+    if not any(anchor in normalized_prompt for anchor in identity_anchors):
+        return False
+
+    lock_without_identity = visual_lock.casefold()
+    for anchor in identity_anchors:
+        lock_without_identity = lock_without_identity.replace(anchor, " ")
+
+    cues: set[str] = set()
+    for fragment in re.split(r"[\s,，。;；:：、/]+", lock_without_identity):
+        compact = fragment.strip()
+        if len(compact) < 3:
+            continue
+        cues.add(compact)
+        if not compact.isascii():
+            cues.update(compact[index:index + 3] for index in range(len(compact) - 2))
+    return any(cue in normalized_prompt for cue in cues)
 
 
 def _penalty(severity: str | None) -> int:

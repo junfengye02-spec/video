@@ -14,6 +14,7 @@ _CALLBACK_FIELD_LIMITS = {
     "type": 16,
     "out_trade_no": 64,
     "trade_no": 191,
+    "channel_order_no": 191,
     "name": 255,
     "money": 32,
     "trade_status": 32,

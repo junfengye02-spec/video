@@ -1,10 +1,60 @@
 import smtplib
 import ssl
+from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import formataddr, make_msgid
 from typing import Protocol
+
+import dns.exception
+import dns.resolver
 
 from server.app.auth.security import normalize_email
 from server.app.core.config import AppSettings
+
+
+MAIL_BRAND_NAME = "mise studio"
+
+
+class RecipientDomainUnavailable(ValueError):
+    """Raised when an address domain is known not to accept email."""
+
+
+def ensure_recipient_domain(email: str) -> None:
+    """Reject domains that have neither MX nor address records.
+
+    DNS outages are treated as unknown rather than invalid so a transient
+    resolver failure does not block otherwise valid registrations.
+    """
+    normalized = normalize_email(email)
+    domain = normalized.rsplit("@", 1)[-1].rstrip(".")
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = 2.0
+    resolver.lifetime = 3.0
+
+    try:
+        mx_records = resolver.resolve(domain, "MX")
+        if any(str(record.exchange).rstrip(".") for record in mx_records):
+            return
+        raise RecipientDomainUnavailable("recipient domain does not accept mail")
+    except dns.resolver.NXDOMAIN as exc:
+        raise RecipientDomainUnavailable("recipient domain does not exist") from exc
+    except dns.resolver.NoAnswer:
+        pass
+    except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers, dns.exception.DNSException):
+        return
+
+    for record_type in ("A", "AAAA"):
+        try:
+            resolver.resolve(domain, record_type)
+            return
+        except dns.resolver.NXDOMAIN as exc:
+            raise RecipientDomainUnavailable("recipient domain does not exist") from exc
+        except dns.resolver.NoAnswer:
+            continue
+        except (dns.resolver.LifetimeTimeout, dns.resolver.NoNameservers, dns.exception.DNSException):
+            return
+
+    raise RecipientDomainUnavailable("recipient domain has no mail or address records")
 
 
 class Mailer(Protocol):
@@ -42,11 +92,18 @@ class SmtpMailer:
 
     def _send(self, email: str, code: str, *, purpose: str) -> None:
         message = EmailMessage()
-        message["Subject"] = f"OpenMontage {purpose} code"
-        message["From"] = str(self._settings.smtp_from_address)
+        message["Subject"] = f"{MAIL_BRAND_NAME} {purpose} code"
+        message["Date"] = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
+        message["Message-ID"] = make_msgid()
+        message["From"] = formataddr(
+            (MAIL_BRAND_NAME, str(self._settings.smtp_from_address))
+        )
         message["To"] = normalize_email(email)
+        message["Reply-To"] = str(self._settings.smtp_from_address)
+        message["Auto-Submitted"] = "auto-generated"
+        message["X-Auto-Response-Suppress"] = "All"
         message.set_content(
-            f"Your OpenMontage {purpose} code is {code}.\n\n"
+            f"Your {MAIL_BRAND_NAME} {purpose} code is {code}.\n\n"
             "This code expires in 10 minutes.\n"
             "If you did not request this, ignore this email."
         )
@@ -78,4 +135,6 @@ class SmtpMailer:
                 self._settings.smtp_username,
                 self._settings.smtp_password.get_secret_value(),
             )
-        client.send_message(message)
+        refused = client.send_message(message)
+        if refused:
+            raise smtplib.SMTPRecipientsRefused(refused)

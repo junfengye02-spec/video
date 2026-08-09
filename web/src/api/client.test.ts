@@ -5,11 +5,14 @@ import type {
   ShotRegenerateRequest,
   ShotSaveRequest,
 } from "../domain/types";
+import { createAcceptedImageTask } from "../test/fixtures";
 import {
   createDraftProject,
   createShortDramaProject,
   loadLatestProject,
+  generateGenerationUnits,
   mediaUrl,
+  previewGenerationPlan,
   saveContinuityPlan,
   optimizePrompt,
   regenerateShot,
@@ -19,10 +22,55 @@ import {
   uploadReferenceImage,
 } from "./client";
 
+describe("generation unit API", () => {
+  it("posts preview and submit payloads without provider credentials", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "a".repeat(64), generation_units: [] }),
+    });
+    const previewPayload = {
+      video_model: "omni_flash-10s",
+      text_model: "selected-planner-model",
+      operation: "text_to_video" as const,
+      shot_ids: ["s1", "s2"],
+      regenerate_unit_ids: [],
+      confirmed_strategy: "accept_longer_duration" as const,
+    };
+    const submitPayload = {
+      generation_plan_id: "a".repeat(64),
+      generation_unit_ids: ["unit-1"],
+      idempotency_key: "submit-1",
+    };
+
+    await previewGenerationPlan("p1", previewPayload, fetchMock as unknown as typeof fetch);
+    await generateGenerationUnits("p1", submitPayload, fetchMock as unknown as typeof fetch);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/projects/p1/generation-plan/preview",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ ...previewPayload, contract_version: 2 }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/projects/p1/generation-units/generate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ ...submitPayload, contract_version: 2 }),
+      }),
+    );
+  });
+});
+
 describe("mediaUrl", () => {
   it("builds project media URLs for relative image paths", () => {
     expect(mediaUrl("assets/images/character/mara.png", "p1")).toBe(
       "/api/projects/p1/media/assets/images/character/mara.png",
+    );
+    expect(mediaUrl("renders/episode-002.mp4", "p1")).toBe(
+      "/api/projects/p1/media/renders/episode-002.mp4",
     );
   });
 });
@@ -224,6 +272,7 @@ describe("uploadReferenceImage", () => {
 describe("ShotSaveRequest", () => {
   it("exposes metadata fields without provider fields for frontend callers", () => {
     const payload: ShotSaveRequest = {
+      episode_number: 2,
       shot_intent: "Push in as Lin realizes the clue matters.",
       shot_language: {
         shot_size: "medium_close",
@@ -235,6 +284,7 @@ describe("ShotSaveRequest", () => {
       },
     };
 
+    expect(payload.episode_number).toBe(2);
     expect(payload.shot_intent).toBe(
       "Push in as Lin realizes the clue matters.",
     );
@@ -349,22 +399,11 @@ describe("optimizePrompt", () => {
 });
 
 describe("regenerateShot", () => {
-  it("posts an empty browser payload to the regenerate endpoint", async () => {
+  it("posts an empty browser payload and returns the accepted task", async () => {
+    const accepted = createAcceptedImageTask("regenerate-task");
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({
-        job_id: "j1",
-        event: { id: "e1", stage: "regenerate" },
-        shot: { id: "s1", status: "complete" },
-        storyboard: { shots: [] },
-        consistency_report: { score: 100, issues: [] },
-        generation: {
-          operation: "reference_to_video",
-          reference_image_paths: ["assets/images/character/lin.png"],
-          output_path: "assets/video/s1.mp4",
-          cost_usd: 0.2,
-        },
-      }),
+      json: async () => accepted,
     });
     const payload: ShotRegenerateRequest = {};
 
@@ -374,9 +413,7 @@ describe("regenerateShot", () => {
       "/api/projects/p1/shots/s1/regenerate",
       expect.objectContaining({ method: "POST", body: JSON.stringify(payload) }),
     );
-    expect(result.event.stage).toBe("regenerate");
-    expect(result.generation?.operation).toBe("reference_to_video");
-    expect(result.generation?.reference_image_paths).toEqual(["assets/images/character/lin.png"]);
+    expect(result).toEqual(accepted);
   });
 });
 

@@ -17,6 +17,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    dialect = op.get_bind().dialect.name
     op.create_table(
         "wallet_accounts",
         sa.Column("id", sa.String(length=32), nullable=False),
@@ -95,27 +96,39 @@ def upgrade() -> None:
         ["user_id", "created_at"],
         unique=False,
     )
-    op.execute(
-        """
-        CREATE FUNCTION wallet_entries_reject_mutation()
-        RETURNS trigger
-        LANGUAGE plpgsql
-        AS $wallet_entries_append_only$
-        BEGIN
-            RAISE EXCEPTION 'wallet entries are append-only'
-                USING ERRCODE = '55000';
-            RETURN NULL;
-        END;
-        $wallet_entries_append_only$
-        """
-    )
-    op.execute(
-        """
-        CREATE TRIGGER wallet_entries_append_only
-        BEFORE UPDATE OR DELETE ON wallet_entries
-        FOR EACH ROW EXECUTE FUNCTION wallet_entries_reject_mutation()
-        """
-    )
+    if dialect == "sqlite":
+        for action in ("UPDATE", "DELETE"):
+            op.execute(
+                f"""
+                CREATE TRIGGER wallet_entries_reject_{action.lower()}
+                BEFORE {action} ON wallet_entries
+                BEGIN
+                    SELECT RAISE(ABORT, 'wallet entries are append-only');
+                END
+                """
+            )
+    else:
+        op.execute(
+            """
+            CREATE FUNCTION wallet_entries_reject_mutation()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $wallet_entries_append_only$
+            BEGIN
+                RAISE EXCEPTION 'wallet entries are append-only'
+                    USING ERRCODE = '55000';
+                RETURN NULL;
+            END;
+            $wallet_entries_append_only$
+            """
+        )
+        op.execute(
+            """
+            CREATE TRIGGER wallet_entries_append_only
+            BEFORE UPDATE OR DELETE ON wallet_entries
+            FOR EACH ROW EXECUTE FUNCTION wallet_entries_reject_mutation()
+            """
+        )
 
     op.create_table(
         "payment_orders",
@@ -219,8 +232,12 @@ def downgrade() -> None:
     op.drop_index("ix_payment_orders_user_created", table_name="payment_orders")
     op.drop_index("ix_payment_orders_status_expires", table_name="payment_orders")
     op.drop_table("payment_orders")
-    op.execute("DROP TRIGGER IF EXISTS wallet_entries_append_only ON wallet_entries")
-    op.execute("DROP FUNCTION IF EXISTS wallet_entries_reject_mutation()")
+    if op.get_bind().dialect.name == "sqlite":
+        op.execute("DROP TRIGGER IF EXISTS wallet_entries_reject_update")
+        op.execute("DROP TRIGGER IF EXISTS wallet_entries_reject_delete")
+    else:
+        op.execute("DROP TRIGGER IF EXISTS wallet_entries_append_only ON wallet_entries")
+        op.execute("DROP FUNCTION IF EXISTS wallet_entries_reject_mutation()")
     op.drop_index("ix_wallet_entries_user_created", table_name="wallet_entries")
     op.drop_table("wallet_entries")
     op.drop_table("topup_products")

@@ -80,6 +80,16 @@ return 0
 """
 
 
+_CANCEL_SCRIPT = """
+local stored = redis.call('GET', KEYS[1])
+if not stored or stored ~= ARGV[1] then
+    return 0
+end
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+return 1
+"""
+
+
 class VerificationError(Exception):
     pass
 
@@ -187,6 +197,26 @@ class VerificationStore:
         )
         if result != 1:
             raise InvalidCode("invalid or expired verification code")
+
+    def cancel(self, email: str, code: str, *, purpose: str) -> bool:
+        """Remove an issued code when its delivery did not complete."""
+        normalized_email = normalize_email(email)
+        code_key = self._key("verification", purpose, normalized_email)
+        attempts_key = f"{code_key}:attempts"
+        resend_key = self._key("verification", "resend", normalized_email)
+        digest = self._digest(purpose, normalized_email, code)
+        return bool(
+            int(
+                self._redis.eval(
+                    _CANCEL_SCRIPT,
+                    3,
+                    code_key,
+                    attempts_key,
+                    resend_key,
+                    digest,
+                )
+            )
+        )
 
     def _digest(self, purpose: str, email: str, code: str) -> str:
         value = f"{purpose}:{email}:{code}".encode("utf-8")

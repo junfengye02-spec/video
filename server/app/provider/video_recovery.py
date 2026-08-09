@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import shutil
 from dataclasses import dataclass
@@ -21,10 +22,19 @@ from server.app.billing.lease import (
 from server.app.billing.models import GenerationJob
 from server.app.billing.service import BillingService, InvalidBillingState
 from server.app.core.config import get_settings
+from server.app.generation_units.publication import (
+    parse_generation_unit_billing_operation,
+    publish_generation_unit_video_result,
+)
 from server.app.projects.models import ProjectRecord
 from server.app.provider.newapi import NewApiClient
 from server.app.storage import WorkbenchStore
+from server.app.keyframe_service import ensure_shot_tail_frame
+from server.app.tasks.service import TaskService
 from tools.video._shared import probe_output
+
+
+tail_frame_logger = logging.getLogger("server.app.tail_frame_recovery")
 
 
 class InvalidVideoArtifact(RuntimeError):
@@ -276,6 +286,7 @@ def resume_billed_video_job(
                 snapshot.token_alias,
                 snapshot.provider_reference_id,
                 destination.temporary_path,
+                fallback_url=task.video_url or task.url,
                 progress_callback=heartbeat,
             )
             heartbeat(force=True)
@@ -319,6 +330,13 @@ def publish_billed_video_result(
     if job.status != "billed" or not job.result_visible or job.result_locator is None:
         db.rollback()
         return False
+    if parse_generation_unit_billing_operation(job.operation) is not None:
+        return publish_generation_unit_video_result(
+            db,
+            job_id,
+            media_store,
+            claim=claim,
+        )
     operation = _SHOT_OPERATION.fullmatch(job.operation)
     if operation is None:
         db.rollback()
@@ -448,6 +466,26 @@ def publish_billed_video_result(
         db.rollback()
         raise
     publication["journal"].complete()
+    try:
+        ensure_shot_tail_frame(
+            db=db,
+            media_store=media_store,
+            owner_user_id=user_id,
+            project_id=project_id,
+            shot_id=shot_id,
+        )
+        TaskService(db).release_external_shot_dependencies(
+            project_id=project_id,
+            previous_shot_id=shot_id,
+            previous_shot_version=int(shot.get("version") or 1),
+        )
+    except Exception:
+        tail_frame_logger.warning(
+            "tail frame extraction failed project_id=%s shot_id=%s",
+            project_id,
+            shot_id,
+            exc_info=True,
+        )
     return True
 
 

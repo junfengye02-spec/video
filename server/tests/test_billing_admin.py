@@ -253,6 +253,8 @@ def utc_now() -> datetime:
     "path",
     [
         "/api/admin/billing/settings",
+        "/api/admin/billing/summary",
+        "/api/admin/users",
         "/api/admin/payment-orders",
         "/api/admin/wallet-entries",
         "/api/admin/billing-reconciliations",
@@ -265,6 +267,23 @@ def test_admin_billing_reads_require_admin(user_client, path):
 def test_topup_product_admin_routes_are_not_exposed(admin_client):
     assert admin_client.get("/api/admin/topup-products").status_code == 404
     assert admin_client.post("/api/admin/topup-products", json={}).status_code == 404
+
+
+def test_admin_billing_summary_uses_authoritative_aggregates(admin_client):
+    response = admin_client.get("/api/admin/billing/summary")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "gross_paid_cny_fen": 1_200,
+        "total_orders": 1,
+        "pending_orders": 0,
+        "paid_orders": 1,
+        "failed_orders": 0,
+        "expired_orders": 0,
+        "wallet_balance_units": 10_000_000,
+        "wallet_held_units": 0,
+        "wallet_available_units": 10_000_000,
+    }
 
 
 def test_admin_billing_reads_order_and_reconciliation_payloads_are_redacted(
@@ -290,6 +309,162 @@ def test_admin_billing_reads_order_and_reconciliation_payloads_are_redacted(
     assert "MERCHANT-SECRET-123456" not in rendered
     assert seeded_billing.secret not in rendered
     assert reconciliation.json()[0]["last_error_code"] == "RuntimeError"
+
+
+def test_admin_orders_support_status_search_and_pagination(admin_client):
+    matched = admin_client.get(
+        "/api/admin/payment-orders",
+        params={"status": "paid", "search": "starter", "limit": 1, "offset": 0},
+    )
+    missed = admin_client.get(
+        "/api/admin/payment-orders",
+        params={"search": "not-present", "limit": 1, "offset": 0},
+    )
+
+    assert matched.status_code == 200
+    assert [order["product_title"] for order in matched.json()] == ["Starter snapshot"]
+    assert missed.json() == []
+
+
+def test_admin_can_search_users_and_read_wallet_balances(admin_client):
+    response = admin_client.get("/api/admin/users?search=USER%40EXAMPLE.COM")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": USER.id,
+            "email": USER.email,
+            "role": "user",
+            "status": "active",
+            "wallet_id": "w000000000000000000000000000001",
+            "balance_units": 10_000_000,
+            "held_units": 0,
+            "available_units": 10_000_000,
+            "created_at": response.json()[0]["created_at"],
+        }
+    ]
+
+
+def test_admin_balance_adjustment_appends_wallet_entry_and_audit(
+    admin_client, db
+):
+    before_entries = count_wallet_entries(db)
+    payload = {
+        "amount_units": 250_000,
+        "reason": "customer service credit",
+        "request_id": "balance-adjustment-0001",
+    }
+
+    response = admin_client.post(
+        f"/api/admin/users/{USER.id}/balance-adjustments",
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["balance_units"] == 10_250_000
+    assert response.json()["available_units"] == 10_250_000
+    assert response.json()["adjustment_amount_units"] == 250_000
+    wallet = db.scalar(
+        select(WalletAccount).where(WalletAccount.user_id == USER.id)
+    )
+    assert wallet is not None
+    assert wallet.balance_units == 10_250_000
+    entry = db.scalar(
+        select(WalletEntry).where(
+            WalletEntry.idempotency_key == "admin-adjust:balance-adjustment-0001"
+        )
+    )
+    assert entry is not None
+    assert entry.kind == "admin_credit"
+    assert entry.source_type == "admin_adjustment"
+    assert entry.balance_after_units == 10_250_000
+    assert count_wallet_entries(db) == before_entries + 1
+    audit = latest_audit(db, "wallet.balance.adjust")
+    assert audit.admin_user_id == ADMIN.id
+    assert audit.object_id == wallet.id
+    assert json.loads(audit.before_json) == {
+        "balance_units": 10_000_000,
+        "held_units": 0,
+    }
+    assert json.loads(audit.after_json) == {
+        "amount_units": 250_000,
+        "balance_units": 10_250_000,
+        "entry_id": entry.id,
+        "held_units": 0,
+        "reason": "customer service credit",
+        "user_id": USER.id,
+    }
+
+    repeated = admin_client.post(
+        f"/api/admin/users/{USER.id}/balance-adjustments",
+        json=payload,
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["entry_id"] == entry.id
+    assert count_wallet_entries(db) == before_entries + 1
+
+
+def test_admin_balance_deduction_cannot_reduce_balance_below_held_units(
+    admin_client, db
+):
+    wallet = db.scalar(
+        select(WalletAccount).where(WalletAccount.user_id == USER.id)
+    )
+    assert wallet is not None
+    wallet.held_units = 8_000_000
+    db.commit()
+    before_entries = count_wallet_entries(db)
+
+    response = admin_client.post(
+        f"/api/admin/users/{USER.id}/balance-adjustments",
+        json={
+            "amount_units": -3_000_000,
+            "reason": "manual correction",
+            "request_id": "balance-adjustment-0002",
+        },
+    )
+
+    assert response.status_code == 409
+    db.refresh(wallet)
+    assert wallet.balance_units == 10_000_000
+    assert count_wallet_entries(db) == before_entries
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "amount_units": 0,
+            "reason": "zero",
+            "request_id": "balance-adjustment-0003",
+        },
+        {
+            "amount_units": 100,
+            "reason": "   ",
+            "request_id": "balance-adjustment-0004",
+        },
+    ],
+)
+def test_admin_balance_adjustment_validates_amount_and_reason(admin_client, payload):
+    response = admin_client.post(
+        f"/api/admin/users/{USER.id}/balance-adjustments",
+        json=payload,
+    )
+    assert response.status_code == 422
+
+
+def test_balance_adjustment_requires_admin_and_csrf(
+    user_client, admin_no_csrf_client
+):
+    payload = {
+        "amount_units": 100,
+        "reason": "support",
+        "request_id": "balance-adjustment-0005",
+    }
+    path = f"/api/admin/users/{USER.id}/balance-adjustments"
+
+    assert user_client.post(path, json=payload).status_code == 403
+    assert admin_no_csrf_client.post(path, json=payload).status_code == 403
 
 
 def test_normal_user_cannot_change_multiplier(user_client):
@@ -335,7 +510,8 @@ def test_multiplier_update_rejects_missing_reason_and_bounds(
 
 def test_reconciliation_retry_missing_returns_404(admin_client):
     response = admin_client.post(
-        "/api/admin/billing-reconciliations/missing/retry"
+        "/api/admin/billing-reconciliations/missing/retry",
+        json={"reason": "manual review"},
     )
     assert response.status_code == 404
 
@@ -349,7 +525,8 @@ def test_reconciliation_retry_closed_returns_409(
     db.commit()
 
     response = admin_client.post(
-        f"/api/admin/billing-reconciliations/{item.id}/retry"
+        f"/api/admin/billing-reconciliations/{item.id}/retry",
+        json={"reason": "manual review"},
     )
 
     assert response.status_code == 409
@@ -357,7 +534,8 @@ def test_reconciliation_retry_closed_returns_409(
 
 def test_reconciliation_retry_requires_admin(user_client, seeded_billing):
     response = user_client.post(
-        f"/api/admin/billing-reconciliations/{seeded_billing.reconciliation_id}/retry"
+        f"/api/admin/billing-reconciliations/{seeded_billing.reconciliation_id}/retry",
+        json={"reason": "manual review"},
     )
     assert response.status_code == 403
 
@@ -366,7 +544,8 @@ def test_reconciliation_retry_requires_csrf(
     admin_no_csrf_client, seeded_billing
 ):
     response = admin_no_csrf_client.post(
-        f"/api/admin/billing-reconciliations/{seeded_billing.reconciliation_id}/retry"
+        f"/api/admin/billing-reconciliations/{seeded_billing.reconciliation_id}/retry",
+        json={"reason": "manual review"},
     )
     assert response.status_code == 403
 
@@ -381,7 +560,8 @@ def test_reconciliation_retry_schedules_open_row_without_wallet_debit(
     before_error = item.last_error
 
     response = admin_client.post(
-        f"/api/admin/billing-reconciliations/{item.id}/retry"
+        f"/api/admin/billing-reconciliations/{item.id}/retry",
+        json={"reason": "manual review"},
     )
 
     assert response.status_code == 202
@@ -397,3 +577,12 @@ def test_reconciliation_retry_schedules_open_row_without_wallet_debit(
     assert count_wallet_entries(db) == before_entries
     audit = latest_audit(db, "billing.reconciliation.retry")
     assert audit.object_id == item.id
+    assert json.loads(audit.after_json)["reason"] == "manual review"
+
+
+def test_reconciliation_retry_rejects_missing_reason(admin_client, seeded_billing):
+    response = admin_client.post(
+        f"/api/admin/billing-reconciliations/{seeded_billing.reconciliation_id}/retry",
+        json={"reason": "   "},
+    )
+    assert response.status_code == 422

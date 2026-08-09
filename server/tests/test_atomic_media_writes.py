@@ -33,7 +33,9 @@ def _link_directory_or_skip(link: Path, target: Path) -> None:
         text=True,
     )
     if result.returncode != 0:
-        pytest.skip(f"directory links are not available: {result.stderr or result.stdout}")
+        pytest.skip(
+            f"directory links are not available: {result.stderr or result.stdout}"
+        )
 
 
 def test_upload_rejects_destination_swapped_to_hardlink_before_replace(tmp_path):
@@ -168,7 +170,12 @@ def test_generation_rejects_destination_swapped_to_hardlink_before_replace(
     with pytest.raises(ValueError, match="Project workspace path is invalid"):
         run_single_shot_generation(
             project_dir=tmp_path,
-            shot={"id": "s1", "prompt": "Lin runs", "characters": []},
+            shot={
+                "id": "s1",
+                "prompt": "Lin runs",
+                "characters": [],
+                "requested_duration_seconds": 10,
+            },
             series_bible={"characters": []},
             video_key="video-key",
             base_url="https://api.example.com",
@@ -225,6 +232,15 @@ def test_compose_rejects_destination_swapped_to_hardlink_before_replace(
         destination.unlink()
         _hardlink_file_or_skip(destination, outside)
 
+    monkeypatch.setattr(
+        "server.app.openmontage_runner._probe_compose_input",
+        lambda _path: {
+            "duration_seconds": 1.0,
+            "video_width": 720,
+            "video_height": 1280,
+            "has_audio": False,
+        },
+    )
     monkeypatch.setattr("server.app.openmontage_runner.subprocess.run", fake_run)
 
     with pytest.raises(ValueError, match="Project workspace path is invalid"):

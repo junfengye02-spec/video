@@ -47,12 +47,13 @@ describe("AccountShellAction", () => {
 
     expect(screen.getByText("user@example.com")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "账单管理" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "模型管理" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "退出" }));
     expect(authMocks.value.logout).toHaveBeenCalledTimes(1);
   });
 
-  it("exposes billing administration only for admins and honors the navigation guard", () => {
+  it("exposes administration links only for admins and honors the navigation guard", () => {
     const onBeforeNavigate = vi.fn(() => false);
     authMocks.value = {
       ...authMocks.value,
@@ -67,6 +68,8 @@ describe("AccountShellAction", () => {
 
     const adminLink = screen.getByRole("link", { name: "账单管理" });
     expect(adminLink).toHaveAttribute("href", "/admin/billing");
+    expect(screen.getByRole("link", { name: "模型管理" }))
+      .toHaveAttribute("href", "/admin/video-models");
     fireEvent.click(adminLink);
     expect(onBeforeNavigate).toHaveBeenCalledTimes(1);
   });

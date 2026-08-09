@@ -5,11 +5,17 @@ export interface OperationToken {
   kind:
     | "open"
     | "create"
+    | "inspiration"
+    | "approve-plan"
+    | "update-plan-section"
+    | "revise-plan"
     | "save-shot"
     | "optimize"
     | "regenerate"
     | "save-continuity"
     | "upload"
+    | "prepare-render"
+    | "refresh-production"
     | "render";
   generation: number;
 }
@@ -78,7 +84,11 @@ function withoutOperation(
 }
 
 function appendUniqueEvent(events: JobEvent[], event: JobEvent): JobEvent[] {
-  return events.some((item) => item.id === event.id) ? events : [...events, event];
+  if (events.some((item) => item.id === event.id)) return events;
+  return [...events, event].sort((left, right) => {
+    const timestampOrder = left.created_at.localeCompare(right.created_at);
+    return timestampOrder || left.id.localeCompare(right.id);
+  });
 }
 
 function selectedShotFor(
@@ -102,8 +112,11 @@ function mergeSnapshot(
   }
   return {
     ...current,
-    render_report: next.render_report,
-    final_path: next.final_path ?? null,
+    // A failed remake response may omit the new render while the previous
+    // final is still valid; keep it visible until a completed replacement exists.
+    render_report: next.render_report ?? current.render_report,
+    final_path: next.final_path ?? current.final_path ?? null,
+    production: next.production ?? current.production,
   };
 }
 

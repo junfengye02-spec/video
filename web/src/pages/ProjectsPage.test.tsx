@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getStrings } from "../i18n";
@@ -7,6 +7,7 @@ import {
   BackupWorkerUnavailableError,
 } from "../localdb/backupArchiveClient";
 import { createProjectResponse } from "../test/fixtures";
+import { chooseSelectMenuOption } from "../test/selectMenu";
 import { ProjectsPage } from "./ProjectsPage";
 
 const projectRepositoryMocks = vi.hoisted(() => ({
@@ -47,6 +48,7 @@ const summary = {
   updatedAt: "2026-07-10T08:00:00Z",
   shotCount: 8,
   hasFinalRender: false,
+  cover: null,
 };
 
 const routerFuture = { v7_relativeSplatPath: true, v7_startTransition: true } as const;
@@ -64,6 +66,12 @@ function LocationProbe() {
   return <output aria-label="当前路径">{useLocation().pathname}</output>;
 }
 
+async function projectAction(projectTitle: string, actionLabel: string) {
+  fireEvent.click(await screen.findByRole("button", { name: `更多操作 ${projectTitle}` }));
+  const menu = await screen.findByRole("menu", { name: `${projectTitle} 项目操作` });
+  return within(menu).getByRole("menuitem", { name: actionLabel });
+}
+
 beforeEach(() => {
   projectRepositoryMocks.projectRepository.list.mockReset().mockResolvedValue([]);
   projectRepositoryMocks.projectRepository.delete.mockReset().mockResolvedValue(undefined);
@@ -78,6 +86,50 @@ afterEach(() => {
 });
 
 describe("ProjectsPage", () => {
+  it("creates from the home composer with the selected creative preferences", async () => {
+    const draft = createProjectResponse({ shotCount: 0 });
+    const onCreateDraft = vi.fn().mockResolvedValue(draft);
+    const onStarted = vi.fn();
+    render(
+      <MemoryRouter future={routerFuture}>
+        <ProjectsPage onCreateDraft={onCreateDraft} onStarted={onStarted} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("heading", { name: "让想法入镜" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "品牌叙事" }));
+    fireEvent.click(screen.getByRole("button", { name: "创作设置" }));
+    chooseSelectMenuOption("画幅", "9:16");
+    chooseSelectMenuOption("项目类型", "短系列");
+    fireEvent.change(screen.getByLabelText("项目标题"), { target: { value: "雨夜品牌片" } });
+    fireEvent.change(screen.getByLabelText("你想做一支什么样的视频？"), {
+      target: { value: "一只旧表见证两代人的和解" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "开始聊灵感" }));
+
+    const initialMessage = "一只旧表见证两代人的和解\n\n创作偏好：品牌叙事，9:16 画幅。";
+    await waitFor(() => expect(onCreateDraft).toHaveBeenCalledWith({
+      title: "雨夜品牌片",
+      project_type: "mini_series",
+      prompt: initialMessage,
+    }));
+    expect(onStarted).toHaveBeenCalledWith(draft.project.id, initialMessage, "gpt-5.5");
+  });
+
+  it("filters project history without changing the underlying list", async () => {
+    projectRepositoryMocks.projectRepository.list.mockResolvedValue([
+      summary,
+      { ...summary, id: "p2", title: "失重城市" },
+    ]);
+    render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
+
+    await screen.findByText("雨夜来信");
+    fireEvent.change(screen.getByLabelText("搜索项目"), { target: { value: "失重" } });
+
+    expect(screen.queryByText("雨夜来信")).not.toBeInTheDocument();
+    expect(screen.getByText("失重城市")).toBeInTheDocument();
+  });
+
   it("always exposes the extracted-directory backup action", () => {
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
@@ -105,7 +157,7 @@ describe("ProjectsPage", () => {
     projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
-    fireEvent.click(await screen.findByRole("button", { name: "删除 雨夜来信" }));
+    fireEvent.click(await projectAction("雨夜来信", "删除 雨夜来信"));
     expect(screen.getByRole("dialog", { name: "删除项目" })).toBeInTheDocument();
     expect(projectRepositoryMocks.projectRepository.delete).not.toHaveBeenCalled();
 
@@ -118,15 +170,15 @@ describe("ProjectsPage", () => {
     projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
-    const opener = await screen.findByRole("button", { name: "删除 雨夜来信" });
-    fireEvent.click(opener);
+    const opener = await screen.findByRole("button", { name: "更多操作 雨夜来信" });
+    fireEvent.click(await projectAction("雨夜来信", "删除 雨夜来信"));
     fireEvent.keyDown(screen.getByRole("dialog", { name: "删除项目" }), { key: "Escape" });
 
     expect(projectRepositoryMocks.projectRepository.delete).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: "删除项目" })).not.toBeInTheDocument();
     await waitFor(() => expect(opener).toHaveFocus());
 
-    fireEvent.click(opener);
+    fireEvent.click(await projectAction("雨夜来信", "删除 雨夜来信"));
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
     expect(projectRepositoryMocks.projectRepository.delete).not.toHaveBeenCalled();
@@ -137,7 +189,7 @@ describe("ProjectsPage", () => {
     projectRepositoryMocks.projectRepository.list.mockResolvedValue([summary]);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
-    fireEvent.click(await screen.findByRole("button", { name: "删除 雨夜来信" }));
+    fireEvent.click(await projectAction("雨夜来信", "删除 雨夜来信"));
 
     expect(screen.getByRole("button", { name: "确认删除" })).toHaveClass("async-action");
   });
@@ -148,7 +200,7 @@ describe("ProjectsPage", () => {
     projectRepositoryMocks.projectRepository.exportBackup.mockResolvedValue(blob);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
 
-    fireEvent.click(await screen.findByRole("button", { name: "导出 雨夜来信" }));
+    fireEvent.click(await projectAction("雨夜来信", "导出 雨夜来信"));
 
     await waitFor(() => expect(downloadMocks.downloadBlob).toHaveBeenCalledWith(
       blob,
@@ -166,9 +218,7 @@ describe("ProjectsPage", () => {
     projectRepositoryMocks.projectRepository.list.mockResolvedValue([project]);
     projectRepositoryMocks.projectRepository.exportBackup.mockReturnValue(pending.promise);
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
-    const exportButton = await screen.findByRole("button", {
-      name: strings.exportProject(project.title),
-    });
+    const exportButton = await projectAction(project.title, strings.exportProject(project.title));
 
     act(() => {
       exportButton.click();
@@ -188,21 +238,16 @@ describe("ProjectsPage", () => {
       projectId === firstProject.id ? first.promise : second.promise
     ));
     render(<MemoryRouter future={routerFuture}><ProjectsPage /></MemoryRouter>);
-    const firstButton = await screen.findByRole("button", {
-      name: strings.exportProject(firstProject.title),
-    });
-    const secondButton = screen.getByRole("button", {
-      name: strings.exportProject(secondProject.title),
-    });
+    fireEvent.click(await projectAction(firstProject.title, strings.exportProject(firstProject.title)));
+    fireEvent.click(await projectAction(secondProject.title, strings.exportProject(secondProject.title)));
 
-    fireEvent.click(firstButton);
-    fireEvent.click(secondButton);
-
-    expect(firstButton).toBeDisabled();
+    let secondButton = await projectAction(secondProject.title, strings.exportProject(secondProject.title));
     expect(secondButton).toBeDisabled();
 
     await act(async () => second.resolve(new Blob(["second"])));
     await waitFor(() => expect(secondButton).toBeEnabled());
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    const firstButton = await projectAction(firstProject.title, strings.exportProject(firstProject.title));
     expect(firstButton).toBeDisabled();
 
     await act(async () => first.resolve(new Blob(["first"])));

@@ -49,6 +49,12 @@ export function useModalFocus<T extends HTMLElement>({
     }
 
     wasOpenRef.current = true;
+    const panel = panelRef.current;
+    const dialog = panel instanceof HTMLDialogElement ? panel : null;
+    if (dialog && !dialog.open) {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
     let cancelled = false;
     window.queueMicrotask(() => {
       if (cancelled) return;
@@ -60,6 +66,10 @@ export function useModalFocus<T extends HTMLElement>({
 
     return () => {
       cancelled = true;
+      if (dialog?.open) {
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+      }
       if (wasOpenRef.current) {
         wasOpenRef.current = false;
         returnFocusRef.current?.focus();

@@ -44,18 +44,16 @@ class SyapiVideo(BaseTool):
     )
     agent_skills = ["ai-video-gen"]
 
-    capabilities = ["text_to_video", "image_to_video", "reference_to_video", "first_last_frame_to_video"]
+    capabilities = ["text_to_video", "reference_to_video"]
     supports = {
         "text_to_video": True,
-        "image_to_video": True,
         "reference_to_video": True,
-        "first_last_frame_to_video": True,
         "vertical_video": True,
     }
     best_for = [
         "low-friction gateway access to Veo and Omni",
         "short vertical AI drama samples",
-        "first/last-frame guided motion when paired with generated keyframes",
+        "reference-conditioned clips through the generic NewAPI images field",
     ]
     not_good_for = ["offline generation", "guaranteed actor identity across many scenes"]
     fallback_tools = ["veo_video", "kling_video", "minimax_video"]
@@ -67,7 +65,7 @@ class SyapiVideo(BaseTool):
             "prompt": {"type": "string"},
             "operation": {
                 "type": "string",
-                "enum": ["text_to_video", "image_to_video", "reference_to_video", "first_last_frame_to_video"],
+                "enum": ["text_to_video", "reference_to_video"],
                 "default": "text_to_video",
             },
             "model_variant": {
@@ -90,10 +88,6 @@ class SyapiVideo(BaseTool):
             "reference_image_path": {"type": "string"},
             "reference_image_urls": {"type": "array", "items": {"type": "string"}},
             "reference_image_paths": {"type": "array", "items": {"type": "string"}},
-            "first_frame_url": {"type": "string"},
-            "first_frame_path": {"type": "string"},
-            "last_frame_url": {"type": "string"},
-            "last_frame_path": {"type": "string"},
             "poll_interval_seconds": {"type": "number", "default": 5},
             "submit_timeout_seconds": {"type": "integer", "default": 180},
             "timeout_seconds": {"type": "integer", "default": 1200},
@@ -143,18 +137,6 @@ class SyapiVideo(BaseTool):
 
     def _collect_images(self, inputs: dict[str, Any]) -> list[str]:
         images: list[str] = []
-        operation = inputs.get("operation", "text_to_video")
-        if operation == "first_last_frame_to_video":
-            if inputs.get("first_frame_url"):
-                images.append(inputs["first_frame_url"])
-            if inputs.get("first_frame_path"):
-                images.append(self._file_to_data_uri(inputs["first_frame_path"]))
-            if inputs.get("last_frame_url"):
-                images.append(inputs["last_frame_url"])
-            if inputs.get("last_frame_path"):
-                images.append(self._file_to_data_uri(inputs["last_frame_path"]))
-            return images[:2]
-
         for key in ("image_url", "reference_image_url"):
             if inputs.get(key):
                 images.append(inputs[key])
@@ -340,6 +322,15 @@ class SyapiVideo(BaseTool):
         api_key = self._api_key()
         if not api_key:
             return ToolResult(success=False, error="SYAPI_API_KEY not set. " + self.install_instructions)
+        operation = inputs.get("operation", "text_to_video")
+        if operation in {"image_to_video", "first_last_frame_to_video"}:
+            return ToolResult(
+                success=False,
+                error=(
+                    "SYAPI /v1/videos only has a verified generic images contract in this "
+                    "integration; native first-frame and first/last-frame generation is unsupported"
+                ),
+            )
 
         import requests
 

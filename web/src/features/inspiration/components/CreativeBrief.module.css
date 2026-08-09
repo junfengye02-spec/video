@@ -1,0 +1,281 @@
+.panel {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-left: 1px solid var(--color-line);
+  background: var(--color-canvas);
+}
+
+.toolbar {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--color-line);
+  background: var(--color-surface);
+}
+
+.toolbar strong {
+  color: var(--color-ink-secondary);
+  font-size: .75rem;
+  font-weight: 650;
+}
+
+.toolbar small {
+  color: var(--color-ink-faint);
+  font-size: .6875rem;
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.scroll {
+  min-height: 0;
+  padding: var(--space-5) clamp(16px, 3vw, 34px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.document {
+  width: min(100%, 720px);
+  min-height: 100%;
+  margin-inline: auto;
+  padding: clamp(24px, 4vw, 44px);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-2);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.documentMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-bottom: 28px;
+  color: var(--color-ink-faint);
+  font-size: .625rem;
+  font-weight: 650;
+}
+
+.documentTitle > span,
+.logline > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--color-ink-faint);
+  font-size: .6875rem;
+  font-weight: 650;
+}
+
+.documentTitle h2 {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: clamp(1.5rem, 3vw, 2.125rem);
+  font-weight: 680;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.logline { margin-top: var(--space-4); }
+
+.logline p {
+  margin: 0;
+  color: var(--color-ink-secondary);
+  font-size: .9375rem;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.fieldTransition {
+  animation: shared-fade-in var(--duration-fast) var(--ease-standard) both;
+}
+
+.empty {
+  color: var(--color-ink-faint) !important;
+  font-weight: 500 !important;
+}
+
+.factGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 28px 0 0;
+  border-top: 1px solid var(--color-line);
+  border-left: 1px solid var(--color-line);
+}
+
+.factGrid > div {
+  min-width: 0;
+  padding: 13px 14px;
+  border-right: 1px solid var(--color-line);
+  border-bottom: 1px solid var(--color-line);
+}
+
+.factGrid > .wide { grid-column: 1 / -1; }
+
+.factGrid dt {
+  color: var(--color-ink-faint);
+  font-size: .6875rem;
+  font-weight: 650;
+}
+
+.factGrid dd {
+  margin: 6px 0 0;
+  color: var(--color-ink-secondary);
+  font-size: .8125rem;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.documentSection,
+.questions {
+  margin-top: 28px;
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--color-line);
+}
+
+.documentSection h3,
+.questions h3 {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: .875rem;
+  font-weight: 680;
+}
+
+.documentSection p,
+.questions p {
+  margin: 10px 0 0;
+  color: var(--color-ink-secondary);
+  font-size: .8125rem;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.mustKeep ul,
+.questions ul {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--color-ink-secondary);
+  font-size: .8125rem;
+  line-height: 1.7;
+}
+
+.mustKeep li,
+.questions li { overflow-wrap: anywhere; }
+
+.questions {
+  padding: var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 22%, var(--color-line));
+  border-radius: var(--radius-2);
+  background: var(--color-warning-soft);
+}
+
+.questions > div {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-warning);
+}
+
+.questions h3 { color: inherit; }
+
+.commandBar {
+  position: sticky;
+  bottom: calc(var(--space-4) * -1);
+  display: grid;
+  min-height: 170px;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
+  align-items: center;
+  gap: 10px var(--space-4);
+  margin-top: 30px;
+  padding: var(--space-4);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-2);
+  background: color-mix(in srgb, var(--color-surface) 94%, transparent);
+  box-shadow: 0 -10px 30px rgb(29 29 31 / 4%);
+  backdrop-filter: blur(12px);
+}
+
+.endFrameControl {
+  display: flex;
+  min-width: 0;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 9px;
+  color: var(--color-ink-secondary);
+  font-size: .75rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.endFrameControl input { width: 16px; height: 16px; margin: 0; accent-color: var(--color-accent); }
+.endFrameControl input:disabled { cursor: not-allowed; }
+.endFrameControl small { color: var(--color-ink-muted); font-size: .625rem; font-weight: 500; }
+
+.assurance {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--color-ink-secondary);
+}
+
+.assurance > svg { flex: 0 0 auto; margin-top: 1px; }
+
+.assurance p {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.assurance strong { font-size: .75rem; font-weight: 680; }
+.assurance span { color: var(--color-ink-muted); font-size: .6875rem; line-height: 1.5; }
+
+.readiness,
+.planningStatus {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  font-size: .6875rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.readiness { grid-column: 1 / -1; }
+.ready { color: var(--color-accent); }
+.pending { color: var(--color-warning); }
+.planningStatus { min-height: 32px; color: var(--color-ink-secondary); }
+.confirmCommand { width: 100%; min-width: 220px; }
+
+.commandFeedback {
+  grid-column: 1 / -1;
+}
+
+.commandFeedback :global(.command-error) { margin: 0; }
+
+@media (max-width: 900px) {
+  .panel { border-left: 0; }
+}
+
+@media (max-width: 1100px) {
+  .commandBar { grid-template-columns: minmax(0, 1fr); }
+  .confirmCommand { min-width: 0; }
+}
+
+@media (max-width: 640px) {
+  .scroll { padding: 10px; }
+  .document { padding: 22px 18px; box-shadow: none; }
+  .factGrid { grid-template-columns: minmax(0, 1fr); }
+  .factGrid > .wide { grid-column: 1; }
+  .commandBar { grid-template-columns: minmax(0, 1fr); }
+  .confirmCommand { min-width: 0; }
+}

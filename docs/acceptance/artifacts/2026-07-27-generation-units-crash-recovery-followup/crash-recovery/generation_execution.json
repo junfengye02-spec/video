@@ -1,0 +1,176 @@
+{
+  "version": "1.0",
+  "project_id": "11f8db68f1dd41328423226d1e77a548",
+  "updated_at": "2026-07-27T02:17:06.636036Z",
+  "active_generation_unit_ids": [
+    "unit-57be5ac26be932a3b6689165"
+  ],
+  "generation_units": [
+    {
+      "id": "unit-57be5ac26be932a3b6689165",
+      "plan_id": "90c6d717cda0c2e1e5330c84059f8271c6972e0f759e0211b68a6ae7f599a11e",
+      "revision": 1,
+      "status": "complete",
+      "active": false,
+      "source_shot_ids": [
+        "s1",
+        "s2"
+      ],
+      "source_shot_versions": {
+        "s1": 1,
+        "s2": 1
+      },
+      "source_beat_ids": [
+        "s1",
+        "s2"
+      ],
+      "prompt_segments": [
+        {
+          "shot_id": "s1",
+          "beat_id": "s1",
+          "prompt": "Lin in red coat finds the envelope.",
+          "recommended_duration_seconds": 5.0,
+          "transition": "continuous"
+        },
+        {
+          "shot_id": "s2",
+          "beat_id": "s2",
+          "prompt": "Chen corners Lin at the elevator.",
+          "recommended_duration_seconds": 5.0,
+          "transition": "continuous"
+        }
+      ],
+      "provider": "newapi",
+      "model_id": "omni_flash-10s",
+      "operation": "text_to_video",
+      "profile_revision": "2026-07-24.1",
+      "profile": {
+        "provider": "newapi",
+        "model_id": "omni_flash-10s",
+        "operation": "text_to_video",
+        "duration_mode": "fixed",
+        "fixed_duration_seconds": 10.0,
+        "supported_duration_seconds": [],
+        "min_duration_seconds": null,
+        "max_duration_seconds": null,
+        "supports_start_frame": false,
+        "supports_end_frame": false,
+        "supports_extend": false,
+        "supports_sequential_beats": true,
+        "supports_multi_shot_prompt": true,
+        "max_narrative_beats_per_unit": 2,
+        "max_reference_images": null,
+        "contract_source": "verified_override",
+        "profile_revision": "2026-07-24.1"
+      },
+      "requested_duration_seconds": 10.0,
+      "source_duration_seconds": 1.0,
+      "timeline_duration_seconds": 1.0,
+      "output_asset_id": "unit-video-361a53fa5118631f16b111a777fb8578",
+      "output_path": "assets/video/units/unit-57be5ac26be932a3b6689165/v1.mp4",
+      "task_item_id": "c223e3ca5ebe4136b3da572aaad77ddb",
+      "billing_job_id": "8b2ab35ee67756bf62829b2b59c5cc1b",
+      "replaces_unit_id": null,
+      "diagnostics": {
+        "tail_frame": {
+          "asset_id": "b25b04b7d71a4e0ab90d1d5ee1a846f5",
+          "path": "assets/images/keyframes/units/unit-57be5ac26be932a3b6689165/unit-57be5ac26be932a3b6689165-v1-a45a892783a36503-tail.png",
+          "media_sha256": "a45a892783a36503cc180930d138542996c4ef332616c4d04058c973be210619",
+          "sample_time_seconds": 0.9656666666666667,
+          "frame_version": 1
+        },
+        "publication": {
+          "status": "published",
+          "billing_job_id": "8b2ab35ee67756bf62829b2b59c5cc1b",
+          "result_locator": "workbench-hidden-video:11f8db68f1dd41328423226d1e77a548:8b2ab35ee67756bf62829b2b59c5cc1b",
+          "published_at": "2026-07-27T02:16:55.063865+00:00"
+        }
+      },
+      "created_at": "2026-07-27T02:16:33.469148",
+      "updated_at": "2026-07-27T02:17:06.635001Z"
+    },
+    {
+      "id": "unit-57be5ac26be932a3b6689165",
+      "plan_id": "f9f21ba845afd4d3fa896bc4a7e49c11fafe14545e7150ef5ea2f450840b7c48",
+      "revision": 2,
+      "status": "complete",
+      "active": true,
+      "source_shot_ids": [
+        "s1",
+        "s2"
+      ],
+      "source_shot_versions": {
+        "s1": 1,
+        "s2": 1
+      },
+      "source_beat_ids": [
+        "s1",
+        "s2"
+      ],
+      "prompt_segments": [
+        {
+          "shot_id": "s1",
+          "beat_id": "s1",
+          "prompt": "Lin in red coat finds the envelope.",
+          "recommended_duration_seconds": 5.0,
+          "transition": "continuous"
+        },
+        {
+          "shot_id": "s2",
+          "beat_id": "s2",
+          "prompt": "Chen corners Lin at the elevator.",
+          "recommended_duration_seconds": 5.0,
+          "transition": "continuous"
+        }
+      ],
+      "provider": "newapi",
+      "model_id": "omni_flash-10s",
+      "operation": "text_to_video",
+      "profile_revision": "2026-07-24.1",
+      "profile": {
+        "provider": "newapi",
+        "model_id": "omni_flash-10s",
+        "operation": "text_to_video",
+        "duration_mode": "fixed",
+        "fixed_duration_seconds": 10.0,
+        "supported_duration_seconds": [],
+        "min_duration_seconds": null,
+        "max_duration_seconds": null,
+        "supports_start_frame": false,
+        "supports_end_frame": false,
+        "supports_extend": false,
+        "supports_sequential_beats": true,
+        "supports_multi_shot_prompt": true,
+        "max_narrative_beats_per_unit": 2,
+        "max_reference_images": null,
+        "contract_source": "verified_override",
+        "profile_revision": "2026-07-24.1"
+      },
+      "requested_duration_seconds": 10.0,
+      "source_duration_seconds": 1.0,
+      "timeline_duration_seconds": 1.0,
+      "output_asset_id": "unit-video-dfdb327774da1ab6b922531c51e7b5e8",
+      "output_path": "assets/video/units/unit-57be5ac26be932a3b6689165/v2.mp4",
+      "task_item_id": "226d8c4e9c57424694064dfabfb8cfe0",
+      "billing_job_id": "ba186464d0407e72a0bc91f2692eaace",
+      "replaces_unit_id": "unit-57be5ac26be932a3b6689165",
+      "diagnostics": {
+        "tail_frame": {
+          "asset_id": "df48c7d7450c47599f2bf2008e907096",
+          "path": "assets/images/keyframes/units/unit-57be5ac26be932a3b6689165/unit-57be5ac26be932a3b6689165-v2-a45a892783a36503-tail.png",
+          "media_sha256": "a45a892783a36503cc180930d138542996c4ef332616c4d04058c973be210619",
+          "sample_time_seconds": 0.9656666666666667,
+          "frame_version": 2
+        },
+        "publication": {
+          "status": "published",
+          "billing_job_id": "ba186464d0407e72a0bc91f2692eaace",
+          "result_locator": "workbench-hidden-video:11f8db68f1dd41328423226d1e77a548:ba186464d0407e72a0bc91f2692eaace",
+          "published_at": "2026-07-27T02:17:06.634490+00:00"
+        }
+      },
+      "created_at": "2026-07-27T02:16:59.676788",
+      "updated_at": "2026-07-27T02:17:06.636036Z"
+    }
+  ]
+}

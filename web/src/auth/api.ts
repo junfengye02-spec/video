@@ -11,9 +11,14 @@ export type AuthErrorCode =
   | "network"
   | "unauthorized"
   | "forbidden"
+  | "session_invalid"
+  | "csrf_invalid"
   | "validation"
   | "conflict"
   | "rate_limited"
+  | "email_domain_unavailable"
+  | "email_delivery_unavailable"
+  | "email_delivery_failed"
   | "server"
   | "request_failed"
   | "invalid_response";
@@ -47,7 +52,52 @@ export function notifyAuthUnauthorized() {
   notifyUnauthorized();
 }
 
-function errorForStatus(status: number): AuthRequestError {
+function errorForStatus(
+  status: number,
+  upstreamCode?: string,
+  upstreamMessage?: string,
+): AuthRequestError {
+  if (
+    upstreamCode === "auth_session_required"
+    || (status === 401 && upstreamMessage === "Authentication required")
+  ) {
+    return new AuthRequestError(
+      "session_invalid",
+      "The browser session is stale.",
+      status,
+    );
+  }
+  if (
+    upstreamCode === "invalid_csrf_token"
+    || (status === 403 && upstreamMessage === "Invalid CSRF token")
+  ) {
+    return new AuthRequestError(
+      "csrf_invalid",
+      "The browser session is stale.",
+      status,
+    );
+  }
+  if (upstreamCode === "email_domain_unavailable") {
+    return new AuthRequestError(
+      "email_domain_unavailable",
+      "The email domain cannot receive mail.",
+      status,
+    );
+  }
+  if (upstreamCode === "email_delivery_failed") {
+    return new AuthRequestError(
+      "email_delivery_failed",
+      "Verification email delivery failed.",
+      status,
+    );
+  }
+  if (upstreamCode === "email_delivery_unavailable") {
+    return new AuthRequestError(
+      "email_delivery_unavailable",
+      "Email delivery is unavailable.",
+      status,
+    );
+  }
   if (status === 0) {
     return new AuthRequestError("network", "Unable to reach the service.");
   }
@@ -112,7 +162,7 @@ export async function authRequest<T = void>(
           error.status,
         );
       }
-      throw errorForStatus(error.status);
+      throw errorForStatus(error.status, error.code, error.message);
     }
     throw error;
   }

@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/generation_execution",
+  "title": "Video Generation Execution Snapshot",
+  "type": "object",
+  "required": [
+    "version",
+    "project_id",
+    "updated_at",
+    "active_generation_unit_ids",
+    "generation_units"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "active_generation_unit_ids": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "generation_units": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/executionUnit" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "executionUnit": {
+      "type": "object",
+      "required": [
+        "id",
+        "plan_id",
+        "revision",
+        "status",
+        "source_shot_ids",
+        "source_shot_versions",
+        "source_beat_ids",
+        "source_segment_ids",
+        "provider",
+        "model_id",
+        "operation",
+        "requested_duration_seconds",
+        "source_duration_seconds",
+        "timeline_duration_seconds",
+        "output_asset_id",
+        "output_path",
+        "task_item_id",
+        "billing_job_id",
+        "replaces_unit_id",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "plan_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "status": {
+          "type": "string",
+          "enum": [
+            "planned",
+            "queued",
+            "running",
+            "waiting_provider",
+            "complete",
+            "failed",
+            "stale"
+          ]
+        },
+        "active": { "type": "boolean" },
+        "source_shot_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "source_shot_versions": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 1 }
+        },
+        "source_beat_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "source_segment_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "prompt_segments": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "provider": { "type": "string", "minLength": 1 },
+        "model_id": { "type": "string", "minLength": 1 },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame_to_video",
+            "extend"
+          ]
+        },
+        "profile_revision": { "type": "string", "minLength": 1 },
+        "profile": { "type": "object" },
+        "requested_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "source_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "timeline_duration_seconds": {
+          "type": ["number", "null"],
+          "exclusiveMinimum": 0
+        },
+        "output_asset_id": { "type": ["string", "null"] },
+        "output_path": { "type": ["string", "null"] },
+        "task_item_id": { "type": ["string", "null"] },
+        "billing_job_id": { "type": ["string", "null"] },
+        "replaces_unit_id": { "type": ["string", "null"] },
+        "diagnostics": { "type": "object" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

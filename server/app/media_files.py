@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import shutil
 import stat
 import tempfile
 from pathlib import Path
@@ -117,6 +118,23 @@ async def save_upload_file(upload: object, destination: Path, max_bytes: int) ->
                 raise
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def copy_media_file_atomic(source: Path, destination: Path) -> None:
+    source_parent = source.parent.resolve(strict=True)
+    _validate_atomic_path(source, source_parent, require_exists=True)
+    descriptor, temporary, expected_parent = create_atomic_output(
+        destination,
+        suffix=".copy",
+    )
+    try:
+        with source.open("rb") as reader, os.fdopen(descriptor, "wb") as writer:
+            shutil.copyfileobj(reader, writer, length=1024 * 1024)
+            writer.flush()
+            os.fsync(writer.fileno())
+        replace_atomic_output(temporary, destination, expected_parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def create_atomic_output(destination: Path, *, suffix: str) -> tuple[int, Path, Path]:

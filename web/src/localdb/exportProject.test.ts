@@ -444,6 +444,64 @@ describe("exportProject", () => {
     expect(recent?.snapshot.project.title).toBe("Rain Alley");
   });
 
+  it("round-trips continuity bindings, provenance and local keyframe media", async () => {
+    const projectId = "continuity-source";
+    await saveProjectSnapshot(snapshot(null, { id: projectId, title: "Continuity Source" }));
+    const frameRef = await saveMediaBlob({
+      projectId,
+      sourcePath: "assets/images/keyframes/s1-tail.png",
+      contentType: "image/png",
+      blob: await blobFromText("tail-frame", "image/png"),
+    });
+    const source = snapshot(null, { id: projectId, title: "Continuity Source" });
+    source.series_bible.assets = [{
+      id: "tail-asset",
+      kind: "scene",
+      label: "s1 tail frame",
+      reference_images: [frameRef],
+      media_urls: [frameRef],
+      source_type: "video_frame",
+      status: "ready",
+      provenance: {
+        shot_id: "s1",
+        video_version: 2,
+        media_sha256: "a".repeat(64),
+        sample_time_seconds: 4.9,
+      },
+    }];
+    source.storyboard.shots[0].continuity = {
+      mode: "carry",
+      inherit_previous_tail: true,
+      explicit_user_first_frame_asset_id: null,
+      inherited_first_frame_asset_id: "tail-asset",
+      last_frame_asset_id: null,
+      first_frame: {
+        asset_id: "tail-asset",
+        version: 1,
+        status: "ready",
+        source: "inherited",
+        origin_shot_id: "s1",
+        origin_shot_version: 2,
+        origin_frame_version: 1,
+      },
+      last_frame: null,
+      stale: false,
+    };
+    await saveProjectSnapshot(source);
+    const backup = await exportProjectBackup(projectId);
+    await deleteLocalDb();
+
+    const imported = await importProjectBackup(
+      new File([backup], "continuity.omproj", { type: "application/zip" }),
+    );
+
+    const asset = imported.series_bible.assets?.[0];
+    expect(imported.storyboard.shots[0].continuity).toEqual(source.storyboard.shots[0].continuity);
+    expect(asset?.provenance).toEqual(source.series_bible.assets[0].provenance);
+    expect(asset?.reference_images[0]).toMatch(/^local:\/\/media\//);
+    expect(await loadMediaBlob(asset?.reference_images[0] as LocalMediaRef)).not.toBeNull();
+  });
+
   it("imports ZIP and extracted-directory backups through equivalent facade behavior", async () => {
     const project = snapshot(null, { id: "equivalent", title: "Equivalent" });
     const archived = await importProjectBackup(backupFile({ project }));
@@ -607,6 +665,18 @@ describe("exportProject", () => {
 
     expect(manifest.version).toBe(1);
     expect(manifest.project.project.project_type).toBe("long_series");
+  });
+
+  it("exports a snapshot whose legacy series mode contains a project type", async () => {
+    const legacy = snapshot(null, { id: "legacy-series-mode" });
+    (legacy.series_bible as unknown as Record<string, unknown>).mode = "single_video";
+    await saveProjectSnapshot(legacy);
+
+    const backup = await exportProjectBackup("legacy-series-mode");
+    const archive = unzipSync(new Uint8Array(await blobToArrayBuffer(backup)));
+    const manifest = JSON.parse(strFromU8(archive["openmontage-project.json"]));
+
+    expect(manifest.project.series_bible.mode).toBe("short_drama");
   });
 
   it("restores local media blobs referenced by the manifest", async () => {

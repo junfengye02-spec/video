@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.responses import PlainTextResponse, RedirectResponse
@@ -19,11 +21,13 @@ from server.app.payments.epay import (
 from server.app.payments.service import (
     EpayNotConfigured,
     PaymentOrderNotFound,
+    TopupProductNotFound,
     create_epay_order,
-    epay_return_state,
+    epay_return_result,
     get_user_order,
     list_user_orders,
-    payment_order_payload,
+    list_topup_products,
+    payment_order_user_payload,
     settle_epay_notify,
 )
 
@@ -34,7 +38,24 @@ router = APIRouter()
 class CreatePaymentOrderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    amount_cny_fen: int = Field(strict=True, gt=0, le=10_000_000)
+    amount_cny_fen: int | None = Field(default=None, strict=True, gt=0, le=10_000_000)
+    product_id: str | None = Field(default=None, min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def _require_one_payment_source(self):
+        if (self.amount_cny_fen is None) == (self.product_id is None):
+            raise ValueError("provide exactly one of amount_cny_fen or product_id")
+        return self
+
+
+PaymentStatus = Literal["pending", "paid", "expired", "failed"]
+
+
+class TopupProductResponse(BaseModel):
+    id: str
+    title: str
+    price_cny_fen: int
+    credit_units: int
 
 
 async def _read_epay_fields(request: Request) -> dict[str, str] | None:
@@ -98,9 +119,13 @@ def create_payment_order(
             db,
             user_id=current.id,
             amount_cny_fen=body.amount_cny_fen,
+            product_id=body.product_id,
             settings=settings,
         )
         db.commit()
+    except TopupProductNotFound as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except EpayNotConfigured as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -108,23 +133,50 @@ def create_payment_order(
         db.rollback()
         raise HTTPException(status_code=503, detail="payment order unavailable") from exc
 
-    payload = payment_order_payload(order)
+    payload = payment_order_user_payload(order)
     payload.update({"action_url": action_url, "form": fields})
     return payload
 
 
+@router.get("/api/topup-products", response_model=list[TopupProductResponse])
+def get_topup_products(
+    _current: CurrentUser = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[TopupProductResponse]:
+    return [
+        TopupProductResponse(
+            id=product.id,
+            title=product.title,
+            price_cny_fen=product.price_cny_fen,
+            credit_units=product.credit_units,
+        )
+        for product in list_topup_products(db)
+    ]
+
+
 @router.get("/api/payment-orders")
 def get_payment_orders(
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+    status: Annotated[PaymentStatus | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=255)] = None,
     current: CurrentUser = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     try:
-        orders = list_user_orders(db, user_id=current.id)
+        orders = list_user_orders(
+            db,
+            user_id=current.id,
+            limit=limit,
+            offset=offset,
+            status=status,
+            search=search,
+        )
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail="payment orders unavailable") from exc
-    return [payment_order_payload(order) for order in orders]
+    return [payment_order_user_payload(order) for order in orders]
 
 
 @router.get("/api/payment-orders/{order_id}")
@@ -142,7 +194,7 @@ def get_payment_order(
     except SQLAlchemyError as exc:
         db.rollback()
         raise HTTPException(status_code=503, detail="payment order unavailable") from exc
-    return payment_order_payload(order)
+    return payment_order_user_payload(order)
 
 
 @router.get("/api/payments/epay/return")
@@ -153,12 +205,18 @@ async def epay_return(
 ) -> RedirectResponse:
     fields = await _read_epay_fields(request)
     state = "failed"
+    order_id = None
     if fields is not None:
         try:
-            state = epay_return_state(db, fields=fields, settings=settings)
+            state, order_id = epay_return_result(
+                db, fields=fields, settings=settings
+            )
         except EpayNotConfigured:
             state = "failed"
-    location = f"{settings.public_origin.rstrip('/')}/recharge?payment={state}"
+    query = {"payment": state}
+    if order_id is not None:
+        query["order_id"] = order_id
+    location = f"{settings.public_origin.rstrip('/')}/wallet?{urlencode(query)}"
     return RedirectResponse(location, status_code=status.HTTP_303_SEE_OTHER)
 
 

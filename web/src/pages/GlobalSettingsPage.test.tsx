@@ -1,7 +1,8 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStrings } from "../i18n";
 import { createContinuityPlan } from "../test/fixtures";
+import { chooseSelectMenuOption } from "../test/selectMenu";
 import { GlobalSettingsPage, type GlobalSettingsPageProps } from "./GlobalSettingsPage";
 
 const singleVideoPlan = createContinuityPlan("single_video");
@@ -22,6 +23,126 @@ afterEach(() => {
 });
 
 describe("GlobalSettingsPage", () => {
+  it("uses immediate section navigation when reduced motion is requested", () => {
+    const scrollIntoView = vi.fn();
+    const focus = vi.fn();
+    const matchMedia = vi.spyOn(window, "matchMedia").mockReturnValue({
+      matches: true,
+      media: "(prefers-reduced-motion: reduce)",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    });
+    const getElementById = vi.spyOn(document, "getElementById").mockImplementation((id) => (
+      id === "settings-worldview"
+        ? { scrollIntoView } as unknown as HTMLElement
+        : id === "settings-worldview-title"
+          ? { focus } as unknown as HTMLElement
+          : null
+    ));
+    render(
+      <GlobalSettingsPage
+        plan={createContinuityPlan("single_video")}
+        saving={false}
+        onSave={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "世界观" }));
+
+    expect(matchMedia).toHaveBeenCalledWith("(prefers-reduced-motion: reduce)");
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "auto", block: "start" });
+    expect(focus).toHaveBeenCalledTimes(1);
+    getElementById.mockRestore();
+    matchMedia.mockRestore();
+  });
+
+  it("uses a directory and document layout for the five Phase 9 setting groups", () => {
+    const characters = Array.from({ length: 13 }, (_, index) => ({
+      id: `character-${index + 1}`,
+      name: `角色 ${index + 1}`,
+      role: index === 0 ? "主角" : "配角",
+      visual_lock: index === 12 ? "" : `造型锁定 ${index + 1}`,
+      voice: index === 0 ? "低沉、克制" : null,
+      reference_images: index === 12 ? [] : [`/characters/${index + 1}.png`],
+      locked: index !== 12,
+    }));
+
+    render(
+      <GlobalSettingsPage
+        characters={characters}
+        consistencyReport={{
+          score: 82,
+          issues: [{
+            shot_id: "shot-12",
+            severity: "warning",
+            code: "character_visual_conflict",
+            message: "角色 13 缺少参考图，且造型锁定为空。",
+          }],
+        }}
+        plan={createContinuityPlan("single_video")}
+        saving={false}
+        workflow={{
+          phase: "approved",
+          messages: [],
+          brief: null,
+          ready_to_confirm: true,
+          planned_asset_ids: [],
+          approved_at: "2026-07-15T08:00:00Z",
+        }}
+        onSave={vi.fn()}
+      />,
+    );
+
+    const directory = screen.getByRole("navigation", { name: "全局设定目录" });
+    ["世界观", "人物连续性", "视觉规则", "声音", "生成偏好"].forEach((name) => {
+      expect(within(directory).getByRole("button", { name })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name })).toBeInTheDocument();
+    });
+    expect(screen.getByText("角色 13")).toBeInTheDocument();
+    expect(screen.getAllByText("角色 13 缺少参考图，且造型锁定为空。").length).toBeGreaterThan(0);
+    expect(screen.getByText("蓝图已最终批准")).toBeInTheDocument();
+  });
+
+  it("persists sound and generation preferences without duplicate saves", async () => {
+    const deferred = createDeferred();
+    const onSave = vi.fn().mockReturnValue(deferred.promise);
+    render(
+      <GlobalSettingsPage
+        plan={createContinuityPlan("single_video")}
+        saving={false}
+        onSave={onSave}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("旁白规则"), {
+      target: { value: "只使用第一人称克制旁白" },
+    });
+    fireEvent.change(screen.getByLabelText("默认图像模型"), {
+      target: { value: "image-model-phase-9" },
+    });
+    chooseSelectMenuOption("默认画幅", "9:16");
+    const save = screen.getByRole("button", { name: "保存全局设定" });
+    fireEvent.click(save);
+    fireEvent.click(save);
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status")).toHaveTextContent("正在保存");
+    expect(onSave.mock.calls[0][0]).toMatchObject({
+      sound: { narration: "只使用第一人称克制旁白" },
+      generation_preferences: {
+        image_model: "image-model-phase-9",
+        aspect_ratio: "9:16",
+      },
+    });
+
+    await act(async () => deferred.resolve());
+    expect(await screen.findByRole("status")).toHaveTextContent("已保存");
+  });
+
   it("reports dirty state upward and returns clean after a successful save", async () => {
     const onDirtyChange = vi.fn();
     const onSave = vi.fn().mockResolvedValue(undefined);
@@ -137,6 +258,44 @@ describe("GlobalSettingsPage", () => {
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave.mock.calls[0][0].episodes[0].goal).toBe("找到失踪证人");
   });
+
+  it.each(["mini_series", "long_series"] as const)(
+    "renders and saves generated prompts and outlines for %s",
+    async (projectType) => {
+      const plan = createContinuityPlan(projectType);
+      plan.series_bible.series_prompt = `${projectType} series prompt`;
+      plan.episodes[0].outline = `${projectType} episode outline`;
+      plan.episodes[0].prompt = `${projectType} episode prompt`;
+      const onSave = vi.fn().mockResolvedValue(undefined);
+
+      render(
+        <GlobalSettingsPage
+          plan={plan}
+          saving={false}
+          strings={getStrings("en")}
+          onSave={onSave}
+        />,
+      );
+
+      expect(screen.getByLabelText("Series prompt")).toHaveValue(`${projectType} series prompt`);
+      expect(screen.getByLabelText("Episode 1 Episode outline")).toHaveValue(
+        `${projectType} episode outline`,
+      );
+      fireEvent.change(screen.getByLabelText("Episode 1 Episode prompt"), {
+        target: { value: `${projectType} revised episode prompt` },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Save global settings" }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+      expect(onSave.mock.calls[0][0].series_bible.series_prompt).toBe(
+        `${projectType} series prompt`,
+      );
+      expect(onSave.mock.calls[0][0].episodes[0]).toMatchObject({
+        outline: `${projectType} episode outline`,
+        prompt: `${projectType} revised episode prompt`,
+      });
+    },
+  );
 
   it("keeps the edited draft visible and reports a rejected save", async () => {
     const onSave = vi.fn().mockRejectedValue(new Error("服务端拒绝保存"));
@@ -375,6 +534,8 @@ describe("GlobalSettingsPage", () => {
         twist: "",
         cliffhanger: "",
         inherited_state: [],
+        prompt: "",
+        outline: "",
         locked: false,
       },
     ]);

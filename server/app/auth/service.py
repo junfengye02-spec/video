@@ -177,6 +177,7 @@ def bootstrap_admin(
     session_store: SessionStore,
     email: str,
     password: str,
+    provisioner: UserProvisioner | None = None,
 ) -> User:
     normalized_email = normalize_email(email)
     password_hash = hash_password(password)
@@ -211,6 +212,8 @@ def bootstrap_admin(
                     after_role="admin",
                 )
             )
+            if provisioner is not None:
+                provisioner.provision(db, user.id)
             if existing_user:
                 session_store.revoke_all(user.id)
             db.commit()

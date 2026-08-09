@@ -1,3 +1,6 @@
+import asyncio
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from redis import Redis
 from sqlalchemy.orm import Session
@@ -8,7 +11,12 @@ from server.app.auth.dependencies import (
     require_public_csrf,
     require_user,
 )
-from server.app.auth.mailer import Mailer, SmtpMailer
+from server.app.auth.mailer import (
+    Mailer,
+    RecipientDomainUnavailable,
+    SmtpMailer,
+    ensure_recipient_domain,
+)
 from server.app.auth.provisioning import NoopUserProvisioner, UserProvisioner
 from server.app.auth.security import normalize_email
 from server.app.auth.schemas import (
@@ -52,6 +60,7 @@ from server.app.request_validation import parse_json_request
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 def get_verification_store(
@@ -69,7 +78,14 @@ def get_mailer(settings: AppSettings = Depends(get_settings)) -> Mailer:
     try:
         return SmtpMailer(settings)
     except ValueError as exc:
-        raise HTTPException(status_code=503, detail="Email delivery is unavailable") from exc
+        logger.error("Email delivery is unavailable because SMTP configuration is incomplete")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "email_delivery_unavailable",
+                "message": "Email delivery is unavailable",
+            },
+        ) from exc
 
 
 def get_provisioner() -> UserProvisioner:
@@ -160,9 +176,21 @@ async def send_verification(
     request: Request,
     verification_store: VerificationStore = Depends(get_verification_store),
     mailer: Mailer = Depends(get_mailer),
+    settings: AppSettings = Depends(get_settings),
 ) -> DetailResponse:
     payload = await parse_json_request(request, EmailRequest)
     email = normalize_email(str(payload.email))
+    if settings.environment != "test":
+        try:
+            await asyncio.to_thread(ensure_recipient_domain, email)
+        except RecipientDomainUnavailable as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "email_domain_unavailable",
+                    "message": "The email domain cannot receive mail",
+                },
+            ) from exc
     try:
         code = verification_store.issue(
             email,
@@ -171,7 +199,24 @@ async def send_verification(
         )
     except (ResendTooSoon, RateLimitExceeded) as exc:
         raise HTTPException(status_code=429, detail="Verification request rate limited") from exc
-    mailer.send_verification(email, code)
+    try:
+        mailer.send_verification(email, code)
+    except Exception as exc:
+        verification_store.cancel(email, code, purpose="register")
+        domain = email.rsplit("@", 1)[-1]
+        logger.exception(
+            "Registration verification email delivery failed "
+            "(domain=%s, smtp_host=%s)",
+            domain,
+            settings.smtp_host or "unset",
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "email_delivery_failed",
+                "message": "Verification email delivery failed",
+            },
+        ) from exc
     return DetailResponse(detail="Verification code sent")
 
 

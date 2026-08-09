@@ -1,0 +1,21 @@
+{
+  "download_count": 2,
+  "duplicate_execute_attempt_count": 0,
+  "execute_attempt_count": 2,
+  "execute_count": 2,
+  "mode": "completed",
+  "quote_count": 2,
+  "quote_status_count": 1,
+  "quotes": {
+    "uq_00000000000000000000000000000001": {
+      "model": "omni_flash-10s",
+      "task_id": "task_00000000000000000000000000000001"
+    },
+    "uq_00000000000000000000000000000002": {
+      "model": "omni_flash-10s",
+      "task_id": "task_00000000000000000000000000000002"
+    }
+  },
+  "receipt_count": 2,
+  "video_task_count": 3
+}

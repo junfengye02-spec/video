@@ -1,19 +1,19 @@
-import { CreditCard, ReceiptText } from "lucide-react";
+import { CreditCard } from "lucide-react";
 import type { MouseEvent } from "react";
 import { Link } from "react-router-dom";
 import { projectRoutes } from "../../app/routes";
 import { useBilling } from "../../billing/BillingProvider";
+import { formatCnyUnits } from "../../billing/money";
 
 interface BillingShellActionProps {
   onBeforeNavigate?: () => boolean;
 }
 
 const walletText = "\u94b1\u5305";
-const ordersText = "\u8ba2\u5355";
 
 function walletLabel(value: number | null | undefined, loading: boolean): string {
   if (loading || value === null || value === undefined) return walletText;
-  return `${walletText} ${value.toLocaleString("zh-CN")}`;
+  return `${walletText} ${formatCnyUnits(value)}`;
 }
 
 export function BillingShellAction({ onBeforeNavigate }: BillingShellActionProps) {
@@ -29,10 +29,6 @@ export function BillingShellAction({ onBeforeNavigate }: BillingShellActionProps
       <Link to={projectRoutes.wallet} onClick={handleNavigate}>
         <CreditCard aria-hidden="true" size={16} />
         {walletLabel(billing.wallet?.available_units, billing.loading)}
-      </Link>
-      <Link to={projectRoutes.orders} onClick={handleNavigate}>
-        <ReceiptText aria-hidden="true" size={16} />
-        {ordersText}
       </Link>
     </>
   );

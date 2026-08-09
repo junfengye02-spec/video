@@ -1,0 +1,150 @@
+.form {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.surface {
+  display: grid;
+  overflow: visible;
+  border-color: var(--color-line-strong);
+  border-radius: var(--radius-3);
+}
+
+.message {
+  display: block;
+}
+
+.message textarea {
+  width: 100%;
+  min-height: 128px;
+  padding: 22px 22px 16px;
+  resize: vertical;
+  border: 0;
+  border-radius: var(--radius-3) var(--radius-3) 0 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--color-ink);
+  font-size: .9375rem;
+  line-height: 1.65;
+}
+
+.message textarea:focus {
+  border: 0;
+  box-shadow: inset 0 0 0 2px var(--color-accent);
+  outline: 0;
+}
+
+.message textarea::placeholder {
+  color: var(--color-ink-faint);
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(210px, 250px) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border-top: 1px solid var(--color-line);
+  border-radius: 0 0 var(--radius-3) var(--radius-3);
+  background: var(--color-surface);
+}
+
+.modeTabs {
+  min-width: 0;
+}
+
+.modelPicker {
+  min-width: 0;
+}
+
+.tabLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settingsButton {
+  min-width: 104px;
+}
+
+.options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.options label {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.options label > span {
+  color: var(--color-ink-muted);
+  font-size: var(--text-caption-size);
+  font-weight: 650;
+}
+
+.options input,
+.options select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-2);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+  font: inherit;
+}
+
+.title {
+  grid-column: 1 / -1;
+}
+
+.submit {
+  min-width: 132px;
+}
+
+.error :global(.command-error) {
+  margin: 0;
+}
+
+@media (max-width: 820px) {
+  .controls {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .modeTabs {
+    grid-column: 1 / -1;
+  }
+
+  .submit {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .message textarea {
+    min-height: 116px;
+    padding: var(--space-4);
+  }
+
+  .controls {
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-3);
+  }
+
+  .settingsButton,
+  .modelPicker,
+  .submit {
+    width: 100%;
+  }
+
+  .options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .title {
+    grid-column: auto;
+  }
+}

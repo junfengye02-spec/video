@@ -7,6 +7,7 @@ import { BillingShellAction } from "../../features/billing/BillingShellAction";
 import { OrdersPage } from "../../pages/OrdersPage";
 import { WalletPage } from "../../pages/WalletPage";
 import { BillingAdminPage } from "../../pages/admin/BillingAdminPage";
+import { VideoModelAdminPage } from "../../pages/admin/VideoModelAdminPage";
 
 function BillingShellLayout() {
   return (
@@ -33,6 +34,7 @@ export function billingRoutes() {
       <Route element={<RequireAdmin />}>
         <Route element={<BillingShellLayout />}>
           <Route path="/admin/billing" element={<BillingAdminPage />} />
+          <Route path="/admin/video-models" element={<VideoModelAdminPage />} />
         </Route>
       </Route>
     </>

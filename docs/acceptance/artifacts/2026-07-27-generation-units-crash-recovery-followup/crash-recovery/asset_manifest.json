@@ -1,0 +1,135 @@
+{
+  "version": "1.0",
+  "assets": [
+    {
+      "id": "s1-video",
+      "type": "video",
+      "path": "assets/video/s1.mp4",
+      "source_tool": "syapi_video",
+      "scene_id": "scene-1",
+      "prompt": "Lin in red coat finds the envelope.. Shot language: 50mm lens, shallow depth of field with bokeh. medium close-up from chest up, slow dolly in toward subject. Lin in red coat finds the envelope.. natural ambient lighting, neutral balanced colors. Style: rainy neon suspense. Shot intent: Reveal the clue.. Character locks: Lin: red coat, short hair. Style lock: rainy neon suspense. Location: rainy alley. Props: envelope",
+      "model": "omni_flash-10s",
+      "cost_usd": 0,
+      "requested_duration_seconds": 10.0,
+      "resolution": "720x1280",
+      "format": "mp4",
+      "provider": "syapi",
+      "generation_summary": "Mapped from short-drama storyboard shot."
+    },
+    {
+      "id": "s2-video",
+      "type": "video",
+      "path": "assets/video/s2.mp4",
+      "source_tool": "syapi_video",
+      "scene_id": "scene-1",
+      "prompt": "Chen corners Lin at the elevator.. Shot language: 35mm lens, medium depth of field. medium shot from waist up, tracking shot moving right alongside subject. Chen corners Lin at the elevator.. natural ambient lighting, neutral balanced colors. Style: rainy neon suspense. Shot intent: Show the antagonist applying pressure.. Character locks: Lin: red coat, short hair; Chen: black suit, silver glasses. Style lock: rainy neon suspense. Location: office elevator lobby. Props: security badge. Maintain the established subject, scene state, lighting, and screen direction.",
+      "model": "omni_flash-10s",
+      "cost_usd": 0,
+      "requested_duration_seconds": 10.0,
+      "resolution": "720x1280",
+      "format": "mp4",
+      "provider": "syapi",
+      "generation_summary": "Mapped from short-drama storyboard shot."
+    },
+    {
+      "id": "s3-video",
+      "type": "video",
+      "path": "assets/video/s3.mp4",
+      "source_tool": "syapi_video",
+      "scene_id": "scene-2",
+      "prompt": "Aunt Mei reveals the recording.. Shot language: 50mm lens, medium depth of field. over-the-shoulder perspective, rack focus shift between foreground and background. Aunt Mei reveals the recording.. natural ambient lighting, neutral balanced colors. Style: rainy neon suspense. Shot intent: Deepen the conspiracy with a witness reveal.. Character locks: Lin: red coat, short hair. Style lock: rainy neon suspense. Location: tea shop doorway. Props: phone. Maintain the established subject, scene state, lighting, and screen direction.",
+      "model": "omni_flash-10s",
+      "cost_usd": 0,
+      "requested_duration_seconds": 10.0,
+      "resolution": "720x1280",
+      "format": "mp4",
+      "provider": "syapi",
+      "generation_summary": "Mapped from short-drama storyboard shot."
+    },
+    {
+      "id": "s4-video",
+      "type": "video",
+      "path": "assets/video/s4.mp4",
+      "source_tool": "syapi_video",
+      "scene_id": "scene-2",
+      "prompt": "Lin confronts Chen under the billboard.. Shot language: 24mm lens, medium depth of field. medium-wide shot framing subject with surroundings, handheld camera with natural movement. Lin confronts Chen under the billboard.. natural ambient lighting, neutral balanced colors. Style: rainy neon suspense. Shot intent: Flip the power dynamic.. Character locks: Lin: red coat, short hair; Chen: black suit, silver glasses. Style lock: rainy neon suspense. Location: rainy alley. Props: phone. Maintain the established subject, scene state, lighting, and screen direction.",
+      "model": "omni_flash-10s",
+      "cost_usd": 0,
+      "requested_duration_seconds": 10.0,
+      "resolution": "720x1280",
+      "format": "mp4",
+      "provider": "syapi",
+      "generation_summary": "Mapped from short-drama storyboard shot."
+    },
+    {
+      "id": "unit-video-361a53fa5118631f16b111a777fb8578",
+      "type": "video",
+      "path": "assets/video/units/unit-57be5ac26be932a3b6689165/v1.mp4",
+      "source_tool": "newapi",
+      "scene_id": "unit-57be5ac26be932a3b6689165",
+      "prompt": "Lin in red coat finds the envelope.\nChen corners Lin at the elevator.",
+      "model": "omni_flash-10s",
+      "cost_usd": 0,
+      "requested_duration_seconds": 10.0,
+      "source_duration_seconds": 1.0,
+      "duration_seconds": 1.0,
+      "format": "mp4",
+      "provider": "newapi",
+      "generation_summary": "Generated as one authoritative video generation unit.",
+      "metadata": {
+        "generation_unit_id": "unit-57be5ac26be932a3b6689165",
+        "source_shot_ids": [
+          "s1",
+          "s2"
+        ],
+        "source_beat_ids": [
+          "s1",
+          "s2"
+        ],
+        "revision": 1,
+        "provider": "newapi",
+        "model": "omni_flash-10s",
+        "operation": "generation_unit:unit-57be5ac26be932a3b6689165:v1",
+        "active": false,
+        "status": "complete"
+      }
+    },
+    {
+      "id": "unit-video-dfdb327774da1ab6b922531c51e7b5e8",
+      "type": "video",
+      "path": "assets/video/units/unit-57be5ac26be932a3b6689165/v2.mp4",
+      "source_tool": "newapi",
+      "scene_id": "unit-57be5ac26be932a3b6689165",
+      "prompt": "Lin in red coat finds the envelope.\nChen corners Lin at the elevator.",
+      "model": "omni_flash-10s",
+      "cost_usd": 0,
+      "requested_duration_seconds": 10.0,
+      "source_duration_seconds": 1.0,
+      "duration_seconds": 1.0,
+      "format": "mp4",
+      "provider": "newapi",
+      "generation_summary": "Generated as one authoritative video generation unit.",
+      "metadata": {
+        "generation_unit_id": "unit-57be5ac26be932a3b6689165",
+        "source_shot_ids": [
+          "s1",
+          "s2"
+        ],
+        "source_beat_ids": [
+          "s1",
+          "s2"
+        ],
+        "revision": 2,
+        "provider": "newapi",
+        "model": "omni_flash-10s",
+        "operation": "generation_unit:unit-57be5ac26be932a3b6689165:v2",
+        "active": true,
+        "status": "complete"
+      }
+    }
+  ],
+  "total_cost_usd": 0,
+  "metadata": {
+    "generation_units_v2": true
+  }
+}

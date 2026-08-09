@@ -1,365 +1,217 @@
-import { useEffect, useRef, useState } from "react";
-import type { ContinuityPlan, EpisodeOutlineItem } from "../../domain/types";
+import { AlertTriangle, Check, ImageOff, UserRound } from "lucide-react";
+import type {
+  Character,
+  ConsistencyReport,
+  ContinuityPlan,
+} from "../../domain/types";
 import type { UIStrings } from "../../i18n";
+import { GenerationModelPicker } from "../../features/generation/GenerationModelPicker";
+import { SelectMenu } from "../../shared/ui";
+import { EpisodePlanningEditor } from "./EpisodePlanningEditor";
+import { LineListTextarea } from "./LineListTextarea";
 
-export type ContinuityEditorStrings = Pick<UIStrings, "continuity" | "globalSettings">;
+export type ContinuityEditorStrings = Pick<
+  UIStrings,
+  "continuity" | "globalSettings" | "modelCatalog"
+>;
 
 export interface ContinuityEditorProps {
   plan: ContinuityPlan;
   resetVersion: number;
   strings: ContinuityEditorStrings;
+  characters?: Character[];
+  consistencyReport?: ConsistencyReport | null;
   onChange: (plan: ContinuityPlan) => void;
 }
 
-function splitLines(value: string): string[] {
-  return value
-    .split("\n")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
+const EMPTY_SOUND = {
+  narration: "",
+  dialogue: "",
+  ambience: "",
+  music_direction: "",
+  prompt: "",
+  storyboard_prompt_integration: false,
+};
 
-function joinLines(value: string[]): string {
-  return value.join("\n");
-}
+const DEFAULT_GENERATION_PREFERENCES = {
+  image_model: "gpt-image-2",
+  video_model: "omni_flash-10s",
+  image_size: "1024x1024",
+  image_quality: "standard",
+  aspect_ratio: "16:9",
+};
 
-function LineListTextarea({
+export function ContinuityEditor({
+  plan,
   resetVersion,
-  value,
+  strings,
+  characters = [],
+  consistencyReport = null,
   onChange,
-}: {
-  resetVersion: number;
-  value: string[];
-  onChange: (value: string[]) => void;
-}) {
-  const joinedValue = joinLines(value);
-  const [rawValue, setRawValue] = useState(joinedValue);
-  const focusedRef = useRef(false);
-  const joinedValueRef = useRef(joinedValue);
-  joinedValueRef.current = joinedValue;
-
-  useEffect(() => {
-    if (!focusedRef.current) {
-      setRawValue(joinedValue);
-    }
-  }, [joinedValue]);
-
-  useEffect(() => {
-    setRawValue(joinedValueRef.current);
-  }, [resetVersion]);
-
-  return (
-    <textarea
-      rows={3}
-      value={rawValue}
-      onFocus={() => {
-        focusedRef.current = true;
-      }}
-      onChange={(event) => {
-        setRawValue(event.target.value);
-        onChange(splitLines(event.target.value));
-      }}
-      onBlur={() => {
-        focusedRef.current = false;
-        setRawValue(joinedValue);
-      }}
-    />
-  );
-}
-
-function createEpisode(index: number): EpisodeOutlineItem {
-  return {
-    episode_number: index,
-    title: "",
-    goal: "",
-    conflict: "",
-    twist: "",
-    cliffhanger: "",
-    inherited_state: [],
-    locked: false,
-  };
-}
-
-export function ContinuityEditor({ plan, resetVersion, strings, onChange }: ContinuityEditorProps) {
+}: ContinuityEditorProps) {
   const labels = strings.continuity;
   const groups = strings.globalSettings;
   const isSeries = plan.project_type !== "single_video";
+  const sound = { ...EMPTY_SOUND, ...(plan.sound ?? {}) };
+  const generationPreferences = {
+    ...DEFAULT_GENERATION_PREFERENCES,
+    ...(plan.generation_preferences ?? {}),
+  };
 
   const updateSeriesBible = <K extends keyof ContinuityPlan["series_bible"]>(
     field: K,
     value: ContinuityPlan["series_bible"][K],
-  ) => {
-    onChange({
-      ...plan,
-      series_bible: { ...plan.series_bible, [field]: value },
-    });
-  };
+  ) => onChange({
+    ...plan,
+    series_bible: { ...plan.series_bible, [field]: value },
+  });
 
   const updateStoryState = <K extends keyof ContinuityPlan["story_state"]>(
     field: K,
     value: ContinuityPlan["story_state"][K],
-  ) => {
-    onChange({
-      ...plan,
-      story_state: { ...plan.story_state, [field]: value },
-    });
+  ) => onChange({
+    ...plan,
+    story_state: { ...plan.story_state, [field]: value },
+  });
+
+  const updateSound = <K extends keyof typeof sound>(field: K, value: (typeof sound)[K]) => {
+    onChange({ ...plan, sound: { ...sound, [field]: value } });
   };
 
-  const updateEpisode = (episodeNumber: number, updates: Partial<EpisodeOutlineItem>) => {
-    onChange({
-      ...plan,
-      episodes: plan.episodes.map((episode) =>
-        episode.episode_number === episodeNumber ? { ...episode, ...updates } : episode,
-      ),
-    });
-  };
-
-  const addEpisode = () => {
-    const nextNumber = Math.max(0, ...plan.episodes.map((episode) => episode.episode_number)) + 1;
-    onChange({
-      ...plan,
-      active_episode_number: plan.active_episode_number ?? nextNumber,
-      episodes: [...plan.episodes, createEpisode(nextNumber)],
-    });
-  };
-
-  const episodeLabel = (episodeNumber: number, field: string) =>
-    groups.episodeFieldLabel(episodeNumber, field);
+  const updateGenerationPreference = <K extends keyof typeof generationPreferences>(
+    field: K,
+    value: (typeof generationPreferences)[K],
+  ) => onChange({
+    ...plan,
+    generation_preferences: { ...generationPreferences, [field]: value },
+  });
 
   return (
     <div className="continuity-panel" aria-label={labels.ariaLabel}>
-      <section className="continuity-subsection">
-        <h2>{groups.storyCoreTitle}</h2>
+      <section className="continuity-subsection" id="settings-worldview">
+        <h2 id="settings-worldview-title" tabIndex={-1}>{groups.worldviewTitle}</h2>
+        <h3>{groups.storyCoreTitle}</h3>
         <div className="continuity-grid">
           <label>
             <span>{labels.worldview}</span>
-            <textarea
-              rows={3}
-              value={plan.series_bible.worldview}
-              onChange={(event) => updateSeriesBible("worldview", event.target.value)}
-            />
+            <textarea rows={5} value={plan.series_bible.worldview} onChange={(event) => updateSeriesBible("worldview", event.target.value)} />
           </label>
           <label>
             <span>{labels.mainArc}</span>
-            <textarea
-              rows={3}
-              value={plan.series_bible.main_arc}
-              onChange={(event) => updateSeriesBible("main_arc", event.target.value)}
-            />
+            <textarea rows={5} value={plan.series_bible.main_arc} onChange={(event) => updateSeriesBible("main_arc", event.target.value)} />
           </label>
+          {isSeries ? (
+            <label className="is-wide">
+              <span>{labels.seriesPrompt}</span>
+              <textarea rows={5} value={plan.series_bible.series_prompt ?? ""} onChange={(event) => updateSeriesBible("series_prompt", event.target.value)} />
+            </label>
+          ) : null}
+        </div>
+        <h3>{groups.storyStateTitle}</h3>
+        <div className="continuity-grid">
+          <label><span>{labels.activeForeshadowing}</span><LineListTextarea resetVersion={resetVersion} value={plan.story_state.active_foreshadowing} onChange={(value) => updateStoryState("active_foreshadowing", value)} /></label>
+          <label><span>{labels.resolvedForeshadowing}</span><LineListTextarea resetVersion={resetVersion} value={plan.story_state.resolved_foreshadowing} onChange={(value) => updateStoryState("resolved_foreshadowing", value)} /></label>
+          <label><span>{labels.currentLocations}</span><LineListTextarea resetVersion={resetVersion} value={plan.story_state.current_locations} onChange={(value) => updateStoryState("current_locations", value)} /></label>
+          <label><span>{labels.propState}</span><LineListTextarea resetVersion={resetVersion} value={plan.story_state.prop_state} onChange={(value) => updateStoryState("prop_state", value)} /></label>
+          <label><span>{labels.locations}</span><LineListTextarea resetVersion={resetVersion} value={plan.series_bible.locations} onChange={(value) => updateSeriesBible("locations", value)} /></label>
+          <label><span>{labels.props}</span><LineListTextarea resetVersion={resetVersion} value={plan.series_bible.props} onChange={(value) => updateSeriesBible("props", value)} /></label>
         </div>
       </section>
 
-      <section className="continuity-subsection">
-        <h2>{groups.visualRulesTitle}</h2>
+      <section className="continuity-subsection" id="settings-characters">
+        <h2 id="settings-characters-title" tabIndex={-1}>{groups.charactersTitle}</h2>
+        <h3>{groups.characterRosterTitle}</h3>
+        {characters.length ? (
+          <ul className="continuity-character-list">
+            {characters.map((character) => (
+              <li key={character.id}>
+                <span className="continuity-character-icon"><UserRound aria-hidden="true" size={17} /></span>
+                <span>
+                  <strong>{character.name}</strong>
+                  <small>{character.role || character.id}</small>
+                </span>
+                <span className="continuity-character-flags">
+                  {character.reference_images.length ? <Check aria-label="reference ready" size={15} /> : <span><ImageOff aria-hidden="true" size={14} />{groups.characterReferenceMissing}</span>}
+                  {!character.visual_lock ? <span><AlertTriangle aria-hidden="true" size={14} />{groups.characterVisualMissing}</span> : null}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="empty-state">{groups.noCharacters}</p>}
+
+        <h3>{groups.charactersRelationshipsTitle}</h3>
         <div className="continuity-grid">
-          <label>
-            <span>{labels.styleLock}</span>
-            <textarea
-              rows={3}
-              value={plan.series_bible.style_lock}
-              onChange={(event) => updateSeriesBible("style_lock", event.target.value)}
-            />
-          </label>
-          <label>
-            <span>{labels.visualRules}</span>
-            <textarea
-              rows={3}
-              value={plan.series_bible.visual_rules}
-              onChange={(event) => updateSeriesBible("visual_rules", event.target.value)}
-            />
-          </label>
-          <label>
-            <span>{labels.taboos}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.series_bible.taboos}
-              onChange={(value) => updateSeriesBible("taboos", value)}
-            />
-          </label>
+          <label><span>{labels.relationshipMap}</span><LineListTextarea resetVersion={resetVersion} value={plan.series_bible.relationship_map} onChange={(value) => updateSeriesBible("relationship_map", value)} /></label>
+          <label><span>{labels.characterKnowledge}</span><LineListTextarea resetVersion={resetVersion} value={plan.story_state.character_knowledge} onChange={(value) => updateStoryState("character_knowledge", value)} /></label>
+          <label><span>{labels.characterStatus}</span><LineListTextarea resetVersion={resetVersion} value={plan.story_state.character_status} onChange={(value) => updateStoryState("character_status", value)} /></label>
+          <label><span>{labels.relationshipChanges}</span><LineListTextarea resetVersion={resetVersion} value={plan.story_state.relationship_changes} onChange={(value) => updateStoryState("relationship_changes", value)} /></label>
+        </div>
+
+        <h3>{groups.continuityIssuesTitle}</h3>
+        {consistencyReport?.issues.length ? (
+          <ul className="continuity-issue-list">
+            {consistencyReport.issues.map((issue, index) => (
+              <li key={`${issue.code}-${issue.shot_id ?? "project"}-${index}`} data-severity={issue.severity}>
+                <AlertTriangle aria-hidden="true" size={16} />
+                <span>{issue.message}</span>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="empty-state">{groups.noContinuityIssues}</p>}
+      </section>
+
+      <section className="continuity-subsection" id="settings-visual">
+        <h2 id="settings-visual-title" tabIndex={-1}>{groups.visualRulesTitle}</h2>
+        <div className="continuity-grid">
+          <label><span>{labels.styleLock}</span><textarea rows={5} value={plan.series_bible.style_lock} onChange={(event) => updateSeriesBible("style_lock", event.target.value)} /></label>
+          <label><span>{labels.visualRules}</span><textarea rows={5} value={plan.series_bible.visual_rules} onChange={(event) => updateSeriesBible("visual_rules", event.target.value)} /></label>
+          <label><span>{labels.taboos}</span><LineListTextarea resetVersion={resetVersion} value={plan.series_bible.taboos} onChange={(value) => updateSeriesBible("taboos", value)} /></label>
         </div>
       </section>
 
-      <section className="continuity-subsection">
-        <h2>{groups.charactersRelationshipsTitle}</h2>
+      <section className="continuity-subsection" id="settings-sound">
+        <h2 id="settings-sound-title" tabIndex={-1}>{groups.soundTitle}</h2>
         <div className="continuity-grid">
-          <label>
-            <span>{labels.relationshipMap}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.series_bible.relationship_map}
-              onChange={(value) => updateSeriesBible("relationship_map", value)}
-            />
-          </label>
-          <label>
-            <span>{labels.characterKnowledge}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.story_state.character_knowledge}
-              onChange={(value) => updateStoryState("character_knowledge", value)}
-            />
-          </label>
-          <label>
-            <span>{labels.characterStatus}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.story_state.character_status}
-              onChange={(value) => updateStoryState("character_status", value)}
-            />
-          </label>
-          <label>
-            <span>{labels.relationshipChanges}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.story_state.relationship_changes}
-              onChange={(value) => updateStoryState("relationship_changes", value)}
-            />
-          </label>
+          <label><span>{groups.narrationLabel}</span><textarea rows={4} value={sound.narration} onChange={(event) => updateSound("narration", event.target.value)} /></label>
+          <label><span>{groups.dialogueLabel}</span><textarea rows={4} value={sound.dialogue} onChange={(event) => updateSound("dialogue", event.target.value)} /></label>
+          <label><span>{groups.ambienceLabel}</span><textarea rows={4} value={sound.ambience} onChange={(event) => updateSound("ambience", event.target.value)} /></label>
+          <label><span>{groups.musicDirectionLabel}</span><textarea rows={4} value={sound.music_direction} onChange={(event) => updateSound("music_direction", event.target.value)} /></label>
+          <label className="is-wide"><span>{groups.soundPromptLabel}</span><textarea rows={5} value={sound.prompt} onChange={(event) => updateSound("prompt", event.target.value)} /></label>
+          <label className="checkbox-row is-wide"><input type="checkbox" checked={sound.storyboard_prompt_integration} onChange={(event) => updateSound("storyboard_prompt_integration", event.target.checked)} /><span>{groups.integrateSoundLabel}</span></label>
         </div>
       </section>
 
-      <section className="continuity-subsection">
-        <h2>{groups.storyStateTitle}</h2>
-        <div className="continuity-grid">
-          <label>
-            <span>{labels.activeForeshadowing}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.story_state.active_foreshadowing}
-              onChange={(value) => updateStoryState("active_foreshadowing", value)}
-            />
-          </label>
-          <label>
-            <span>{labels.resolvedForeshadowing}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.story_state.resolved_foreshadowing}
-              onChange={(value) => updateStoryState("resolved_foreshadowing", value)}
-            />
-          </label>
-          <label>
-            <span>{labels.propState}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.story_state.prop_state}
-              onChange={(value) => updateStoryState("prop_state", value)}
-            />
-          </label>
-          <label>
-            <span>{labels.currentLocations}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.story_state.current_locations}
-              onChange={(value) => updateStoryState("current_locations", value)}
-            />
-          </label>
-          <label>
-            <span>{labels.locations}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.series_bible.locations}
-              onChange={(value) => updateSeriesBible("locations", value)}
-            />
-          </label>
-          <label>
-            <span>{labels.props}</span>
-            <LineListTextarea
-              resetVersion={resetVersion}
-              value={plan.series_bible.props}
-              onChange={(value) => updateSeriesBible("props", value)}
-            />
-          </label>
+      <section className="continuity-subsection" id="settings-generation">
+        <h2 id="settings-generation-title" tabIndex={-1}>{groups.generationPreferencesTitle}</h2>
+        <div className="continuity-grid continuity-preferences-grid">
+          <GenerationModelPicker
+            capability="image"
+            label={groups.imageModelLabel}
+            strings={strings.modelCatalog}
+            value={generationPreferences.image_model}
+            onChange={(value) => updateGenerationPreference("image_model", value)}
+          />
+          <GenerationModelPicker
+            capability="video"
+            label={groups.videoModelLabel}
+            strings={strings.modelCatalog}
+            value={generationPreferences.video_model}
+            onChange={(value) => updateGenerationPreference("video_model", value)}
+          />
+          <SelectMenu label={groups.imageSizeLabel} value={generationPreferences.image_size} onValueChange={(value) => updateGenerationPreference("image_size", value)} options={[{ value: "1024x1024", label: "1024 x 1024" }, { value: "1536x1024", label: "1536 x 1024" }, { value: "1024x1536", label: "1024 x 1536" }]} />
+          <SelectMenu label={groups.imageQualityLabel} value={generationPreferences.image_quality} onValueChange={(value) => updateGenerationPreference("image_quality", value)} options={[{ value: "standard", label: "standard" }, { value: "high", label: "high" }]} />
+          <SelectMenu label={groups.aspectRatioLabel} value={generationPreferences.aspect_ratio} onValueChange={(value) => updateGenerationPreference("aspect_ratio", value)} options={[{ value: "16:9", label: "16:9" }, { value: "9:16", label: "9:16" }, { value: "1:1", label: "1:1" }, { value: "4:3", label: "4:3" }]} />
         </div>
       </section>
 
       {isSeries ? (
-        <section className="continuity-subsection">
-          <h2>{groups.episodePlanningTitle}</h2>
-          <div className="episode-actions">
-            <p className="active-episode-summary">
-              {labels.currentProductionEpisode(plan.active_episode_number)}
-            </p>
-            <button className="secondary-button" type="button" onClick={addEpisode}>
-              {labels.addEpisode}
-            </button>
-          </div>
-          <div className="episode-list">
-            {plan.episodes.map((episode) => (
-              <article key={episode.episode_number} className="episode-row episode-editor">
-                <div className="episode-toolbar">
-                  <strong>{groups.episodeHeading(episode.episode_number, episode.title)}</strong>
-                  {plan.active_episode_number === episode.episode_number ? (
-                    <span className="status-pill">{labels.currentEpisodeBadge}</span>
-                  ) : (
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => onChange({ ...plan, active_episode_number: episode.episode_number })}
-                    >
-                      {labels.setCurrentEpisode(episode.episode_number)}
-                    </button>
-                  )}
-                </div>
-                <div className="continuity-grid">
-                  <label>
-                    <span>{episodeLabel(episode.episode_number, labels.episodeTitle)}</span>
-                    <input
-                      value={episode.title}
-                      onChange={(event) => updateEpisode(episode.episode_number, { title: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>{episodeLabel(episode.episode_number, labels.goal)}</span>
-                    <textarea
-                      rows={3}
-                      value={episode.goal}
-                      onChange={(event) => updateEpisode(episode.episode_number, { goal: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>{episodeLabel(episode.episode_number, labels.conflict)}</span>
-                    <textarea
-                      rows={3}
-                      value={episode.conflict}
-                      onChange={(event) => updateEpisode(episode.episode_number, { conflict: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>{episodeLabel(episode.episode_number, labels.twist)}</span>
-                    <textarea
-                      rows={3}
-                      value={episode.twist}
-                      onChange={(event) => updateEpisode(episode.episode_number, { twist: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>{episodeLabel(episode.episode_number, labels.cliffhanger)}</span>
-                    <textarea
-                      rows={3}
-                      value={episode.cliffhanger}
-                      onChange={(event) => updateEpisode(episode.episode_number, { cliffhanger: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>{episodeLabel(episode.episode_number, labels.inheritedState)}</span>
-                    <LineListTextarea
-                      resetVersion={resetVersion}
-                      value={episode.inherited_state}
-                      onChange={(value) => updateEpisode(episode.episode_number, { inherited_state: value })}
-                    />
-                  </label>
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={episode.locked}
-                      onChange={(event) => updateEpisode(episode.episode_number, { locked: event.target.checked })}
-                    />
-                    <span>{episodeLabel(episode.episode_number, labels.locked)}</span>
-                  </label>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
+        <EpisodePlanningEditor
+          plan={plan}
+          resetVersion={resetVersion}
+          labels={labels}
+          groups={groups}
+          onChange={onChange}
+        />
       ) : null}
     </div>
   );

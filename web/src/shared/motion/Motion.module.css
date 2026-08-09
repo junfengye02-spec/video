@@ -1,0 +1,21 @@
+.fade {
+  animation: shared-fade-in var(--duration-ui) var(--ease-standard) both;
+}
+
+.liftFade {
+  animation: shared-lift-fade-in var(--duration-message) var(--ease-standard) both;
+}
+
+.scaleFade {
+  transform-origin: var(--motion-origin, top right);
+  animation: shared-scale-fade-in var(--duration-ui) var(--ease-out) both;
+}
+
+.slidePanel {
+  animation: shared-slide-in-right var(--duration-panel) var(--ease-out) both;
+}
+
+.route {
+  min-width: 0;
+  animation: shared-route-in var(--duration-ui) var(--ease-standard) both;
+}

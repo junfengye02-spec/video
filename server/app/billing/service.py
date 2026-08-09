@@ -69,6 +69,9 @@ class _BillingSettings(Protocol):
     billing_reference_recovery_seconds: int
     billing_receipt_deadline_seconds: int
     billing_hold_timeout_seconds: int
+    newapi_text_fixed_group: str
+    newapi_image_fixed_group: str
+    newapi_video_fixed_group: str
 
 
 _CAPABILITY_ROUTES = {
@@ -170,6 +173,7 @@ def _validate_quote(
     scoped_quote: TokenScopedQuote,
     *,
     capability: TokenKind,
+    expected_fixed_group: str,
     provider_method: str,
     provider_route: str,
     now: datetime,
@@ -224,7 +228,7 @@ def _validate_quote(
         or (enforce_quote_context and quote.relay_format != expected_format)
         or (
             enforce_quote_context
-            and quote.fixed_group != f"openmontage-{capability}"
+            and quote.fixed_group != expected_fixed_group
         )
         or quote_expires_at <= now
         or len(scoped_quote.token_alias) > 64
@@ -258,6 +262,13 @@ class BillingService:
         self.settings = settings
         self.artifact_inspector = artifact_inspector
         self._now = now
+
+    def _expected_fixed_group(self, capability: TokenKind) -> str:
+        return getattr(
+            self.settings,
+            f"newapi_{capability}_fixed_group",
+            f"openmontage-{capability}",
+        )
 
     def create_parent_job(
         self, *, user_id: str, project_id: str, operation: str
@@ -385,13 +396,31 @@ class BillingService:
         self, job: GenerationJob, receipt: UsageReceipt
     ) -> None:
         self._validate_receipt_identity(job, receipt)
+        media_pricing_is_financially_equivalent = (
+            job.capability in {"image", "video"}
+            and receipt.status == "settled"
+            and receipt.refunded_quota == 0
+            and receipt.quota == job.quote_estimated_quota
+            and receipt.cost_amount_micro == job.quote_estimated_provider_cost_micro
+        )
+        text_pricing_is_financially_equivalent = (
+            job.capability == "text"
+            and receipt.status == "settled"
+            and receipt.refunded_quota == 0
+            and Decimal(receipt.cost_amount_micro) * receipt.quota_per_unit
+            == Decimal(receipt.quota) * Decimal(1_000_000)
+        )
         if (
             receipt.status == "pending"
             or receipt.settled_at is None
             or receipt.quota_per_unit <= 0
             or not receipt.pricing_version
             or receipt.quota_per_unit != job.quote_quota_per_unit
-            or receipt.pricing_version != job.quote_pricing_version
+            or (
+                receipt.pricing_version != job.quote_pricing_version
+                and not media_pricing_is_financially_equivalent
+                and not text_pricing_is_financially_equivalent
+            )
         ):
             raise InvalidBillingState("receipt snapshot does not match billing quote")
         if receipt.status == "settled" and (
@@ -476,6 +505,7 @@ class BillingService:
         provider_quote = _validate_quote(
             quote,
             capability=capability,
+            expected_fixed_group=self._expected_fixed_group(capability),
             provider_method=provider_method,
             provider_route=provider_route,
             now=now,
@@ -708,6 +738,7 @@ class BillingService:
                 provider_quote = _validate_quote(
                     fresh_quote,
                     capability=job.capability,
+                    expected_fixed_group=self._expected_fixed_group(job.capability),
                     provider_method=job.provider_method,
                     provider_route=job.provider_route,
                     now=self._now(),
@@ -730,7 +761,7 @@ class BillingService:
             )
             if provider_quote.relay_format != expected_format:
                 raise InvalidBillingState("fresh quote provider route changed")
-            if provider_quote.fixed_group != f"openmontage-{job.capability}":
+            if provider_quote.fixed_group != self._expected_fixed_group(job.capability):
                 raise InvalidBillingState("fresh quote capability group changed")
             duplicate = self.db.scalar(
                 select(GenerationJob.id).where(

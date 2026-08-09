@@ -92,6 +92,19 @@ const localMediaUrlMocks = vi.hoisted(() => ({
 vi.mock("../api/client", () => apiMocks);
 vi.mock("../features/generation/GenerationService", () => ({
   generationService: {
+    listModels: vi.fn(async (capability: "text" | "image" | "video") => ({
+      capability,
+      models: capability === "text"
+        ? ["gpt-5.5"]
+        : capability === "image"
+          ? ["gpt-image-2"]
+          : ["omni_flash-10s"],
+    })),
+    listAssets: vi.fn(async () => ({ assets: [], next_cursor: null })),
+    generateImages: vi.fn(),
+    listTasks: vi.fn(async () => ({ tasks: [] })),
+    retryTaskItem: vi.fn(),
+    addAssetToProject: vi.fn(),
     optimize: vi.fn((projectId: string, shotId: string, sourceText: string) => (
       apiMocks.optimizePrompt(projectId, {
         target: "shot",
@@ -100,6 +113,7 @@ vi.mock("../features/generation/GenerationService", () => ({
         mode: "shot_json",
       })
     )),
+    optimizeImagePrompt: vi.fn(),
     saveShot: vi.fn((projectId: string, shotId: string, payload: unknown) => (
       apiMocks.saveShot(projectId, shotId, payload)
     )),
@@ -197,15 +211,21 @@ vi.mock("../platform/storage/MediaRepository", () => ({
 const zh = getStrings("zh");
 
 const routeMatrix = [
-  { path: "/login", label: "Sign in", access: "public", kind: "heading" },
-  { path: "/register", label: "Create account", access: "public", kind: "heading" },
-  { path: "/projects", label: zh.projectsPage.title, access: "authenticated", kind: "heading" },
+  { path: "/login", label: "欢迎回来", access: "public", kind: "heading" },
+  { path: "/register", label: "创建创作者账户", access: "public", kind: "heading" },
+  { path: "/forgot-password", label: "找回你的创作空间", access: "public", kind: "heading" },
+  { path: "/reset-password", label: "设置新密码", access: "public", kind: "heading" },
+  { path: "/projects", label: "让想法入镜", access: "authenticated", kind: "heading" },
+  { path: "/projects/p1/idea", label: "\u7075\u611f\u5bf9\u8bdd", access: "authenticated", kind: "heading", phase: "inspiration" },
+  { path: "/projects/p1/plan-review", label: "创作蓝图", access: "authenticated", kind: "heading", phase: "plan_review" },
   { path: "/projects/p1/storyboard", label: zh.storyboardPage.shotListLabel, access: "authenticated", kind: "text" },
   { path: "/projects/p1/settings", label: zh.globalSettings.title, access: "authenticated", kind: "heading" },
   { path: "/projects/p1/resources", label: zh.resources.title, access: "authenticated", kind: "heading" },
   { path: "/projects/p1/production", label: zh.production.pageLabel, access: "authenticated", kind: "label" },
   { path: "/wallet", label: zh.billing.walletTitle, access: "authenticated", kind: "heading" },
   { path: "/orders", label: zh.billing.ordersTitle, access: "authenticated", kind: "heading" },
+  { path: "/admin/billing", label: "\u8ba1\u8d39\u7ba1\u7406", access: "admin", kind: "heading" },
+  { path: "/admin/video-models", label: "\u89c6\u9891\u6a21\u578b\u65f6\u957f", access: "admin", kind: "heading" },
 ] as const;
 
 function projectSnapshot(): ShortDramaProjectResponse {
@@ -295,6 +315,28 @@ describe("App composition contracts", () => {
   it.each(routeMatrix)("renders the route matrix entry $path", async (route) => {
     if (route.access === "public") {
       authMocks.value = { ...authMocks.value, user: null };
+    } else if (route.access === "admin") {
+      authMocks.value = {
+        ...authMocks.value,
+        user: { id: "admin-1", email: "admin@example.com", role: "admin" },
+      };
+    }
+    if ("phase" in route) {
+      const snapshot = projectSnapshot();
+      snapshot.creative_workflow = {
+        phase: route.phase,
+        messages: [],
+        brief: null,
+        ready_to_confirm: false,
+        planned_asset_ids: [],
+        approved_at: null,
+      };
+      localProjectStoreMocks.loadProjectSnapshot.mockResolvedValue({
+        id: "p1",
+        title: "Rain Alley",
+        updatedAt: "2026-07-11T08:00:00Z",
+        snapshot,
+      });
     }
 
     renderAt(route.path);
@@ -316,14 +358,14 @@ describe("App composition contracts", () => {
     },
   );
 
-  it.each(routeMatrix.filter((route) => route.access === "authenticated"))(
+  it.each(routeMatrix.filter((route) => route.access !== "public"))(
     "preserves the return URL for protected deep link $path",
     async (route) => {
       authMocks.value = { ...authMocks.value, user: null };
 
       renderAt(route.path);
 
-      expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "欢迎回来" })).toBeInTheDocument();
       expect(window.location.pathname).toBe("/login");
       const from = window.history.state?.usr?.from as {
         hash?: string;
@@ -341,7 +383,7 @@ describe("App composition contracts", () => {
 
     authMocks.value = { ...authMocks.value, user: null };
     const login = renderAt("/login");
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "欢迎回来" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     login.unmount();
 

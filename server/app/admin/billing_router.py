@@ -7,16 +7,16 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from server.app.auth.dependencies import CurrentUser, require_admin, require_csrf
-from server.app.auth.models import AdminAuditLog
+from server.app.auth.models import AdminAuditLog, User
 from server.app.billing.models import BillingReconciliation, BillingSetting
 from server.app.db.session import get_db
 from server.app.payments.models import PaymentOrder
-from server.app.wallet.models import WalletEntry
+from server.app.wallet.models import WalletAccount, WalletEntry
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin-billing"])
@@ -31,6 +31,18 @@ class BillingSettingsResponse(BaseModel):
     version: int
     created_at: datetime
     updated_at: datetime
+
+
+class BillingSummaryResponse(BaseModel):
+    gross_paid_cny_fen: int
+    total_orders: int
+    pending_orders: int
+    paid_orders: int
+    failed_orders: int
+    expired_orders: int
+    wallet_balance_units: int
+    wallet_held_units: int
+    wallet_available_units: int
 
 
 class PaymentOrderAdminResponse(BaseModel):
@@ -57,6 +69,18 @@ class WalletEntryAdminResponse(BaseModel):
     kind: str
     source_type: str
     source_id: str
+    created_at: datetime
+
+
+class AdminUserWalletResponse(BaseModel):
+    id: str
+    email: str
+    role: str
+    status: str
+    wallet_id: str | None
+    balance_units: int
+    held_units: int
+    available_units: int
     created_at: datetime
 
 
@@ -90,10 +114,39 @@ class UpdateBillingSettingsRequest(ReasonedRequest):
     multiplier_bps: int = Field(ge=10_000, le=100_000)
 
 
+class AdjustWalletBalanceRequest(ReasonedRequest):
+    amount_units: int = Field(
+        strict=True,
+        ge=-9_000_000_000_000_000,
+        le=9_000_000_000_000_000,
+    )
+    request_id: str = Field(
+        min_length=16,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+    @field_validator("amount_units")
+    @classmethod
+    def _require_nonzero_amount(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("amount_units must not be zero")
+        return value
+
+
+class WalletBalanceAdjustmentResponse(AdminUserWalletResponse):
+    entry_id: str
+    adjustment_amount_units: int
+
+
 class ReconciliationRetryResponse(BaseModel):
     id: str
     status: str
     next_retry_at: datetime
+
+
+class RetryReconciliationRequest(ReasonedRequest):
+    pass
 
 
 def _require_admin_csrf(current: CurrentUser = Depends(require_csrf)) -> CurrentUser:
@@ -144,6 +197,25 @@ def _audit_log(
     )
 
 
+def _admin_user_wallet_response(
+    user: User,
+    wallet: WalletAccount | None,
+) -> AdminUserWalletResponse:
+    balance_units = wallet.balance_units if wallet is not None else 0
+    held_units = wallet.held_units if wallet is not None else 0
+    return AdminUserWalletResponse(
+        id=user.id,
+        email=user.email,
+        role=user.role,
+        status=user.status,
+        wallet_id=wallet.id if wallet is not None else None,
+        balance_units=balance_units,
+        held_units=held_units,
+        available_units=balance_units - held_units,
+        created_at=user.created_at,
+    )
+
+
 @router.get("/billing/settings", response_model=BillingSettingsResponse)
 def get_billing_settings(
     _current: CurrentUser = Depends(require_admin),
@@ -157,6 +229,50 @@ def get_billing_settings(
         version=settings.version,
         created_at=settings.created_at,
         updated_at=settings.updated_at,
+    )
+
+
+@router.get("/billing/summary", response_model=BillingSummaryResponse)
+def get_billing_summary(
+    _current: CurrentUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> BillingSummaryResponse:
+    order_rows = db.execute(
+        select(
+            func.count(PaymentOrder.id),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (PaymentOrder.status == "paid", PaymentOrder.price_cny_fen),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+            func.coalesce(func.sum(case((PaymentOrder.status == "pending", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((PaymentOrder.status == "paid", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((PaymentOrder.status == "failed", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((PaymentOrder.status == "expired", 1), else_=0)), 0),
+        )
+    ).one()
+    wallet_row = db.execute(
+        select(
+            func.coalesce(func.sum(WalletAccount.balance_units), 0),
+            func.coalesce(func.sum(WalletAccount.held_units), 0),
+        )
+    ).one()
+    balance_units = int(wallet_row[0])
+    held_units = int(wallet_row[1])
+    return BillingSummaryResponse(
+        total_orders=int(order_rows[0]),
+        gross_paid_cny_fen=int(order_rows[1]),
+        pending_orders=int(order_rows[2]),
+        paid_orders=int(order_rows[3]),
+        failed_orders=int(order_rows[4]),
+        expired_orders=int(order_rows[5]),
+        wallet_balance_units=balance_units,
+        wallet_held_units=held_units,
+        wallet_available_units=balance_units - held_units,
     )
 
 
@@ -204,18 +320,158 @@ def update_billing_settings(
         ) from exc
 
 
+@router.get("/users", response_model=list[AdminUserWalletResponse])
+def get_admin_users(
+    limit: LimitQuery = 100,
+    search: Annotated[str | None, Query(max_length=320)] = None,
+    _current: CurrentUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[AdminUserWalletResponse]:
+    stmt = select(User, WalletAccount).outerjoin(
+        WalletAccount, WalletAccount.user_id == User.id
+    )
+    normalized_search = search.strip().lower() if search is not None else ""
+    if normalized_search:
+        stmt = stmt.where(
+            func.lower(User.email).contains(normalized_search, autoescape=True)
+        )
+    rows = db.execute(
+        stmt.order_by(User.created_at.desc(), User.id.desc()).limit(limit)
+    ).all()
+    return [_admin_user_wallet_response(user, wallet) for user, wallet in rows]
+
+
+@router.post(
+    "/users/{user_id}/balance-adjustments",
+    response_model=WalletBalanceAdjustmentResponse,
+)
+def adjust_admin_user_balance(
+    user_id: str,
+    body: AdjustWalletBalanceRequest,
+    current: CurrentUser = Depends(_require_admin_csrf),
+    db: Session = Depends(get_db),
+) -> WalletBalanceAdjustmentResponse:
+    idempotency_key = f"admin-adjust:{body.request_id}"
+    try:
+        existing = db.scalar(
+            select(WalletEntry).where(
+                WalletEntry.idempotency_key == idempotency_key
+            )
+        )
+        if existing is not None:
+            if (
+                existing.user_id != user_id
+                or existing.amount_units != body.amount_units
+                or existing.source_type != "admin_adjustment"
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="adjustment request conflicts with an existing entry",
+                )
+            user = db.get(User, user_id)
+            wallet = db.scalar(
+                select(WalletAccount).where(WalletAccount.user_id == user_id)
+            )
+            if user is None or wallet is None:
+                raise HTTPException(status_code=404, detail="user wallet not found")
+            response = _admin_user_wallet_response(user, wallet)
+            return WalletBalanceAdjustmentResponse(
+                **response.model_dump(),
+                entry_id=existing.id,
+                adjustment_amount_units=existing.amount_units,
+            )
+
+        user = db.get(User, user_id)
+        wallet = db.scalar(
+            select(WalletAccount)
+            .where(WalletAccount.user_id == user_id)
+            .with_for_update()
+        )
+        if user is None or wallet is None:
+            raise HTTPException(status_code=404, detail="user wallet not found")
+
+        next_balance = wallet.balance_units + body.amount_units
+        if next_balance < wallet.held_units:
+            raise HTTPException(
+                status_code=409,
+                detail="adjustment would reduce balance below held units",
+            )
+
+        entry = WalletEntry(
+            id=uuid.uuid4().hex,
+            wallet_id=wallet.id,
+            user_id=user.id,
+            amount_units=body.amount_units,
+            balance_after_units=next_balance,
+            kind="admin_credit" if body.amount_units > 0 else "admin_debit",
+            source_type="admin_adjustment",
+            source_id=body.request_id,
+            idempotency_key=idempotency_key,
+        )
+        before = {
+            "balance_units": wallet.balance_units,
+            "held_units": wallet.held_units,
+        }
+        wallet.balance_units = next_balance
+        after = {
+            "amount_units": body.amount_units,
+            "balance_units": next_balance,
+            "entry_id": entry.id,
+            "held_units": wallet.held_units,
+            "reason": body.reason,
+            "user_id": user.id,
+        }
+        db.add(entry)
+        db.add(
+            _audit_log(
+                actor_id=current.id,
+                action="wallet.balance.adjust",
+                object_type="wallet_account",
+                object_id=wallet.id,
+                before=before,
+                after=after,
+            )
+        )
+        db.commit()
+        db.refresh(wallet)
+        response = _admin_user_wallet_response(user, wallet)
+        return WalletBalanceAdjustmentResponse(
+            **response.model_dump(),
+            entry_id=entry.id,
+            adjustment_amount_units=entry.amount_units,
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="user wallet unavailable") from exc
+
+
 @router.get("/payment-orders", response_model=list[PaymentOrderAdminResponse])
 def get_admin_payment_orders(
     limit: LimitQuery = 50,
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     status: Annotated[PaymentStatus | None, Query()] = None,
+    search: Annotated[str | None, Query(max_length=255)] = None,
     _current: CurrentUser = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> list[PaymentOrderAdminResponse]:
     stmt = select(PaymentOrder)
     if status is not None:
         stmt = stmt.where(PaymentOrder.status == status)
+    normalized_search = search.strip().lower() if search is not None else ""
+    if normalized_search:
+        stmt = stmt.where(
+            func.lower(PaymentOrder.product_title).contains(
+                normalized_search,
+                autoescape=True,
+            )
+        )
     orders = db.scalars(
-        stmt.order_by(PaymentOrder.created_at.desc(), PaymentOrder.id.desc()).limit(limit)
+        stmt.order_by(PaymentOrder.created_at.desc(), PaymentOrder.id.desc())
+        .offset(offset)
+        .limit(limit)
     ).all()
     return [
         PaymentOrderAdminResponse(
@@ -307,6 +563,7 @@ def get_admin_billing_reconciliations(
 )
 def retry_admin_billing_reconciliation(
     reconciliation_id: str,
+    body: RetryReconciliationRequest,
     current: CurrentUser = Depends(_require_admin_csrf),
     db: Session = Depends(get_db),
 ) -> ReconciliationRetryResponse:
@@ -322,7 +579,10 @@ def retry_admin_billing_reconciliation(
             raise HTTPException(status_code=409, detail="reconciliation is closed")
         before = {"next_retry_at": _audit_datetime(row.next_retry_at)}
         row.next_retry_at = datetime.now(timezone.utc)
-        after = {"next_retry_at": _audit_datetime(row.next_retry_at)}
+        after = {
+            "next_retry_at": _audit_datetime(row.next_retry_at),
+            "reason": body.reason,
+        }
         db.add(
             _audit_log(
                 actor_id=current.id,

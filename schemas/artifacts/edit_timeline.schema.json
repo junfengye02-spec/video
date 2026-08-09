@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/edit_timeline",
+  "title": "Edit Timeline",
+  "description": "Frame-exact, user-editable timeline compiled into an immutable render plan.",
+  "type": "object",
+  "required": [
+    "version",
+    "project_id",
+    "revision",
+    "output",
+    "media_references",
+    "tracks",
+    "transitions",
+    "render_runtime"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "2.0" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "revision": { "type": "string", "minLength": 1 },
+    "output": { "$ref": "#/$defs/output" },
+    "media_references": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/media_reference" }
+    },
+    "tracks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/track" }
+    },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transition" }
+    },
+    "render_runtime": {
+      "type": "string",
+      "enum": ["remotion", "hyperframes", "ffmpeg"]
+    },
+    "renderer_family": { "type": "string" },
+    "metadata": { "type": "object" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "time": {
+      "type": "object",
+      "required": ["value", "rate_numerator", "rate_denominator"],
+      "properties": {
+        "value": { "type": "integer", "minimum": 0 },
+        "rate_numerator": { "type": "integer", "exclusiveMinimum": 0 },
+        "rate_denominator": { "type": "integer", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "range": {
+      "type": "object",
+      "required": ["start", "duration"],
+      "properties": {
+        "start": { "$ref": "#/$defs/time" },
+        "duration": { "$ref": "#/$defs/time" }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "required": [
+        "width",
+        "height",
+        "frame_rate_numerator",
+        "frame_rate_denominator",
+        "format",
+        "video_codec",
+        "audio_codec"
+      ],
+      "properties": {
+        "width": { "type": "integer", "exclusiveMinimum": 0 },
+        "height": { "type": "integer", "exclusiveMinimum": 0 },
+        "frame_rate_numerator": { "type": "integer", "exclusiveMinimum": 0 },
+        "frame_rate_denominator": { "type": "integer", "exclusiveMinimum": 0 },
+        "format": { "type": "string", "const": "mp4" },
+        "video_codec": { "type": "string" },
+        "audio_codec": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "media_reference": {
+      "type": "object",
+      "required": ["id", "path", "kind", "metadata"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["video", "audio", "image"] },
+        "available_range": {
+          "oneOf": [
+            { "$ref": "#/$defs/range" },
+            { "type": "null" }
+          ]
+        },
+        "has_audio": { "type": ["boolean", "null"] },
+        "probe_hash": { "type": ["string", "null"] },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "source_audio": {
+      "type": "object",
+      "required": ["policy", "volume"],
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": ["preserve", "mix", "replace", "mute"]
+        },
+        "volume": { "type": "number", "minimum": 0, "maximum": 2 }
+      },
+      "additionalProperties": false
+    },
+    "clip": {
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "media_reference_id",
+        "source_range",
+        "timeline_duration",
+        "source_audio",
+        "speed",
+        "metadata"
+      ],
+      "properties": {
+        "type": { "type": "string", "const": "clip" },
+        "id": { "type": "string", "minLength": 1 },
+        "media_reference_id": { "type": "string", "minLength": 1 },
+        "source_range": { "$ref": "#/$defs/range" },
+        "timeline_duration": { "$ref": "#/$defs/time" },
+        "source_audio": { "$ref": "#/$defs/source_audio" },
+        "speed": { "type": "number", "exclusiveMinimum": 0 },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "gap": {
+      "type": "object",
+      "required": ["type", "id", "duration"],
+      "properties": {
+        "type": { "type": "string", "const": "gap" },
+        "id": { "type": "string", "minLength": 1 },
+        "duration": { "$ref": "#/$defs/time" }
+      },
+      "additionalProperties": false
+    },
+    "track": {
+      "type": "object",
+      "required": ["id", "kind", "role", "items", "enabled", "volume", "metadata"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["video", "audio", "subtitle"] },
+        "role": {
+          "type": "string",
+          "enum": [
+            "primary",
+            "overlay",
+            "subtitle",
+            "dialogue",
+            "narration",
+            "music",
+            "sfx",
+            "ambience"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/clip" },
+              { "$ref": "#/$defs/gap" }
+            ]
+          }
+        },
+        "enabled": { "type": "boolean" },
+        "volume": { "type": "number", "minimum": 0, "maximum": 2 },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "transition": {
+      "type": "object",
+      "required": [
+        "id",
+        "from_item_id",
+        "to_item_id",
+        "type",
+        "in_offset",
+        "out_offset",
+        "audio_curve"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "from_item_id": { "type": "string", "minLength": 1 },
+        "to_item_id": { "type": "string", "minLength": 1 },
+        "type": {
+          "type": "string",
+          "enum": ["dissolve", "fade_through_black"]
+        },
+        "in_offset": { "$ref": "#/$defs/time" },
+        "out_offset": { "$ref": "#/$defs/time" },
+        "audio_curve": {
+          "type": "string",
+          "enum": ["linear", "equal_power"]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

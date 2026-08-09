@@ -1,0 +1,124 @@
+.composer {
+  display: grid;
+  gap: 9px;
+  padding-top: var(--space-3);
+}
+
+.tools {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(210px, 250px);
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.suggestions {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.suggestions::-webkit-scrollbar { display: none; }
+
+.suggestions button {
+  min-height: 28px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-raised);
+  color: var(--color-ink-muted);
+  cursor: pointer;
+  font-size: .6875rem;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+
+.suggestions button:hover:not(:disabled) {
+  border-color: var(--color-line-strong);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+}
+
+.suggestions button:active:not(:disabled) { transform: translateY(1px); }
+.suggestions button:disabled { cursor: not-allowed; opacity: .5; }
+
+.modelPicker {
+  min-width: 0;
+}
+
+.srLabel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.composerSurface {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: end;
+  gap: var(--space-2);
+  padding: 9px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-3);
+  background: var(--color-surface-raised);
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.composerSurface:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
+}
+
+.composerSurface textarea {
+  width: 100%;
+  min-height: 54px;
+  max-height: 150px;
+  padding: 4px 3px;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--color-ink);
+  font: inherit;
+  font-size: .8125rem;
+  line-height: 1.55;
+}
+
+.composerSurface textarea::placeholder { color: var(--color-ink-faint); }
+
+.sendCommand {
+  width: 42px;
+  min-width: 42px;
+  height: 42px;
+  min-height: 42px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.sendLabel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+@media (max-width: 720px) {
+  .tools {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

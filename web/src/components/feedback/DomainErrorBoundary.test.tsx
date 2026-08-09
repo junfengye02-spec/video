@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../../platform/http/HttpClient";
 import {
   CommandErrorNotice,
   DomainErrorBoundary,
@@ -74,21 +75,27 @@ describe("DomainErrorBoundary", () => {
 
   it("formats payment-required command errors without exposing provider details", () => {
     const error = commandErrorFrom(
-      { status: 402, code: "payment_required_quote", required_units: 1200 },
-      { fallback: "fallback", walletAvailableUnits: 800 },
+      new ApiError(402, "Payment required", "payment_required_quote", {
+        billing_job_id: "b".repeat(32),
+        required_units: 7_230_000,
+      }),
+      { fallback: "fallback", walletAvailableUnits: 800_000 },
     );
+
+    expect(error).toMatchObject({ billingJobId: "b".repeat(32) });
 
     render(
       <MemoryRouter>
-        <CommandErrorNotice error={error} />
+        <CommandErrorNotice error={error} walletLinkTarget="_blank" />
       </MemoryRouter>,
     );
 
     expect(screen.getByRole("alert")).toHaveTextContent("\u4f59\u989d\u4e0d\u8db3");
-    expect(screen.getByRole("alert")).toHaveTextContent("\u53ef\u7528\u4f59\u989d 800");
-    expect(screen.getByRole("alert")).toHaveTextContent("\u672c\u6b21\u6700\u591a\u9700\u8981 1,200");
+    expect(screen.getByRole("alert")).toHaveTextContent("\u53ef\u7528\u4f59\u989d ¥0.80");
+    expect(screen.getByRole("alert")).toHaveTextContent("\u672c\u6b21\u6700\u591a\u9700\u8981 ¥7.23");
     expect(screen.queryByText(/provider/i)).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "\u524d\u5f80\u94b1\u5305" })).toHaveAttribute("href", "/wallet");
+    expect(screen.getByRole("link", { name: "\u524d\u5f80\u94b1\u5305" })).toHaveAttribute("target", "_blank");
   });
 
   it("hands 401 command errors to session recovery instead of rendering an alert", () => {

@@ -80,17 +80,39 @@ afterEach(() => {
 
 it("validates login fields without sending a request", async () => {
   const mutation = vi.fn().mockResolvedValue(jsonResponse({ user, csrf_token: "csrf-login" }));
-  renderPage("login", anonymousFetch(mutation));
-  const submit = await screen.findByRole("button", { name: "Sign in" });
+  const rendered = renderPage("login", anonymousFetch(mutation));
+  const submit = await screen.findByRole("button", { name: "登录" });
+  const feedbackSlot = rendered.container.querySelector(".auth-feedback-slot");
+  expect(feedbackSlot).toHaveAttribute("data-empty", "true");
 
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: "not-an-email" } });
-  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "short" } });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "not-an-email" } });
+  fireEvent.change(screen.getByLabelText("密码"), { target: { value: "short" } });
   fireEvent.click(submit);
 
   expect(mutation).not.toHaveBeenCalled();
-  expect(screen.getByLabelText("Email")).toHaveAttribute("aria-invalid", "true");
-  expect(screen.getByLabelText("Password")).toHaveAttribute("aria-invalid", "true");
-  expect(screen.getByRole("alert")).toHaveTextContent("Enter a valid email address");
+  expect(screen.getByLabelText("邮箱")).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByLabelText("密码")).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByLabelText("邮箱")).toHaveAttribute("aria-describedby", "login-feedback");
+  expect(screen.getByLabelText("密码")).toHaveAttribute("aria-describedby", "login-feedback");
+  expect(document.getElementById("login-feedback")).toContainElement(screen.getByRole("alert"));
+  expect(screen.getByLabelText("邮箱")).toHaveFocus();
+  expect(screen.getByRole("alert")).toHaveTextContent("请输入有效的邮箱地址");
+  expect(screen.getByRole("alert")).toHaveAttribute("aria-live", "assertive");
+  expect(rendered.container.querySelector(".auth-feedback-slot")).toBe(feedbackSlot);
+});
+
+it("gives the password visibility control an accessible toggled state", async () => {
+  renderPage("login", anonymousFetch());
+  await screen.findByRole("button", { name: "登录" });
+  const password = screen.getByLabelText<HTMLInputElement>("密码");
+  const showPassword = screen.getByRole("button", { name: "显示密码" });
+
+  expect(password).toHaveAttribute("type", "password");
+  expect(showPassword).toHaveAttribute("aria-pressed", "false");
+  fireEvent.click(showPassword);
+
+  expect(password).toHaveAttribute("type", "text");
+  expect(screen.getByRole("button", { name: "隐藏密码" })).toHaveAttribute("aria-pressed", "true");
 });
 
 it("submits login once, disables pending controls, and honors the guarded destination", async () => {
@@ -105,17 +127,17 @@ it("submits login once, disables pending controls, and honors the guarded destin
     }),
     { pathname: "/login", state: { from: { pathname: "/projects/p1", search: "", hash: "" } } },
   );
-  await screen.findByRole("button", { name: "Sign in" });
+  await screen.findByRole("button", { name: "登录" });
 
-  expect(screen.getByLabelText("Email")).toHaveAttribute("autocomplete", "username");
-  expect(screen.getByLabelText("Password")).toHaveAttribute("autocomplete", "current-password");
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
-  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "password123" } });
-  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  expect(screen.getByLabelText("邮箱")).toHaveAttribute("autocomplete", "username");
+  expect(screen.getByLabelText("密码")).toHaveAttribute("autocomplete", "current-password");
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+  fireEvent.change(screen.getByLabelText("密码"), { target: { value: "password123" } });
+  fireEvent.click(screen.getByRole("button", { name: "登录" }));
 
-  expect(screen.getByRole("button", { name: "Signing in..." })).toBeDisabled();
-  expect(screen.getByLabelText("Email")).toBeDisabled();
-  fireEvent.click(screen.getByRole("button", { name: "Signing in..." }));
+  expect(screen.getByRole("button", { name: "正在登录..." })).toBeDisabled();
+  expect(screen.getByLabelText("邮箱")).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "正在登录..." }));
   await waitFor(() => expect(loginInit).toBeDefined());
   expect(JSON.parse(String(loginInit?.body))).toEqual({
     email: user.email,
@@ -132,66 +154,87 @@ it("submits login once, disables pending controls, and honors the guarded destin
 it("renders a generic login error without reflecting response secrets", async () => {
   const secret = "password123 leaked by upstream";
   renderPage("login", anonymousFetch(async () => jsonResponse({ detail: secret }, 500)));
-  await screen.findByRole("button", { name: "Sign in" });
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
-  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "password123" } });
+  await screen.findByRole("button", { name: "登录" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+  fireEvent.change(screen.getByLabelText("密码"), { target: { value: "password123" } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+  fireEvent.click(screen.getByRole("button", { name: "登录" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("temporarily unavailable");
+  expect(alert).toHaveTextContent("服务暂时不可用");
   expect(document.body).not.toHaveTextContent(secret);
-  expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "登录" })).toBeEnabled();
 });
 
-it("always shows neutral verification-copy after a valid send-code attempt", async () => {
+it("shows a safe error when verification email delivery fails", async () => {
   const secret = "person@example.com does not exist";
   const mutation = vi.fn().mockResolvedValue(jsonResponse({ detail: secret }, 429));
   renderPage("register", anonymousFetch(mutation));
-  await screen.findByRole("button", { name: "Send code" });
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
+  await screen.findByRole("button", { name: "发送验证码" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Send code" }));
+  fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
 
-  expect(await screen.findByRole("status")).toHaveTextContent(
-    "If this address can receive a code, it will arrive shortly.",
-  );
+  expect(await screen.findByRole("alert")).toHaveTextContent("尝试次数过多，请稍后再试");
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
   expect(document.body).not.toHaveTextContent(secret);
   expect(mutation).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  [422, "email_domain_unavailable", "该邮箱域名无法接收邮件，请检查邮箱地址。"],
+  [503, "email_delivery_unavailable", "邮件服务尚未配置，请联系管理员。"],
+  [503, "email_delivery_failed", "验证码邮件发送失败，请稍后再试。"],
+] as const)("shows a specific safe verification error for %s/%s", async (status, code, message) => {
+  renderPage("register", anonymousFetch(async () => jsonResponse({
+    detail: { code, message: "upstream detail must stay hidden" },
+  }, status)));
+  await screen.findByRole("button", { name: "发送验证码" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+
+  fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  expect(document.body).not.toHaveTextContent("upstream detail must stay hidden");
 });
 
 it("keeps the verification action disabled while it is pending", async () => {
   const deferred = createDeferredResponse();
   renderPage("register", anonymousFetch(async () => deferred.promise));
-  await screen.findByRole("button", { name: "Send code" });
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
+  await screen.findByRole("button", { name: "发送验证码" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Send code" }));
+  fireEvent.click(screen.getByRole("button", { name: "发送验证码" }));
 
-  expect(screen.getByRole("button", { name: "Sending code..." })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "正在发送..." })).toBeDisabled();
   await act(async () => {
     deferred.resolve(jsonResponse({ detail: "sent" }, 202));
     await deferred.promise;
   });
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "验证码已发送，请检查收件箱和垃圾邮件。",
+  );
 });
 
 it("validates a six-digit registration code and matching password", async () => {
   const mutation = vi.fn().mockResolvedValue(jsonResponse({ user, csrf_token: "csrf-register" }, 201));
   renderPage("register", anonymousFetch(mutation));
-  await screen.findByRole("button", { name: "Create account" });
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
-  fireEvent.change(screen.getByLabelText("Verification code"), { target: { value: "12345x" } });
-  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "password123" } });
-  fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "password456" } });
+  await screen.findByRole("button", { name: "创建账户" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+  fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "12345x" } });
+  fireEvent.change(screen.getByLabelText("设置密码"), { target: { value: "password123" } });
+  fireEvent.change(screen.getByLabelText("确认密码"), { target: { value: "password456" } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+  fireEvent.click(screen.getByRole("button", { name: "创建账户" }));
 
   expect(mutation).not.toHaveBeenCalled();
-  expect(screen.getByRole("alert")).toHaveTextContent("Enter the six-digit code");
-  expect(screen.getByRole("alert")).toHaveTextContent("Passwords must match");
-  expect(screen.getByLabelText("Verification code")).toHaveAttribute("inputmode", "numeric");
-  expect(screen.getByLabelText("Verification code")).toHaveAttribute("autocomplete", "one-time-code");
-  expect(screen.getByLabelText("Password")).toHaveAttribute("autocomplete", "new-password");
+  expect(screen.getByRole("alert")).toHaveTextContent("请输入 6 位数字验证码");
+  expect(screen.getByRole("alert")).toHaveTextContent("两次输入的密码不一致");
+  expect(screen.getByLabelText("验证码")).toHaveAttribute("aria-describedby", "register-feedback");
+  expect(screen.getByLabelText("设置密码")).toHaveAttribute("aria-describedby", "register-feedback");
+  expect(screen.getByLabelText("验证码")).toHaveAttribute("inputmode", "numeric");
+  expect(screen.getByLabelText("验证码")).toHaveAttribute("autocomplete", "one-time-code");
+  expect(screen.getByLabelText("设置密码")).toHaveAttribute("autocomplete", "new-password");
 });
 
 it("submits registration with only email, password, and code", async () => {
@@ -201,61 +244,104 @@ it("submits registration with only email, password, and code", async () => {
     registerBody = JSON.parse(String(init?.body));
     return jsonResponse({ user, csrf_token: "csrf-register" }, 201);
   }));
-  await screen.findByRole("button", { name: "Create account" });
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
-  fireEvent.change(screen.getByLabelText("Verification code"), { target: { value: "123456" } });
-  fireEvent.change(screen.getByLabelText("Password"), { target: { value: "password123" } });
-  fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "password123" } });
+  await screen.findByRole("button", { name: "创建账户" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+  fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "123456" } });
+  fireEvent.change(screen.getByLabelText("设置密码"), { target: { value: "password123" } });
+  fireEvent.change(screen.getByLabelText("确认密码"), { target: { value: "password123" } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+  fireEvent.click(screen.getByRole("button", { name: "创建账户" }));
 
   expect(await screen.findByRole("heading", { name: "Projects" })).toBeInTheDocument();
   expect(registerBody).toEqual({ email: user.email, password: "password123", code: "123456" });
   expect(registerBody).not.toHaveProperty("role");
 });
 
+it("disables every registration control during account creation", async () => {
+  const deferred = createDeferredResponse();
+  renderPage("register", anonymousFetch(async () => deferred.promise));
+  await screen.findByRole("button", { name: "创建账户" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+  fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "123456" } });
+  fireEvent.change(screen.getByLabelText("设置密码"), { target: { value: "password123" } });
+  fireEvent.change(screen.getByLabelText("确认密码"), { target: { value: "password123" } });
+
+  fireEvent.click(screen.getByRole("button", { name: "创建账户" }));
+
+  expect(screen.getByRole("button", { name: "正在创建..." })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "正在创建..." })).toHaveAttribute("aria-busy", "true");
+  expect(screen.getByLabelText("邮箱")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "发送验证码" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "显示设置密码" })).toBeDisabled();
+
+  await act(async () => {
+    deferred.resolve(jsonResponse({ user, csrf_token: "csrf-register" }, 201));
+    await deferred.promise;
+  });
+});
+
 it("validates reset-request email without calling the API", async () => {
   const mutation = vi.fn();
   renderPage("forgot", anonymousFetch(mutation));
-  await screen.findByRole("button", { name: "Send reset code" });
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: "invalid" } });
+  await screen.findByRole("button", { name: "发送重置验证码" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: "invalid" } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Send reset code" }));
+  fireEvent.click(screen.getByRole("button", { name: "发送重置验证码" }));
 
   expect(mutation).not.toHaveBeenCalled();
-  expect(screen.getByRole("alert")).toHaveTextContent("Enter a valid email address");
+  expect(screen.getByRole("alert")).toHaveTextContent("请输入有效的邮箱地址");
+  expect(screen.getByLabelText("邮箱")).toHaveAttribute("aria-describedby", "recovery-feedback");
 });
 
 it.each([202, 500])("shows the same neutral reset-request result for status %s", async (status) => {
   const secret = "account lookup result";
   renderPage("forgot", anonymousFetch(async () => jsonResponse({ detail: secret }, status)));
-  await screen.findByRole("button", { name: "Send reset code" });
-  expect(screen.getByLabelText("Email")).toHaveAttribute("autocomplete", "username");
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
+  await screen.findByRole("button", { name: "发送重置验证码" });
+  expect(screen.getByLabelText("邮箱")).toHaveAttribute("autocomplete", "email");
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Send reset code" }));
+  fireEvent.click(screen.getByRole("button", { name: "发送重置验证码" }));
 
   expect(await screen.findByRole("status")).toHaveTextContent(
-    "If the account can be reset, a code will arrive shortly.",
+    "如果该账户可以重置，你会很快收到验证码。",
   );
   expect(document.body).not.toHaveTextContent(secret);
+});
+
+it("disables account-recovery input while the request is pending", async () => {
+  const deferred = createDeferredResponse();
+  renderPage("forgot", anonymousFetch(async () => deferred.promise));
+  await screen.findByRole("button", { name: "发送重置验证码" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+
+  fireEvent.click(screen.getByRole("button", { name: "发送重置验证码" }));
+
+  expect(screen.getByRole("button", { name: "正在发送..." })).toBeDisabled();
+  expect(screen.getByLabelText("邮箱")).toBeDisabled();
+
+  await act(async () => {
+    deferred.resolve(jsonResponse({ detail: "sent" }, 202));
+    await deferred.promise;
+  });
+  expect(await screen.findByRole("status")).toHaveAttribute("aria-live", "polite");
 });
 
 it("validates reset confirmation fields without submitting", async () => {
   const mutation = vi.fn();
   renderPage("reset", anonymousFetch(mutation));
-  await screen.findByRole("button", { name: "Reset password" });
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
-  fireEvent.change(screen.getByLabelText("Reset code"), { target: { value: "123" } });
-  fireEvent.change(screen.getByLabelText("New password"), { target: { value: "new-password" } });
-  fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "different-password" } });
+  await screen.findByRole("button", { name: "确认重置密码" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+  fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "123" } });
+  fireEvent.change(screen.getByLabelText("新密码"), { target: { value: "new-password" } });
+  fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "different-password" } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Reset password" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认重置密码" }));
 
   expect(mutation).not.toHaveBeenCalled();
-  expect(screen.getByRole("alert")).toHaveTextContent("Enter the six-digit code");
-  expect(screen.getByRole("alert")).toHaveTextContent("Passwords must match");
-  expect(screen.getByLabelText("New password")).toHaveAttribute("autocomplete", "new-password");
+  expect(screen.getByRole("alert")).toHaveTextContent("请输入 6 位数字验证码");
+  expect(screen.getByRole("alert")).toHaveTextContent("两次输入的密码不一致");
+  expect(screen.getByLabelText("验证码")).toHaveAttribute("aria-describedby", "reset-feedback");
+  expect(screen.getByLabelText("新密码")).toHaveAttribute("autocomplete", "new-password");
 });
 
 it("submits reset confirmation once and reports completion", async () => {
@@ -266,15 +352,15 @@ it("submits reset confirmation once and reports completion", async () => {
     resetBody = JSON.parse(String(init?.body));
     return deferred.promise;
   }));
-  await screen.findByRole("button", { name: "Reset password" });
-  fireEvent.change(screen.getByLabelText("Email"), { target: { value: user.email } });
-  fireEvent.change(screen.getByLabelText("Reset code"), { target: { value: "123456" } });
-  fireEvent.change(screen.getByLabelText("New password"), { target: { value: "new-password" } });
-  fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "new-password" } });
+  await screen.findByRole("button", { name: "确认重置密码" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+  fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "123456" } });
+  fireEvent.change(screen.getByLabelText("新密码"), { target: { value: "new-password" } });
+  fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "new-password" } });
 
-  fireEvent.click(screen.getByRole("button", { name: "Reset password" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认重置密码" }));
 
-  expect(screen.getByRole("button", { name: "Resetting password..." })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "正在重置..." })).toBeDisabled();
   expect(resetBody).toEqual({
     email: user.email,
     code: "123456",
@@ -284,7 +370,24 @@ it("submits reset confirmation once and reports completion", async () => {
     deferred.resolve(new Response(null, { status: 204 }));
     await deferred.promise;
   });
-  expect(await screen.findByRole("status")).toHaveTextContent("Password reset complete");
+  expect(await screen.findByRole("status")).toHaveTextContent("密码已重置");
+  expect(screen.getByRole("button", { name: "密码已重置" })).toBeDisabled();
+});
+
+it("shows a safe reset service error and restores the form", async () => {
+  const secret = "internal reset gateway failure";
+  renderPage("reset", anonymousFetch(async () => jsonResponse({ detail: secret }, 500)));
+  await screen.findByRole("button", { name: "确认重置密码" });
+  fireEvent.change(screen.getByLabelText("邮箱"), { target: { value: user.email } });
+  fireEvent.change(screen.getByLabelText("验证码"), { target: { value: "123456" } });
+  fireEvent.change(screen.getByLabelText("新密码"), { target: { value: "new-password" } });
+  fireEvent.change(screen.getByLabelText("确认新密码"), { target: { value: "new-password" } });
+
+  fireEvent.click(screen.getByRole("button", { name: "确认重置密码" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("服务暂时不可用");
+  expect(document.body).not.toHaveTextContent(secret);
+  expect(screen.getByRole("button", { name: "确认重置密码" })).toBeEnabled();
 });
 
 it("redirects an already authenticated visitor away from public auth pages", async () => {

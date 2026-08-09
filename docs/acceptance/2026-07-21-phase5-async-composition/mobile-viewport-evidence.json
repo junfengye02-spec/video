@@ -1,0 +1,53 @@
+{
+  "requested_viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "observed_before_workflow": {
+    "innerWidth": 390,
+    "innerHeight": 844,
+    "bodyScrollWidth": 390,
+    "documentScrollWidth": 390,
+    "devicePixelRatio": 1
+  },
+  "generation_navigation": {
+    "innerWidth": 390,
+    "innerHeight": 844,
+    "bodyScrollWidth": 375,
+    "documentScrollWidth": 375,
+    "outOfBoundsControls": [],
+    "note": "The 15px difference is the visible vertical scrollbar; neither scroll width exceeds the 390px viewport."
+  },
+  "partial_failure": {
+    "innerWidth": 390,
+    "innerHeight": 844,
+    "clientWidth": 390,
+    "bodyScrollWidth": 390,
+    "documentScrollWidth": 390,
+    "horizontalOverflow": false,
+    "outOfBoundsControls": [],
+    "overlappingKeyControls": [],
+    "retryButtons": 3
+  },
+  "recovery": {
+    "sseForcedStatus": 503,
+    "pollIntervalSeconds": 2,
+    "stateAfterRefresh": "partial_failure",
+    "sseStateAfterRestoreAndReload": "connected",
+    "generationBatchBeforeRetry": "partial_failure:1_complete_3_failed",
+    "generationBatchAfterItemRetries": "complete:4_complete_0_failed",
+    "generationJobCountBeforeRetry": 6,
+    "generationJobCountAfterRetry": 6
+  },
+  "composition": {
+    "submitStatus": 202,
+    "activeCommandDisabled": true,
+    "stateAfterRefresh": "complete",
+    "previewAvailable": true,
+    "downloadClicked": true,
+    "mediaStatus": 200,
+    "mediaContentType": "video/mp4",
+    "mediaLengthBytes": 2903
+  },
+  "browserConsoleWarningsOrErrors": []
+}

@@ -14,12 +14,21 @@
         "required": ["path", "format", "resolution", "duration_seconds"],
         "properties": {
           "path": { "type": "string" },
+          "episode_number": { "type": ["integer", "null"], "minimum": 1 },
+          "episode_title": { "type": ["string", "null"] },
+          "shot_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "uniqueItems": true
+          },
           "format": { "type": "string" },
           "codec": { "type": "string" },
           "audio_codec": { "type": "string" },
           "resolution": { "type": "string" },
           "fps": { "type": "number" },
           "duration_seconds": { "type": "number", "minimum": 0 },
+          "target_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+          "duration_difference_seconds": { "type": "number" },
           "file_size_bytes": { "type": "integer" },
           "platform_target": { "type": "string" }
         },

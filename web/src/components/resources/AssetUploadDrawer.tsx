@@ -1,7 +1,8 @@
 import { Upload, X } from "lucide-react";
-import { useState, type FormEvent, type RefObject } from "react";
+import { useEffect, useState, type FormEvent, type RefObject } from "react";
 import type { ReferenceImageUploadRequest } from "../../domain/types";
 import { getStrings, type UIStrings } from "../../i18n";
+import { SelectMenu } from "../../shared/ui";
 import { useModalFocus } from "../accessibility/useModalFocus";
 
 export interface AssetUploadDrawerProps {
@@ -10,6 +11,7 @@ export interface AssetUploadDrawerProps {
   returnFocusRef: RefObject<HTMLElement | null>;
   strings?: UIStrings["resources"];
   onClose: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
   onSubmit: (payload: ReferenceImageUploadRequest) => Promise<void>;
 }
 
@@ -19,6 +21,7 @@ export function AssetUploadDrawer({
   returnFocusRef,
   strings = getStrings("zh").resources,
   onClose,
+  onDirtyChange,
   onSubmit,
 }: AssetUploadDrawerProps) {
   const [kind, setKind] = useState<ReferenceImageUploadRequest["kind"]>("character");
@@ -26,6 +29,16 @@ export function AssetUploadDrawer({
   const [description, setDescription] = useState("");
   const [prompt, setPrompt] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const dirty = kind !== "character" || Boolean(label || description || prompt || file);
+
+  useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
+  const requestClose = () => {
+    if (busy) return;
+    if (dirty && !window.confirm(strings.discardDrawerChanges)) return;
+    onClose();
+  };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -45,23 +58,18 @@ export function AssetUploadDrawer({
 
   const { panelRef, onKeyDown } = useModalFocus<HTMLDialogElement>({
     open: true,
-    onEscape: () => {
-      if (!busy) onClose();
-    },
+    onEscape: requestClose,
     returnFocusRef,
   });
 
   return (
     <dialog
       ref={panelRef}
-      open
       aria-modal="true"
       aria-labelledby="resource-upload-title"
       onCancel={(event) => {
         event.preventDefault();
-        if (!busy) {
-          onClose();
-        }
+        requestClose();
       }}
       onKeyDown={onKeyDown}
     >
@@ -72,25 +80,24 @@ export function AssetUploadDrawer({
           title={strings.closeUploadAction}
           aria-label={strings.closeUploadAction}
           disabled={busy}
-          onClick={onClose}
+          onClick={requestClose}
         >
           <X aria-hidden="true" size={16} />
         </button>
       </div>
 
       <form className="resource-form" onSubmit={handleSubmit}>
-        <label>
-          <span>{strings.kindLabel}</span>
-          <select
-            value={kind}
-            disabled={busy}
-            onChange={(event) => setKind(event.target.value as ReferenceImageUploadRequest["kind"])}
-          >
-            <option value="character">{strings.kindLabels.character}</option>
-            <option value="scene">{strings.kindLabels.scene}</option>
-            <option value="prop">{strings.kindLabels.prop}</option>
-          </select>
-        </label>
+        <SelectMenu
+          disabled={busy}
+          label={strings.kindLabel}
+          value={kind}
+          onValueChange={setKind}
+          options={[
+            { value: "character", label: strings.kindLabels.character },
+            { value: "scene", label: strings.kindLabels.scene },
+            { value: "prop", label: strings.kindLabels.prop },
+          ]}
+        />
         <label>
           <span>{strings.labelLabel}</span>
           <input value={label} disabled={busy} onChange={(event) => setLabel(event.target.value)} />

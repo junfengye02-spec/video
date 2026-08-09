@@ -198,10 +198,6 @@ class OpenAIImage(BaseTool):
                 error="OPENAI_API_KEY not set. " + self.install_instructions,
             )
 
-        from openai import OpenAI
-
-        start = time.time()
-        client = OpenAI()
         model = inputs.get("model", "gpt-image-1")
         prompt = inputs["prompt"]
         size = inputs.get("size", "1024x1024")
@@ -209,6 +205,11 @@ class OpenAIImage(BaseTool):
 
         if model == "gpt-image-2":
             return self._execute_gpt_image_2(inputs)
+
+        from openai import OpenAI
+
+        start = time.time()
+        client = OpenAI()
 
         try:
             if model == "gpt-image-1":

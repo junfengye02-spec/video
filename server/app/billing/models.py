@@ -284,3 +284,18 @@ class BillingReconciliation(TimestampMixin, Base):
         Index("ix_billing_reconciliations_due", "status", "next_retry_at"),
         Index("ix_billing_reconciliations_job", "job_id"),
     )
+
+
+class BillingWorkerHeartbeat(TimestampMixin, Base):
+    __tablename__ = "billing_worker_heartbeats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    worker_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_billing_worker_heartbeat_singleton"),
+        Index("ix_billing_worker_heartbeat_lease", "lease_expires_at"),
+    )

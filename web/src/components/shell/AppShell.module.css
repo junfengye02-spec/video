@@ -1,0 +1,30 @@
+.shell {
+  min-height: 100vh;
+  overflow-x: clip;
+  background: var(--color-canvas);
+}
+
+.topbar {
+  background: rgb(251 251 250 / 88%);
+  backdrop-filter: blur(18px) saturate(140%);
+  transition: background-color var(--duration-ui) var(--ease-standard);
+}
+
+.content {
+  min-width: 0;
+}
+
+.content[data-full-bleed="true"] {
+  padding: 0;
+}
+
+.mobileMenu:not([hidden]) {
+  animation: shared-scale-fade-in var(--duration-ui) var(--ease-out) both;
+  transform-origin: top right;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobileMenu:not([hidden]) {
+    animation: none;
+  }
+}

@@ -14,6 +14,7 @@ from server.app.auth.models import AdminAuditLog, User
 from server.app.auth.security import hash_password, verify_password
 from server.app.auth.service import bootstrap_admin
 from server.app.db.base import Base
+from server.app.wallet.models import WalletAccount
 from server.manage import run_manage
 
 
@@ -66,6 +67,12 @@ def test_create_admin_prompts_twice_and_writes_non_secret_audit(
     rendered_audit = audit.before_json + audit.after_json
     assert PASSWORD not in rendered_audit
     assert user.password_hash not in rendered_audit
+    wallet = auth_db.scalar(
+        select(WalletAccount).where(WalletAccount.user_id == user.id)
+    )
+    assert wallet is not None
+    assert wallet.balance_units == 0
+    assert wallet.held_units == 0
 
 
 def test_create_admin_new_user_does_not_depend_on_session_revocation(

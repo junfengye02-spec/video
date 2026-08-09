@@ -355,6 +355,11 @@ def test_takeover_waits_for_quoted_then_recovers_stale_execution_reference(
     monkeypatch.setattr(
         "server.app.provider.video_recovery.get_settings", lambda: SETTINGS
     )
+    extracted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "server.app.provider.video_recovery.ensure_shot_tail_frame",
+        lambda **kwargs: extracted.append((kwargs["project_id"], kwargs["shot_id"])),
+    )
 
     assert reconcile_due_jobs(
         db,
@@ -377,6 +382,7 @@ def test_takeover_waits_for_quoted_then_recovers_stale_execution_reference(
     assert public_path.is_file(), [
         (row.reason, row.status, row.last_error) for row in reconciliations
     ]
+    assert extracted == [(project_id, "s1")]
 
 
 @pytest.fixture
@@ -1267,7 +1273,11 @@ def test_worker_waits_five_seconds_uses_fresh_sessions_and_closes_client(monkeyp
     stop = Stop()
     client = Mock()
     reconcile = Mock(return_value=0)
+    record_heartbeat = Mock()
+    release_heartbeat = Mock(return_value=True)
     monkeypatch.setattr(billing_worker, "reconcile_due_jobs", reconcile)
+    monkeypatch.setattr(billing_worker, "record_worker_heartbeat", record_heartbeat)
+    monkeypatch.setattr(billing_worker, "release_worker_heartbeat", release_heartbeat)
 
     billing_worker.run_worker(
         stop,
@@ -1278,9 +1288,11 @@ def test_worker_waits_five_seconds_uses_fresh_sessions_and_closes_client(monkeyp
         now=lambda: NOW,
     )
 
-    assert len(sessions) == 2
+    assert len(sessions) == 4
     assert stop.waits == [5, 5]
     assert reconcile.call_count == 2
+    record_heartbeat.assert_called_once()
+    release_heartbeat.assert_called_once()
     client.close.assert_called_once_with()
 
 
@@ -1559,6 +1571,7 @@ def test_postgres_video_file_io_keeps_job_unlocked_and_claim_exclusive(
             reference_id,
             destination,
             *,
+            fallback_url=None,
             progress_callback=None,
         ):
             assert (alias, reference_id) == ("video-original", task_id)

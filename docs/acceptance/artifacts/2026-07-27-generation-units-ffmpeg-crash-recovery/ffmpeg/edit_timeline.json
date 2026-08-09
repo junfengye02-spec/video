@@ -1,0 +1,272 @@
+{
+  "version": "2.0",
+  "project_id": "real-ffmpeg-generation-units",
+  "revision": "sha256:14d9384305555c530fbb137e37637beb7e42d0e6a8e0d2393f667c7bfa9c8a94",
+  "output": {
+    "width": 320,
+    "height": 180,
+    "frame_rate_numerator": 30,
+    "frame_rate_denominator": 1,
+    "format": "mp4",
+    "video_codec": "h264",
+    "audio_codec": "aac"
+  },
+  "media_references": [
+    {
+      "id": "media-clip-s1",
+      "path": "C:\\Users\\zhuba\\Desktop\\OpenMontage\\videro\\tmp\\generation-units-real-ffmpeg-final\\test_real_ffmpeg_generation_un0\\real-ffmpeg-project\\assets\\video\\units\\unit-1\\v1.mp4",
+      "kind": "video",
+      "available_range": {
+        "start": {
+          "value": 0,
+          "rate_numerator": 30,
+          "rate_denominator": 1
+        },
+        "duration": {
+          "value": 24,
+          "rate_numerator": 30,
+          "rate_denominator": 1
+        }
+      },
+      "has_audio": false,
+      "probe_hash": "sha256:35f04dc62f840a7f1da7569892e03378ad290236a34c26c181e480d28582449f",
+      "metadata": {
+        "width": 320,
+        "height": 180,
+        "video_codec": "h264",
+        "audio_codec": null,
+        "generation_unit_id": "unit-1",
+        "generation_unit_revision": 1,
+        "source_shot_ids": [
+          "s1",
+          "s2"
+        ],
+        "source_beat_ids": [
+          "b1",
+          "b2"
+        ]
+      }
+    },
+    {
+      "id": "media-clip-s3",
+      "path": "C:\\Users\\zhuba\\Desktop\\OpenMontage\\videro\\tmp\\generation-units-real-ffmpeg-final\\test_real_ffmpeg_generation_un0\\real-ffmpeg-project\\assets\\video\\units\\unit-2\\v1.mp4",
+      "kind": "video",
+      "available_range": {
+        "start": {
+          "value": 0,
+          "rate_numerator": 30,
+          "rate_denominator": 1
+        },
+        "duration": {
+          "value": 30,
+          "rate_numerator": 30,
+          "rate_denominator": 1
+        }
+      },
+      "has_audio": false,
+      "probe_hash": "sha256:cee12f6f8d76f7efcc1f8b2ddf49104f064017c50b8510ebce22cd67cdad0ee6",
+      "metadata": {
+        "width": 320,
+        "height": 180,
+        "video_codec": "h264",
+        "audio_codec": null,
+        "generation_unit_id": "unit-2",
+        "generation_unit_revision": 1,
+        "source_shot_ids": [
+          "s3",
+          "s4"
+        ],
+        "source_beat_ids": [
+          "b3",
+          "b4"
+        ]
+      }
+    },
+    {
+      "id": "media-clip-s5",
+      "path": "C:\\Users\\zhuba\\Desktop\\OpenMontage\\videro\\tmp\\generation-units-real-ffmpeg-final\\test_real_ffmpeg_generation_un0\\real-ffmpeg-project\\assets\\video\\units\\unit-3\\v1.mp4",
+      "kind": "video",
+      "available_range": {
+        "start": {
+          "value": 0,
+          "rate_numerator": 30,
+          "rate_denominator": 1
+        },
+        "duration": {
+          "value": 36,
+          "rate_numerator": 30,
+          "rate_denominator": 1
+        }
+      },
+      "has_audio": false,
+      "probe_hash": "sha256:654d7079e9d097159b16bad5fc19a47d4f75705c9c8e460c101dec0ad72fb721",
+      "metadata": {
+        "width": 320,
+        "height": 180,
+        "video_codec": "h264",
+        "audio_codec": null,
+        "generation_unit_id": "unit-3",
+        "generation_unit_revision": 1,
+        "source_shot_ids": [
+          "s5",
+          "s6"
+        ],
+        "source_beat_ids": [
+          "b5",
+          "b6"
+        ]
+      }
+    }
+  ],
+  "tracks": [
+    {
+      "id": "video-primary",
+      "kind": "video",
+      "role": "primary",
+      "items": [
+        {
+          "type": "clip",
+          "id": "clip-s1",
+          "media_reference_id": "media-clip-s1",
+          "source_range": {
+            "start": {
+              "value": 0,
+              "rate_numerator": 30,
+              "rate_denominator": 1
+            },
+            "duration": {
+              "value": 24,
+              "rate_numerator": 30,
+              "rate_denominator": 1
+            }
+          },
+          "timeline_duration": {
+            "value": 24,
+            "rate_numerator": 30,
+            "rate_denominator": 1
+          },
+          "source_audio": {
+            "policy": "preserve",
+            "volume": 1.0
+          },
+          "speed": 1.0,
+          "metadata": {
+            "shot_id": "s1",
+            "generation_unit_id": "unit-1",
+            "generation_unit_revision": 1,
+            "source_shot_ids": [
+              "s1",
+              "s2"
+            ],
+            "source_beat_ids": [
+              "b1",
+              "b2"
+            ]
+          }
+        },
+        {
+          "type": "clip",
+          "id": "clip-s3",
+          "media_reference_id": "media-clip-s3",
+          "source_range": {
+            "start": {
+              "value": 0,
+              "rate_numerator": 30,
+              "rate_denominator": 1
+            },
+            "duration": {
+              "value": 30,
+              "rate_numerator": 30,
+              "rate_denominator": 1
+            }
+          },
+          "timeline_duration": {
+            "value": 30,
+            "rate_numerator": 30,
+            "rate_denominator": 1
+          },
+          "source_audio": {
+            "policy": "preserve",
+            "volume": 1.0
+          },
+          "speed": 1.0,
+          "metadata": {
+            "shot_id": "s3",
+            "generation_unit_id": "unit-2",
+            "generation_unit_revision": 1,
+            "source_shot_ids": [
+              "s3",
+              "s4"
+            ],
+            "source_beat_ids": [
+              "b3",
+              "b4"
+            ]
+          }
+        },
+        {
+          "type": "clip",
+          "id": "clip-s5",
+          "media_reference_id": "media-clip-s5",
+          "source_range": {
+            "start": {
+              "value": 0,
+              "rate_numerator": 30,
+              "rate_denominator": 1
+            },
+            "duration": {
+              "value": 36,
+              "rate_numerator": 30,
+              "rate_denominator": 1
+            }
+          },
+          "timeline_duration": {
+            "value": 36,
+            "rate_numerator": 30,
+            "rate_denominator": 1
+          },
+          "source_audio": {
+            "policy": "preserve",
+            "volume": 1.0
+          },
+          "speed": 1.0,
+          "metadata": {
+            "shot_id": "s5",
+            "generation_unit_id": "unit-3",
+            "generation_unit_revision": 1,
+            "source_shot_ids": [
+              "s5",
+              "s6"
+            ],
+            "source_beat_ids": [
+              "b5",
+              "b6"
+            ]
+          }
+        }
+      ],
+      "enabled": true,
+      "volume": 1.0,
+      "metadata": {}
+    }
+  ],
+  "transitions": [],
+  "render_runtime": "ffmpeg",
+  "renderer_family": "cinematic-trailer",
+  "metadata": {
+    "source": "generation-unit-ledger",
+    "audio_plan": {
+      "source_audio_default": "preserve",
+      "source_audio_volume": 1.0,
+      "source_audio_transition_seconds": 0.08,
+      "music": null,
+      "dialogue": [],
+      "narration": [],
+      "sfx": [],
+      "ambience": [],
+      "target_lufs": -14.0,
+      "true_peak_db": -1.5,
+      "loudness_range_lu": 11.0
+    }
+  }
+}

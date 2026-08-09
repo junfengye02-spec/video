@@ -1,0 +1,46 @@
+.root {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.root label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.root input {
+  width: 100%;
+  min-width: 0;
+}
+
+.status {
+  display: block;
+  min-height: 16px;
+  color: var(--color-ink-faint, #6f7e87);
+  font-size: .6875rem;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.root[data-status="error"] .status {
+  color: var(--color-danger, #b42318);
+}
+
+.root[data-compact="true"] {
+  gap: 2px;
+}
+
+.root[data-compact="true"] label {
+  gap: 3px;
+}
+
+.root[data-compact="true"] .status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

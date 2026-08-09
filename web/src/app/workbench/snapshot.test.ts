@@ -46,7 +46,7 @@ describe("committed media hydration overlays", () => {
 
     expect(overlaid.storyboard.shots[0]).toMatchObject({
       output_path: "local://media/shot-1",
-      output_url: null,
+      output_url: "assets/video/shot-1.mp4",
     });
     expect(overlaid.final_path).toBe("renders/final-new.mp4");
     expect(overlaid.series_bible.assets![0].reference_images).toEqual(["local://media/mara"]);
@@ -91,6 +91,7 @@ describe("emptyContinuityPlan", () => {
         main_arc: "",
         style_lock: "",
         visual_rules: "",
+        series_prompt: "",
         taboos: [],
         locations: [],
         props: [],
@@ -105,6 +106,21 @@ describe("emptyContinuityPlan", () => {
         prop_state: [],
         character_status: [],
         current_locations: [],
+      },
+      sound: {
+        narration: "",
+        dialogue: "",
+        ambience: "",
+        music_direction: "",
+        prompt: "",
+        storyboard_prompt_integration: false,
+      },
+      generation_preferences: {
+        image_model: "gpt-image-2",
+        video_model: "omni_flash-10s",
+        image_size: "1024x1024",
+        image_quality: "standard",
+        aspect_ratio: "16:9",
       },
     });
   });

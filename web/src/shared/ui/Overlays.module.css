@@ -1,0 +1,191 @@
+.menuRoot {
+  position: relative;
+  display: inline-flex;
+}
+
+.popoverRoot {
+  position: relative;
+  display: inline-flex;
+}
+
+.menu {
+  position: absolute;
+  z-index: var(--z-popover);
+  top: calc(100% + var(--space-2));
+  right: 0;
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(360px, calc(100vw - 32px));
+  overflow-y: auto;
+  gap: 2px;
+  padding: var(--space-1);
+  border: 1px solid rgb(255 255 255 / 55%);
+  border-radius: var(--radius-2);
+  background: var(--color-surface-floating);
+  box-shadow: var(--shadow-floating), inset 0 1px 0 rgb(255 255 255 / 70%);
+  backdrop-filter: blur(18px) saturate(140%);
+}
+
+.menuRoot[data-align="left"] .menu {
+  right: auto;
+  left: 0;
+}
+
+.menuRoot[data-placement="top"] .menu {
+  top: auto;
+  bottom: calc(100% + var(--space-2));
+}
+
+.popover {
+  position: absolute;
+  z-index: var(--z-popover);
+  right: 0;
+  bottom: calc(100% + var(--space-2));
+  width: min(360px, calc(100vw - 32px));
+  padding: var(--space-4);
+  border: 1px solid rgb(255 255 255 / 55%);
+  border-radius: var(--radius-3);
+  background: var(--color-surface-floating);
+  box-shadow: var(--shadow-floating), inset 0 1px 0 rgb(255 255 255 / 70%);
+  backdrop-filter: blur(18px) saturate(140%);
+}
+
+.menuItem {
+  display: flex;
+  width: 100%;
+  min-height: 36px;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-1);
+  background: transparent;
+  color: var(--color-ink-secondary);
+  cursor: pointer;
+  font-size: .8125rem;
+  text-align: left;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.menuItem:hover:not(:disabled),
+.menuItem:focus-visible {
+  background: var(--color-selection);
+  color: var(--color-ink);
+}
+
+.menuItem[data-selected="true"] {
+  background: var(--color-selection);
+  color: var(--color-ink);
+  font-weight: 650;
+}
+
+.menuItemLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menuItem[data-danger="true"] {
+  color: var(--color-danger);
+}
+
+.menuItem:disabled {
+  cursor: not-allowed;
+  opacity: .5;
+}
+
+.backdrop {
+  position: fixed;
+  z-index: var(--z-dialog);
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+  background: var(--color-overlay);
+  animation: shared-fade-in var(--duration-ui) var(--ease-standard) both;
+}
+
+.dialog,
+.drawer {
+  border: 1px solid rgb(255 255 255 / 60%);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-modal), inset 0 1px 0 rgb(255 255 255 / 75%);
+  color: var(--color-ink);
+}
+
+.dialog {
+  width: min(480px, 100%);
+  max-height: min(720px, calc(100vh - 40px));
+  padding: var(--space-6);
+  overflow: auto;
+  border-radius: var(--radius-4);
+  animation: shared-scale-fade-in var(--duration-panel) var(--ease-out) both;
+}
+
+.dialogHeader,
+.drawerHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.dialogTitle,
+.drawerTitle {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 670;
+  line-height: 1.35;
+}
+
+.dialogBody,
+.drawerBody {
+  color: var(--color-ink-secondary);
+}
+
+.drawerBackdrop {
+  place-items: stretch end;
+  padding: 0;
+  z-index: var(--z-drawer);
+}
+
+.drawer {
+  width: min(420px, 100vw);
+  height: 100%;
+  padding: var(--space-5);
+  overflow: auto;
+  border-radius: var(--radius-4) 0 0 var(--radius-4);
+  animation: shared-slide-in-right var(--duration-panel) var(--ease-out) both;
+}
+
+@media (max-width: 520px) {
+  .popoverRoot {
+    width: 100%;
+  }
+
+  .popover {
+    right: auto;
+    left: 0;
+    width: min(100%, calc(100vw - 32px));
+  }
+
+  .backdrop {
+    align-items: end;
+    padding: var(--space-3);
+  }
+
+  .dialog {
+    width: 100%;
+    max-height: calc(100vh - 24px);
+    border-radius: var(--radius-4);
+  }
+
+  .drawer {
+    width: 100vw;
+    border-radius: 0;
+  }
+}

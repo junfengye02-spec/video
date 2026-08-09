@@ -19,7 +19,12 @@ export interface FormRequestInit {
 }
 
 export class ApiError extends Error {
-  constructor(readonly status: number, message: string, readonly code?: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly code?: string,
+    readonly details: Readonly<Record<string, unknown>> = {},
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -55,13 +60,22 @@ function isMutation(method: string): boolean {
   return method !== "GET" && method !== "HEAD";
 }
 
-async function parseErrorBody(response: Response): Promise<{ code?: string; detail?: string }> {
+async function parseErrorBody(response: Response): Promise<Record<string, unknown>> {
   try {
     const body = await response.json();
-    return body && typeof body === "object" ? body as { code?: string; detail?: string } : {};
+    return body && typeof body === "object" && !Array.isArray(body)
+      ? body as Record<string, unknown>
+      : {};
   } catch {
     return {};
   }
+}
+
+function errorDetails(body: Record<string, unknown>): Record<string, unknown> {
+  const nested = body.detail;
+  return nested && typeof nested === "object" && !Array.isArray(nested)
+    ? { ...body, ...(nested as Record<string, unknown>) }
+    : body;
 }
 
 export class HttpClient {
@@ -113,10 +127,16 @@ export class HttpClient {
     if (response.status === 401) this.options.onUnauthorized?.();
     if (!response.ok) {
       const body = await parseErrorBody(response);
+      const details = errorDetails(body);
       throw new ApiError(
         response.status,
-        body.detail ?? `Request failed with status ${response.status}`,
-        body.code,
+        typeof body.detail === "string"
+          ? body.detail
+          : typeof details.message === "string"
+            ? details.message
+          : `Request failed with status ${response.status}`,
+        typeof details.code === "string" ? details.code : undefined,
+        details,
       );
     }
     if (response.status === 204) return undefined as T;

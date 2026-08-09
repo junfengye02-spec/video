@@ -1,0 +1,44 @@
+[
+  {
+    "path": "C:\\Users\\zhuba\\Desktop\\OpenMontage\\videro\\tmp\\generation-units-real-ffmpeg-final\\test_real_ffmpeg_generation_un0\\real-ffmpeg-project\\assets\\video\\units\\unit-1\\v1.mp4",
+    "file_size_bytes": 2452,
+    "duration_seconds": 0.8,
+    "has_video": true,
+    "video_width": 320,
+    "video_height": 180,
+    "video_codec": "h264",
+    "fps": 30.0,
+    "has_audio": false,
+    "audio_codec": null,
+    "audio_channels": 0,
+    "audio_sample_rate": 0
+  },
+  {
+    "path": "C:\\Users\\zhuba\\Desktop\\OpenMontage\\videro\\tmp\\generation-units-real-ffmpeg-final\\test_real_ffmpeg_generation_un0\\real-ffmpeg-project\\assets\\video\\units\\unit-2\\v1.mp4",
+    "file_size_bytes": 2621,
+    "duration_seconds": 1.0,
+    "has_video": true,
+    "video_width": 320,
+    "video_height": 180,
+    "video_codec": "h264",
+    "fps": 30.0,
+    "has_audio": false,
+    "audio_codec": null,
+    "audio_channels": 0,
+    "audio_sample_rate": 0
+  },
+  {
+    "path": "C:\\Users\\zhuba\\Desktop\\OpenMontage\\videro\\tmp\\generation-units-real-ffmpeg-final\\test_real_ffmpeg_generation_un0\\real-ffmpeg-project\\assets\\video\\units\\unit-3\\v1.mp4",
+    "file_size_bytes": 2888,
+    "duration_seconds": 1.2,
+    "has_video": true,
+    "video_width": 320,
+    "video_height": 180,
+    "video_codec": "h264",
+    "fps": 30.0,
+    "has_audio": false,
+    "audio_codec": null,
+    "audio_channels": 0,
+    "audio_sample_rate": 0
+  }
+]

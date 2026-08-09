@@ -1,0 +1,92 @@
+.root {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.root > div {
+  width: 100%;
+  min-width: 0;
+}
+
+.label {
+  color: var(--color-ink-muted, #61717c);
+  font-size: var(--text-caption-size, .75rem);
+  font-weight: 650;
+}
+
+.trigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--color-surface, #f6f8f9);
+  color: var(--color-ink, #172126);
+  cursor: pointer;
+  font: inherit;
+  font-size: .8125rem;
+  font-weight: 620;
+  text-align: left;
+  transition:
+    background-color var(--duration-fast, 120ms) ease,
+    border-color var(--duration-fast, 120ms) ease,
+    box-shadow var(--duration-fast, 120ms) ease;
+}
+
+.trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trigger svg {
+  flex: 0 0 auto;
+  color: var(--color-ink-faint, #6f7e87);
+  transition: transform var(--duration-fast, 120ms) ease;
+}
+
+.trigger[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.trigger:hover:not(:disabled),
+.trigger[aria-expanded="true"] {
+  border-color: var(--color-line, #dce4e8);
+  background: var(--color-surface-raised, #fbfdfe);
+}
+
+.trigger:focus-visible {
+  outline: none;
+  border-color: var(--color-accent, #168a8f);
+  box-shadow: 0 0 0 3px var(--color-focus-ring, rgb(22 138 143 / 16%));
+}
+
+.trigger:disabled {
+  cursor: not-allowed;
+  opacity: .5;
+}
+
+.root[data-compact="true"] {
+  gap: 0;
+}
+
+.root[data-compact="true"] .label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.root[data-compact="true"] .trigger {
+  min-height: 34px;
+  background: transparent;
+}

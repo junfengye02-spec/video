@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenMontage 全页面设计总览</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 30px; background: #1d1e1c; color: #f4f4ee; font-family: "DM Sans", "Noto Sans SC", Arial, sans-serif; }
+      h1 { margin: 0; font-size: 28px; font-weight: 500; }
+      p { margin: 8px 0 25px; color: #aeb0a8; font-size: 13px; }
+      .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+      figure { margin: 0; padding: 8px; border: 1px solid #3b3c38; border-radius: 8px; background: #272825; }
+      img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; object-position: top; border-radius: 5px; }
+      figcaption { padding: 9px 2px 2px; color: #d9d9d1; font-size: 11px; }
+      @media (max-width: 1250px) { .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    </style>
+  </head>
+  <body>
+    <h1>OpenMontage · YouMind 风格完整前端设计</h1>
+    <p>13 个真实页面状态 · 统一创作工作流 · 1600 × 1000 原尺寸截图</p>
+    <div class="grid">
+      <figure><img src="/output/frontend-youmind-complete-design/01-login.png" /><figcaption>01 登录</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/02-register.png" /><figcaption>02 注册</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/03-account-recovery.png" /><figcaption>03 账户恢复</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/04-projects.png" /><figcaption>04 项目首页</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/05-inspiration-chat.png" /><figcaption>05 灵感对话</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/06-creative-blueprint.png" /><figcaption>06 创作蓝图确认</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/07-storyboard-studio.png" /><figcaption>07 分镜工作台</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/08-global-settings.png" /><figcaption>08 全局设定</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/09-resource-library.png" /><figcaption>09 资源库</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/10-production.png" /><figcaption>10 制作与成片</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/11-wallet.png" /><figcaption>11 钱包与额度</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/12-orders.png" /><figcaption>12 订单记录</figcaption></figure>
+      <figure><img src="/output/frontend-youmind-complete-design/13-billing-admin.png" /><figcaption>13 计费管理后台</figcaption></figure>
+    </div>
+  </body>
+</html>

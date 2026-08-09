@@ -1,0 +1,25 @@
+.surface {
+  min-width: 0;
+  border: 1px solid var(--color-line);
+  color: var(--color-ink);
+}
+
+.content {
+  border-radius: var(--radius-3);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-panel);
+}
+
+.raised {
+  border-radius: var(--radius-3);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-panel);
+}
+
+.floating {
+  border-color: rgb(255 255 255 / 55%);
+  border-radius: var(--radius-4);
+  background: var(--color-surface-floating);
+  box-shadow: var(--shadow-floating);
+  backdrop-filter: blur(18px) saturate(140%);
+}

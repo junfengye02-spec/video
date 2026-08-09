@@ -49,15 +49,47 @@ describe("HttpClient", () => {
 
   it("throws structured API errors without losing backend code fields", async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      billing_job_id: "b".repeat(32),
       detail: "Balance too low",
       code: "insufficient_balance",
+      required_units: 1200,
     }, 402));
     const client = new HttpClient();
 
     await expect(client.json("/api/render")).rejects.toMatchObject({
       code: "insufficient_balance",
+      details: {
+        billing_job_id: "b".repeat(32),
+        code: "insufficient_balance",
+        detail: "Balance too low",
+        required_units: 1200,
+      },
       message: "Balance too low",
       status: 402,
+    });
+  });
+
+  it("flattens structured FastAPI detail objects for recoverable conflicts", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      detail: {
+        code: "plan_section_revision_conflict",
+        message: "Creative plan section has changed",
+        section: "worldview",
+        current_revision: 3,
+      },
+    }, 409));
+
+    await expect(new HttpClient().json("/api/projects/p1/creative-plan", {
+      method: "PATCH",
+      body: {},
+    })).rejects.toMatchObject({
+      code: "plan_section_revision_conflict",
+      message: "Creative plan section has changed",
+      status: 409,
+      details: {
+        section: "worldview",
+        current_revision: 3,
+      },
     });
   });
 

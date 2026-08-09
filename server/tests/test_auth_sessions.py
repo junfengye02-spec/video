@@ -519,6 +519,45 @@ def test_unsafe_methods_require_the_exact_same_origin(method):
         )
 
 
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "http://localhost:5174",
+        "http://[::1]:5175",
+    ],
+)
+def test_development_can_explicitly_allow_loopback_frontend_origins(origin):
+    validate_origin(
+        _request(origin=origin),
+        ORIGIN,
+        allow_loopback=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://127.0.0.1",
+        "http://127.0.0.1:5174/",
+        "https://127.0.0.1:5174",
+        "http://127.0.0.2:5174",
+        "http://evil.example:5174",
+    ],
+)
+def test_loopback_origin_exception_remains_narrow(origin):
+    _assert_http_error(
+        403,
+        "Invalid request origin",
+        lambda: validate_origin(
+            _request(origin=origin),
+            ORIGIN,
+            allow_loopback=True,
+        ),
+    )
+
+
 @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
 def test_safe_methods_deliberately_skip_origin_validation(method):
     assert validate_origin(_request(method=method, origin=None), ORIGIN) is None

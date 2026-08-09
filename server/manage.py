@@ -10,12 +10,18 @@ from getpass import getpass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from server.app.assets.legacy_recovery import (
+    LegacyRecoveryError,
+    audit_legacy_assets,
+    restore_legacy_assets,
+)
 from server.app.auth.models import AdminAuditLog, User
 from server.app.auth.security import normalize_email, verify_password
 from server.app.auth.service import bootstrap_admin
 from server.app.auth.sessions import SessionStore
 from server.app.projects.legacy_migration import migrate_legacy_projects
 from server.app.projects.models import ProjectRecord
+from server.app.wallet.provisioning import WalletProvisioner
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -30,12 +36,25 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("create-admin")
     migrate = commands.add_parser("migrate-legacy-projects")
     migrate.add_argument("--sqlite-path", required=True)
+    audit_assets = commands.add_parser("audit-legacy-assets")
+    audit_assets.add_argument("--sqlite-path", required=True)
+    audit_assets.add_argument("--projects-root", required=True)
+    restore_assets = commands.add_parser("restore-legacy-assets")
+    restore_assets.add_argument("--sqlite-path", required=True)
+    restore_assets.add_argument("--projects-root", required=True)
+    restore_assets.add_argument("--owner-email", required=True)
+    restore_assets.add_argument("--project-id")
+    restore_assets.add_argument("--dry-run", action="store_true")
     commands.add_parser("list-unowned-projects")
     assign = commands.add_parser("assign-project")
     assign.add_argument("--project-id", required=True)
     assign.add_argument("--owner-email", required=True)
     reconcile = commands.add_parser("reconcile-billing")
     reconcile.add_argument("--once", action="store_true", required=True)
+    recover_waits = commands.add_parser("recover-provider-waits")
+    recover_waits.add_argument("--project-id")
+    recover_waits.add_argument("--projects-root")
+    recover_waits.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -66,6 +85,7 @@ def _run_command(
                 session_store=session_store,
                 email=email,
                 password=password,
+                provisioner=WalletProvisioner(),
             )
         except Exception:
             print("Administrator bootstrap could not be completed.", file=sys.stderr)
@@ -85,6 +105,52 @@ def _run_command(
         for project_id in result.conflict_ids:
             print(f"Conflicting project ID: {project_id}", file=sys.stderr)
         return 1 if result.conflict_ids else 0
+    if args.command == "audit-legacy-assets":
+        try:
+            report = audit_legacy_assets(db, args.sqlite_path, args.projects_root)
+        except LegacyRecoveryError as exc:
+            _print_json({"error": exc.as_dict()}, file=sys.stderr)
+            return 1
+        except Exception:
+            _print_json(
+                {
+                    "error": {
+                        "code": "legacy_audit_failed",
+                        "message": "Legacy asset audit could not be completed",
+                    }
+                },
+                file=sys.stderr,
+            )
+            return 1
+        _print_json(report)
+        return 0
+    if args.command == "restore-legacy-assets":
+        try:
+            report = restore_legacy_assets(
+                db,
+                args.sqlite_path,
+                args.projects_root,
+                owner_email=args.owner_email,
+                project_id=args.project_id,
+                dry_run=args.dry_run,
+            )
+        except LegacyRecoveryError as exc:
+            _print_json({"error": exc.as_dict()}, file=sys.stderr)
+            return 1
+        except Exception:
+            db.rollback()
+            _print_json(
+                {
+                    "error": {
+                        "code": "legacy_restore_failed",
+                        "message": "Legacy asset restore could not be completed",
+                    }
+                },
+                file=sys.stderr,
+            )
+            return 1
+        _print_json(report)
+        return 0 if report["can_restore"] else 1
     if args.command == "list-unowned-projects":
         project_ids = db.scalars(
             select(ProjectRecord.id)
@@ -172,6 +238,19 @@ def _run_command(
             media_store=media_store,
         )
         return 0
+    if args.command == "recover-provider-waits":
+        if media_store is None:
+            raise ValueError("provider wait recovery media store is unavailable")
+        from server.app.tasks.recovery import recover_provider_waits
+
+        report = recover_provider_waits(
+            db,
+            media_store,
+            project_id=args.project_id,
+            dry_run=args.dry_run,
+        )
+        _print_json(report)
+        return 1 if report["unresolved"] or report["manual_audit"] else 0
     return 2
 
 
@@ -186,7 +265,13 @@ def run_manage(
 ) -> int:
     args = _parser().parse_args(argv)
     if db_session is not None:
-        if args.command != "reconcile-billing" and session_store is None:
+        database_only_commands = {
+            "audit-legacy-assets",
+            "reconcile-billing",
+            "recover-provider-waits",
+            "restore-legacy-assets",
+        }
+        if args.command not in database_only_commands and session_store is None:
             raise ValueError("database session and session store must be supplied together")
         return _run_command(
             args,
@@ -205,6 +290,21 @@ def run_manage(
     from server.app.db.session import SessionLocal
 
     settings = settings or get_settings()
+    if args.command in {"audit-legacy-assets", "restore-legacy-assets"}:
+        with SessionLocal() as db:
+            return _run_command(args, db, None)
+    if args.command == "recover-provider-waits":
+        from server.app.settings import DEFAULT_PROJECTS_ROOT
+        from server.app.storage import WorkbenchStore
+
+        projects_root = args.projects_root or DEFAULT_PROJECTS_ROOT
+        with SessionLocal() as db:
+            return _run_command(
+                args,
+                db,
+                None,
+                media_store=WorkbenchStore(projects_root=projects_root),
+            )
     if args.command == "reconcile-billing":
         from server.app.provider.newapi import NewApiClient
         from server.app.settings import DEFAULT_PROJECTS_ROOT
@@ -233,6 +333,13 @@ def run_manage(
 
 def main(argv: list[str] | None = None) -> int:
     return run_manage(argv)
+
+
+def _print_json(value: object, *, file=None) -> None:
+    print(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True),
+        file=file,
+    )
 
 
 if __name__ == "__main__":

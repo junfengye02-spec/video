@@ -100,6 +100,19 @@ def test_expired_code_is_rejected(redis_client, store):
         store.consume("person@example.com", code, purpose="register", now=701)
 
 
+def test_cancel_removes_only_the_matching_code_and_resend_gate(redis_client, store):
+    code = store.issue("person@example.com", purpose="register", now=100)
+
+    assert store.cancel("person@example.com", "000000", purpose="register") is False
+    store.consume("person@example.com", code, purpose="register", now=101)
+
+    _allow_resend(redis_client, "person@example.com")
+    replacement = store.issue("person@example.com", purpose="register", now=160)
+    assert store.cancel("person@example.com", replacement, purpose="register") is True
+    assert redis_client.get(f"{PREFIX}verification:register:person@example.com") is None
+    assert redis_client.get(f"{PREFIX}verification:resend:person@example.com") is None
+
+
 def test_resend_gate_does_not_replace_code_or_increment_quota(redis_client, store, monkeypatch):
     codes = iter([111111, 999999, 222222])
     monkeypatch.setattr("server.app.auth.verification.secrets.randbelow", lambda _: next(codes))

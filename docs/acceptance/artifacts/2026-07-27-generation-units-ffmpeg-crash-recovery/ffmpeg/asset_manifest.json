@@ -1,0 +1,84 @@
+{
+  "version": "1.0",
+  "assets": [
+    {
+      "id": "asset-unit-1",
+      "type": "video",
+      "path": "assets/video/units/unit-1/v1.mp4",
+      "source_tool": "strict_fake_provider",
+      "scene_id": "unit-1",
+      "requested_duration_seconds": 10,
+      "source_duration_seconds": 0.8,
+      "duration_seconds": 0.8,
+      "format": "mp4",
+      "metadata": {
+        "generation_unit_id": "unit-1",
+        "revision": 1,
+        "source_shot_ids": [
+          "s1",
+          "s2"
+        ],
+        "source_beat_ids": [
+          "b1",
+          "b2"
+        ],
+        "active": true,
+        "status": "complete"
+      }
+    },
+    {
+      "id": "asset-unit-2",
+      "type": "video",
+      "path": "assets/video/units/unit-2/v1.mp4",
+      "source_tool": "strict_fake_provider",
+      "scene_id": "unit-2",
+      "requested_duration_seconds": 10,
+      "source_duration_seconds": 1.0,
+      "duration_seconds": 1.0,
+      "format": "mp4",
+      "metadata": {
+        "generation_unit_id": "unit-2",
+        "revision": 1,
+        "source_shot_ids": [
+          "s3",
+          "s4"
+        ],
+        "source_beat_ids": [
+          "b3",
+          "b4"
+        ],
+        "active": true,
+        "status": "complete"
+      }
+    },
+    {
+      "id": "asset-unit-3",
+      "type": "video",
+      "path": "assets/video/units/unit-3/v1.mp4",
+      "source_tool": "strict_fake_provider",
+      "scene_id": "unit-3",
+      "requested_duration_seconds": 10,
+      "source_duration_seconds": 1.2,
+      "duration_seconds": 1.2,
+      "format": "mp4",
+      "metadata": {
+        "generation_unit_id": "unit-3",
+        "revision": 1,
+        "source_shot_ids": [
+          "s5",
+          "s6"
+        ],
+        "source_beat_ids": [
+          "b5",
+          "b6"
+        ],
+        "active": true,
+        "status": "complete"
+      }
+    }
+  ],
+  "total_cost_usd": 0,
+  "metadata": {
+    "generation_units_v2": true
+  }
+}

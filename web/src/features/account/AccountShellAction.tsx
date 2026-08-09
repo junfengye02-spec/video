@@ -1,4 +1,4 @@
-import { LogOut, ShieldCheck, UserCircle } from "lucide-react";
+import { LogOut, ShieldCheck, UserCircle, Video } from "lucide-react";
 import type { MouseEvent } from "react";
 import { Link } from "react-router-dom";
 import { projectRoutes } from "../../app/routes";
@@ -9,6 +9,7 @@ interface AccountShellActionProps {
 }
 
 const adminBillingText = "\u8d26\u5355\u7ba1\u7406";
+const adminVideoModelsText = "\u6a21\u578b\u7ba1\u7406";
 const logoutText = "\u9000\u51fa";
 
 export function AccountShellAction({ onBeforeNavigate }: AccountShellActionProps) {
@@ -22,9 +23,27 @@ export function AccountShellAction({ onBeforeNavigate }: AccountShellActionProps
   return (
     <>
       {auth.user?.role === "admin" ? (
-        <Link to={projectRoutes.adminBilling} onClick={handleNavigate}>
+        <Link
+          className="admin-shell-link"
+          to={projectRoutes.adminBilling}
+          title={adminBillingText}
+          aria-label={adminBillingText}
+          onClick={handleNavigate}
+        >
           <ShieldCheck aria-hidden="true" size={16} />
-          {adminBillingText}
+          <span>{adminBillingText}</span>
+        </Link>
+      ) : null}
+      {auth.user?.role === "admin" ? (
+        <Link
+          className="admin-shell-link"
+          to={projectRoutes.adminVideoModels}
+          title={adminVideoModelsText}
+          aria-label={adminVideoModelsText}
+          onClick={handleNavigate}
+        >
+          <Video aria-hidden="true" size={16} />
+          <span>{adminVideoModelsText}</span>
         </Link>
       ) : null}
       {auth.user?.email ? (

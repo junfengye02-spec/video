@@ -1,0 +1,13 @@
+{
+  "initial_batch_id": "a23bcd3a8cee48868b28c1bfd7d4ff3d",
+  "initial_idempotency_key": "process-crash-original",
+  "project_id": "11f8db68f1dd41328423226d1e77a548",
+  "replacement_batch_id": "2d950a0fb5264ec9926305d047c9adb0",
+  "replacement_idempotency_key": "process-replacement-v2",
+  "replacement_item_id": "226d8c4e9c57424694064dfabfb8cfe0",
+  "storyboard_shot_ids": [
+    "s1",
+    "s2"
+  ],
+  "unit_id": "unit-57be5ac26be932a3b6689165"
+}

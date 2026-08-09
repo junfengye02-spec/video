@@ -53,6 +53,24 @@ function stateFor(projectId: string, generation = 1): WorkbenchState {
 }
 
 describe("workbench reducer", () => {
+  it("deduplicates and orders out-of-order job events deterministically", () => {
+    const current = {
+      ...initialWorkbenchState,
+      snapshot: project("p1"),
+      load: "ready" as const,
+    };
+    const later = event("p1", "later");
+    later.created_at = "2026-07-12T00:02:00Z";
+    const earlier = event("p1", "earlier");
+    earlier.created_at = "2026-07-12T00:01:00Z";
+
+    const withLater = reduceWorkbench(current, { type: "eventReceived", event: later });
+    const reordered = reduceWorkbench(withLater, { type: "eventReceived", event: earlier });
+    const duplicate = reduceWorkbench(reordered, { type: "eventReceived", event: later });
+
+    expect(duplicate.events.map((item) => item.id)).toEqual(["earlier", "later"]);
+  });
+
   it("opens a project and selects its first shot", () => {
     const open = token("p1", "open");
     const opened = reduceWorkbench(initialWorkbenchState, { type: "openStarted", token: open });
@@ -138,6 +156,62 @@ describe("workbench reducer", () => {
     );
     expect(failed.error).toBe("optimization failed");
     expect(failed.snapshot?.storyboard.shots[0].prompt).toBe("Saved prompt");
+  });
+
+  it("tracks plan section and revision operations independently", () => {
+    const base = { ...initialWorkbenchState, snapshot: project("p1"), load: "ready" as const };
+    const section = token("p1", "update-plan-section");
+    const revision = token("p1", "revise-plan", 2);
+    const started = reduceWorkbench(
+      reduceWorkbench(base, { type: "operationStarted", token: section }),
+      { type: "operationStarted", token: revision },
+    );
+
+    expect(started.operations["update-plan-section"]).toEqual(section);
+    expect(started.operations["revise-plan"]).toEqual(revision);
+    const finished = reduceWorkbench(started, {
+      type: "operationSucceeded",
+      token: section,
+      snapshot: project("p1", "Updated plan"),
+    });
+    expect(finished.operations["update-plan-section"]).toBeUndefined();
+    expect(finished.operations["revise-plan"]).toEqual(revision);
+  });
+
+  it("keeps inspiration state while a planning operation fails", () => {
+    const current = project("p1");
+    current.creative_workflow = {
+      phase: "inspiration",
+      messages: [
+        { role: "user", content: "A rainy reunion" },
+        { role: "assistant", content: "The intent is ready" },
+      ],
+      brief: null,
+      ready_to_confirm: false,
+      planned_asset_ids: [],
+      approved_at: null,
+    };
+    const inspiration = token("p1", "inspiration");
+    const planning = token("p1", "create", 2);
+    const started = reduceWorkbench(
+      reduceWorkbench(
+        { ...initialWorkbenchState, snapshot: current, load: "ready" },
+        { type: "operationStarted", token: inspiration },
+      ),
+      { type: "operationStarted", token: planning },
+    );
+
+    const failed = reduceWorkbench(started, {
+      type: "operationFailed",
+      token: planning,
+      error: "planning failed",
+    });
+
+    expect(failed.snapshot).toBe(current);
+    expect(failed.snapshot?.creative_workflow?.messages).toHaveLength(2);
+    expect(failed.operations.inspiration).toEqual(inspiration);
+    expect(failed.operations.create).toBeUndefined();
+    expect(failed.error).toBe("planning failed");
   });
 
   it("merges a render result without overwriting a concurrent shot save", () => {

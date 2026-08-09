@@ -7,17 +7,24 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
 from urllib.parse import unquote, urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from server.app.models import (
-    CameraMovement,
     ContinuityPlan,
     CredentialFreeRequest,
     ProjectType,
     ShotLanguage,
+    ShotContinuity,
     ShotRevision,
-    ShotSize,
 )
+from server.app.generation_units.schemas import GenerationExecutionSnapshot
 
 
 MAX_IMPORT_ARTIFACT_BYTES = 1024 * 1024
@@ -32,6 +39,7 @@ OpaqueArtifactId = Annotated[
 class ProjectCreateRequest(CredentialFreeRequest):
     title: str = Field(min_length=1, max_length=255)
     project_type: ProjectType = "single_video"
+    prompt: str = Field(default="", max_length=10000)
 
 
 class ProjectResponse(BaseModel):
@@ -66,6 +74,18 @@ class ImportedCharacter(BaseModel):
         return [_validate_browser_local_media(value) for value in values]
 
 
+class ImportedVideoFrameProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shot_id: OpaqueArtifactId
+    video_version: int = Field(ge=1)
+    media_sha256: Annotated[
+        str,
+        StringConstraints(pattern=r"^[0-9a-f]{64}$"),
+    ]
+    sample_time_seconds: float = Field(ge=0)
+
+
 class ImportedAsset(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -77,11 +97,40 @@ class ImportedAsset(BaseModel):
     reference_images: list[str] = Field(default_factory=list, max_length=64)
     shot_ids: list[OpaqueArtifactId] = Field(default_factory=list, max_length=1000)
     version: int = Field(default=1, ge=1)
+    origin_project_id: str | None = Field(default=None, max_length=128)
+    source_type: Literal["upload", "ai_generated", "video_frame"] | None = None
+    model: str | None = Field(default=None, max_length=255)
+    generation_job_id: str | None = Field(default=None, max_length=128)
+    media_asset_id: str | None = Field(default=None, max_length=128)
+    media_url: str | None = Field(default=None, max_length=4000)
+    media_urls: list[str] = Field(default_factory=list, max_length=64)
+    status: Literal["ready", "missing", "stale", "deleted"] | None = None
+    created_at: str | None = Field(default=None, max_length=128)
+    provenance: ImportedVideoFrameProvenance | None = None
 
     @field_validator("reference_images")
     @classmethod
     def validate_reference_images(cls, values: list[str]) -> list[str]:
         return [_validate_browser_local_media(value) for value in values]
+
+    @model_validator(mode="after")
+    def validate_provenance_source(self) -> "ImportedAsset":
+        if self.source_type == "video_frame" and self.provenance is None:
+            raise ValueError("video-frame assets require provenance")
+        if self.source_type != "video_frame" and self.provenance is not None:
+            raise ValueError("only video-frame assets may include provenance")
+        return self
+
+
+class ImportedSoundPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    narration: str = Field(default="", max_length=10000)
+    dialogue: str = Field(default="", max_length=10000)
+    ambience: str = Field(default="", max_length=10000)
+    music_direction: str = Field(default="", max_length=10000)
+    prompt: str = Field(default="", max_length=10000)
+    storyboard_prompt_integration: bool = False
 
 
 class ImportedSeriesBible(BaseModel):
@@ -90,6 +139,13 @@ class ImportedSeriesBible(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     mode: Literal["short_drama", "general_video"] = "short_drama"
     style_lock: str = ""
+    project_brief: str = Field(default="", max_length=10000)
+    worldview: str = Field(default="", max_length=10000)
+    main_arc: str = Field(default="", max_length=10000)
+    visual_rules: str = Field(default="", max_length=10000)
+    series_prompt: str = Field(default="", max_length=10000)
+    relationship_map: list[str] = Field(default_factory=list, max_length=500)
+    sound_plan: ImportedSoundPlan | None = None
     characters: list[ImportedCharacter] = Field(default_factory=list, max_length=500)
     assets: list[ImportedAsset] = Field(default_factory=list, max_length=2000)
 
@@ -100,6 +156,7 @@ class ImportedShot(BaseModel):
     id: OpaqueArtifactId
     scene_id: OpaqueArtifactId
     index: int = Field(ge=0, le=100000)
+    episode_number: int | None = Field(default=None, ge=1, le=100000)
     beat: str = Field(default="", max_length=10000)
     prompt: str = Field(default="", max_length=10000)
     characters: list[OpaqueArtifactId] = Field(default_factory=list, max_length=500)
@@ -107,11 +164,14 @@ class ImportedShot(BaseModel):
     props: list[str] = Field(default_factory=list, max_length=500)
     shot_intent: str | None = Field(default=None, max_length=10000)
     shot_language: ShotLanguage | None = None
-    status: Literal["draft", "ready", "generating", "complete", "failed"] = "draft"
+    status: Literal[
+        "draft", "ready", "generating", "complete", "failed", "stale"
+    ] = "draft"
     consistency_score: int = Field(default=100, ge=0, le=100)
     output_url: str | None = Field(default=None, max_length=4000)
     output_path: str | None = Field(default=None, max_length=4000)
     asset_ids: list[OpaqueArtifactId] = Field(default_factory=list, max_length=2000)
+    continuity: ShotContinuity = Field(default_factory=ShotContinuity)
     version: int = Field(default=1, ge=1)
     history: list[ShotRevision] = Field(default_factory=list, max_length=1000)
 
@@ -159,6 +219,7 @@ class ProjectImportRequest(BaseModel):
     series_bible: ImportedSeriesBible
     storyboard: ImportedStoryboard
     continuity_plan: ContinuityPlan
+    generation_execution: GenerationExecutionSnapshot | None = None
 
     def artifact_payloads(self) -> dict[str, dict[str, Any]]:
         return {
@@ -168,10 +229,19 @@ class ProjectImportRequest(BaseModel):
         }
 
     def artifact_size_bytes(self) -> int:
-        return sum(
+        artifact_bytes = sum(
             len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
             for value in self.artifact_payloads().values()
         )
+        if self.generation_execution is not None:
+            artifact_bytes += len(
+                json.dumps(
+                    self.generation_execution.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+        return artifact_bytes
 
 
 def _validate_browser_local_media(value: str) -> str:

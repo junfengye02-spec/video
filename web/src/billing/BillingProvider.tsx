@@ -20,6 +20,19 @@ export interface BillingContextValue {
 }
 
 const BillingContext = createContext<BillingContextValue | null>(null);
+const BILLING_INVALIDATED_EVENT = "mise:billing-invalidated";
+const BILLING_CHANNEL = "mise-billing";
+const BILLING_TAB_ID = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+  ? crypto.randomUUID()
+  : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+
+export function notifyBillingChanged(): void {
+  window.dispatchEvent(new Event(BILLING_INVALIDATED_EVENT));
+  if (typeof BroadcastChannel === "undefined") return;
+  const channel = new BroadcastChannel(BILLING_CHANNEL);
+  channel.postMessage({ sourceId: BILLING_TAB_ID, type: "invalidate" });
+  channel.close();
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error && error.message
@@ -104,6 +117,33 @@ export function BillingProvider({ children }: { children: ReactNode }) {
     }
     void refreshWalletForGeneration(generation);
   }, [auth.loading, refreshWalletForGeneration, userId]);
+
+  useEffect(() => {
+    if (!userId) return undefined;
+    const handleInvalidation = () => {
+      void refreshWallet();
+    };
+    window.addEventListener(BILLING_INVALIDATED_EVENT, handleInvalidation);
+    const channel = typeof BroadcastChannel === "undefined"
+      ? null
+      : new BroadcastChannel(BILLING_CHANNEL);
+    if (channel) {
+      channel.onmessage = (event: MessageEvent<unknown>) => {
+        const message = event.data;
+        if (
+          message
+          && typeof message === "object"
+          && "sourceId" in message
+          && (message as { sourceId?: unknown }).sourceId === BILLING_TAB_ID
+        ) return;
+        handleInvalidation();
+      };
+    }
+    return () => {
+      window.removeEventListener(BILLING_INVALIDATED_EVENT, handleInvalidation);
+      channel?.close();
+    };
+  }, [refreshWallet, userId]);
 
   const value = useMemo<BillingContextValue>(() => ({
     wallet,

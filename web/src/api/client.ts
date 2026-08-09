@@ -1,12 +1,18 @@
+import { GENERATION_UNITS_CONTRACT_VERSION } from "../domain/types";
 import type {
   ContinuityPlan,
   ContinuityPlanResponse,
   DraftProjectRequest,
   JobEvent,
+  GenerationPlan,
+  GenerationPlanPreviewRequest,
+  GenerationUnitsGenerateRequest,
+  GenerationUnitsGenerateResponse,
   PromptOptimizeRequest,
   PromptOptimizeResponse,
   ReferenceImageUploadRequest,
   ReferenceImageUploadResponse,
+  RegenerateShotAcceptedResponse,
   RenderProjectRequest,
   RegenerateShotResponse,
   RenderProjectResponse,
@@ -75,12 +81,12 @@ export function mediaUrl(path: string | null | undefined, projectId?: string | n
     return null;
   }
   const mediaPattern =
-    /^\/api\/projects\/[^/]+\/media\/(?:renders\/final\.(?:mp4|mov|webm)|assets\/video\/.+\.(?:mp4|mov|webm)|assets\/images\/.+\.(?:png|jpg|jpeg|webp))$/i;
+    /^\/api\/projects\/[^/]+\/media\/(?:renders\/(?:final|episode-\d+)\.(?:mp4|mov|webm)|assets\/video\/.+\.(?:mp4|mov|webm)|assets\/images\/.+\.(?:png|jpg|jpeg|webp))$/i;
   if (mediaPattern.test(value)) {
     return value;
   }
   const relativeMediaPattern =
-    /^(?:renders\/final\.(?:mp4|mov|webm)|assets\/video\/.+\.(?:mp4|mov|webm)|assets\/images\/.+\.(?:png|jpg|jpeg|webp))$/i;
+    /^(?:renders\/(?:final|episode-\d+)\.(?:mp4|mov|webm)|assets\/video\/.+\.(?:mp4|mov|webm)|assets\/images\/.+\.(?:png|jpg|jpeg|webp))$/i;
   if (projectId && relativeMediaPattern.test(value)) {
     const encodedPath = value.split("/").map(encodeURIComponent).join("/");
     return `/api/projects/${encodeURIComponent(projectId)}/media/${encodedPath}`;
@@ -131,10 +137,34 @@ export function regenerateShot(
   shotId: string,
   payload: ShotRegenerateRequest,
   fetcher?: typeof fetch,
-): Promise<RegenerateShotResponse> {
-  return postJson<RegenerateShotResponse>(
+): Promise<RegenerateShotAcceptedResponse> {
+  return postJson<RegenerateShotAcceptedResponse>(
     `/api/projects/${projectId}/shots/${shotId}/regenerate`,
     payload,
+    fetcher,
+  );
+}
+
+export function previewGenerationPlan(
+  projectId: string,
+  payload: GenerationPlanPreviewRequest,
+  fetcher?: typeof fetch,
+): Promise<GenerationPlan> {
+  return postJson<GenerationPlan>(
+    `/api/projects/${projectId}/generation-plan/preview`,
+    { ...payload, contract_version: GENERATION_UNITS_CONTRACT_VERSION },
+    fetcher,
+  );
+}
+
+export function generateGenerationUnits(
+  projectId: string,
+  payload: GenerationUnitsGenerateRequest,
+  fetcher?: typeof fetch,
+): Promise<GenerationUnitsGenerateResponse> {
+  return postJson<GenerationUnitsGenerateResponse>(
+    `/api/projects/${projectId}/generation-units/generate`,
+    { ...payload, contract_version: GENERATION_UNITS_CONTRACT_VERSION },
     fetcher,
   );
 }

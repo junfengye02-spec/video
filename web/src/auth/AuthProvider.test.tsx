@@ -50,7 +50,28 @@ function StateProbe() {
       >
         register
       </button>
+      <button type="button" onClick={() => void auth.sendVerification(user.email)}>
+        send verification
+      </button>
       <button type="button" onClick={() => void auth.logout()}>logout</button>
+    </div>
+  );
+}
+
+function LoginErrorProbe() {
+  const auth = useAuth();
+  const [errorCode, setErrorCode] = useState("");
+  return (
+    <div>
+      <span>{errorCode}</span>
+      <button
+        type="button"
+        onClick={() => void auth.login({ email: user.email, password: "wrong-password" }).catch((error: unknown) => {
+          if (error instanceof AuthRequestError) setErrorCode(error.code);
+        })}
+      >
+        login
+      </button>
     </div>
   );
 }
@@ -117,6 +138,43 @@ describe("authRequest", () => {
     expect(JSON.stringify(error)).not.toContain(secret);
   });
 
+  it.each([
+    [422, "email_domain_unavailable"],
+    [503, "email_delivery_unavailable"],
+    [503, "email_delivery_failed"],
+  ] as const)("preserves the safe email error code for status %s", async (status, code) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      detail: { code, message: "safe message" },
+    }, status)));
+
+    await expect(authRequest("/api/auth/email-verifications", { method: "POST" }))
+      .rejects.toMatchObject({ code, status });
+  });
+
+  it("distinguishes a stale CSRF token from a forbidden request origin", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ detail: "Invalid CSRF token" }, 403))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Invalid request origin" }, 403));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(authRequest("/api/auth/login", { method: "POST" }))
+      .rejects.toMatchObject({ code: "csrf_invalid", status: 403 });
+    await expect(authRequest("/api/auth/login", { method: "POST" }))
+      .rejects.toMatchObject({ code: "forbidden", status: 403 });
+  });
+
+  it("distinguishes a missing session from invalid credentials", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ detail: "Authentication required" }, 401))
+      .mockResolvedValueOnce(jsonResponse({ detail: "Email or password is incorrect" }, 401));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(authRequest("/api/auth/login", { method: "POST" }))
+      .rejects.toMatchObject({ code: "session_invalid", status: 401 });
+    await expect(authRequest("/api/auth/login", { method: "POST" }))
+      .rejects.toMatchObject({ code: "unauthorized", status: 401 });
+  });
+
   it("notifies narrow subscribers after an unauthorized response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ detail: "no" }, 401)));
     const listener = vi.fn();
@@ -165,6 +223,122 @@ describe("AuthProvider", () => {
 
     expect(await screen.findByText("anonymous")).toBeInTheDocument();
     expect(calls).toEqual(["/api/auth/me", "/api/auth/csrf"]);
+  });
+
+  it("refreshes anonymous CSRF and retries verification after a stale session 401", async () => {
+    let csrfCount = 0;
+    let verificationCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/auth/me") return jsonResponse({ detail: "no" }, 401);
+      if (path === "/api/auth/csrf") {
+        csrfCount += 1;
+        return jsonResponse({ csrf_token: `csrf-${csrfCount}` });
+      }
+      if (path === "/api/auth/email-verifications") {
+        verificationCount += 1;
+        if (verificationCount === 1) return jsonResponse({ detail: "Authentication required" }, 401);
+        expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("csrf-2");
+        return jsonResponse({ detail: "Verification code sent" }, 202);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AuthProvider><StateProbe /></AuthProvider>);
+    await screen.findByText("anonymous");
+
+    fireEvent.click(screen.getByRole("button", { name: "send verification" }));
+
+    await waitFor(() => expect(verificationCount).toBe(2));
+    expect(csrfCount).toBe(2);
+  });
+
+  it("does not retry a login that failed because the credentials were invalid", async () => {
+    let csrfCount = 0;
+    let loginCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/auth/me") return jsonResponse({ detail: "Authentication required" }, 401);
+      if (path === "/api/auth/csrf") {
+        csrfCount += 1;
+        return jsonResponse({ csrf_token: `csrf-${csrfCount}` });
+      }
+      if (path === "/api/auth/login") {
+        loginCount += 1;
+        return jsonResponse({ detail: "Email or password is incorrect" }, 401);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AuthProvider><LoginErrorProbe /></AuthProvider>);
+    await waitFor(() => expect(csrfCount).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "login" }));
+
+    expect(await screen.findByText("unauthorized")).toBeInTheDocument();
+    expect(loginCount).toBe(1);
+    expect(csrfCount).toBe(1);
+  });
+
+  it("does not let a superseded CSRF request overwrite a forced refresh", async () => {
+    const firstCsrf = deferredResponse();
+    let csrfCount = 0;
+    let verificationCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/auth/me") return jsonResponse({ detail: "Authentication required" }, 401);
+      if (path === "/api/auth/csrf") {
+        csrfCount += 1;
+        if (csrfCount === 1) return firstCsrf.promise;
+        return jsonResponse({ csrf_token: "csrf-fresh" });
+      }
+      if (path === "/api/auth/email-verifications") {
+        verificationCount += 1;
+        if (verificationCount === 1) return jsonResponse({ detail: "Authentication required" }, 401);
+        expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("csrf-fresh");
+        return jsonResponse({ detail: "Verification code sent" }, 202);
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AuthProvider><StateProbe /></AuthProvider>);
+    await waitFor(() => expect(csrfCount).toBe(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "send verification" }));
+    await waitFor(() => expect(verificationCount).toBe(1));
+    firstCsrf.resolve(jsonResponse({ csrf_token: "csrf-stale" }));
+
+    await waitFor(() => expect(verificationCount).toBe(2));
+    expect(csrfCount).toBe(2);
+  });
+
+  it("refreshes anonymous CSRF and retries login after a stale-token 403", async () => {
+    let csrfCount = 0;
+    let loginCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/auth/me") return jsonResponse({ detail: "no" }, 401);
+      if (path === "/api/auth/csrf") {
+        csrfCount += 1;
+        return jsonResponse({ csrf_token: `csrf-${csrfCount}` });
+      }
+      if (path === "/api/auth/login") {
+        loginCount += 1;
+        if (loginCount === 1) return jsonResponse({ detail: "Invalid CSRF token" }, 403);
+        expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("csrf-2");
+        return jsonResponse({ user, csrf_token: "csrf-login" });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AuthProvider><StateProbe /></AuthProvider>);
+    await screen.findByText("anonymous");
+
+    fireEvent.click(screen.getByRole("button", { name: "login" }));
+
+    expect(await screen.findByText(user.email)).toBeInTheDocument();
+    expect(loginCount).toBe(2);
+    expect(csrfCount).toBe(2);
   });
 
   it.each(["login", "register"] as const)("stores the successful %s session in memory", async (action) => {

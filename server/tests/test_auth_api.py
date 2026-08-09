@@ -214,6 +214,84 @@ def test_mixed_case_verification_and_registration_share_canonical_email(
     assert response.json()["user"]["email"] == EMAIL
 
 
+def test_verification_delivery_failure_returns_503_and_allows_retry(
+    auth_client,
+    auth_app,
+    auth_redis,
+    auth_settings,
+    mailer,
+):
+    from server.app.auth.router import get_mailer
+
+    class FailingMailer:
+        def send_verification(self, email: str, code: str) -> None:
+            raise RuntimeError("delivery unavailable")
+
+        def send_password_reset(self, email: str, code: str) -> None:
+            raise RuntimeError("delivery unavailable")
+
+    _bootstrap(auth_client)
+    auth_app.dependency_overrides[get_mailer] = FailingMailer
+
+    failed = auth_client.post("/api/auth/email-verifications", json={"email": EMAIL})
+
+    assert failed.status_code == 503
+    assert failed.json() == {
+        "detail": {
+            "code": "email_delivery_failed",
+            "message": "Verification email delivery failed",
+        }
+    }
+    assert auth_redis.get(
+        f"{auth_settings.redis_prefix}verification:register:{EMAIL}"
+    ) is None
+    assert auth_redis.get(
+        f"{auth_settings.redis_prefix}verification:resend:{EMAIL}"
+    ) is None
+
+    auth_app.dependency_overrides[get_mailer] = lambda: mailer
+    retried = auth_client.post("/api/auth/email-verifications", json={"email": EMAIL})
+
+    assert retried.status_code == 202
+    assert mailer.messages[-1][:2] == ("register", EMAIL)
+
+
+def test_unreachable_recipient_domain_is_rejected_before_issuing_code(
+    auth_client,
+    auth_app,
+    auth_settings,
+    auth_redis,
+    mailer,
+    monkeypatch,
+):
+    from server.app.auth import router as auth_router
+
+    auth_settings.environment = "development"
+
+    def reject_domain(_email: str) -> None:
+        from server.app.auth.mailer import RecipientDomainUnavailable
+
+        raise RecipientDomainUnavailable("recipient domain does not exist")
+
+    monkeypatch.setattr(auth_router, "ensure_recipient_domain", reject_domain)
+    _bootstrap(auth_client)
+
+    response = auth_client.post(
+        "/api/auth/email-verifications",
+        json={"email": EMAIL},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "code": "email_domain_unavailable",
+            "message": "The email domain cannot receive mail",
+        }
+    }
+    assert mailer.messages == []
+    assert auth_redis.get(f"{auth_settings.redis_prefix}verification:register:{EMAIL}") is None
+
+
 def test_duplicate_registration_is_atomic_and_does_not_rotate_anonymous_session(
     auth_client, mailer, auth_redis, auth_settings, auth_db, provisioner, session_store
 ):

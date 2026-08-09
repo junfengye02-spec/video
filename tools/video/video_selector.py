@@ -23,13 +23,15 @@ class VideoSelector(BaseTool):
     agent_skills = ["ai-video-gen", "create-video", "ltx2"]
 
     capabilities = [
-        "text_to_video", "image_to_video", "stock_video",
+        "text_to_video", "image_to_video", "reference_to_video",
+        "first_last_frame_to_video", "stock_video",
         "provider_selection", "search_video", "download_video",
     ]
     supports = {
         "user_preference_routing": True,
         "offline_fallback": True,
         "reference_image": True,
+        "first_last_frame_to_video": True,
         "stock_fallback": True,
     }
     best_for = [
@@ -51,7 +53,13 @@ class VideoSelector(BaseTool):
             "allowed_providers": {"type": "array", "items": {"type": "string"}},
             "operation": {
                 "type": "string",
-                "enum": ["text_to_video", "image_to_video", "reference_to_video", "rank"],
+                "enum": [
+                    "text_to_video",
+                    "image_to_video",
+                    "reference_to_video",
+                    "first_last_frame_to_video",
+                    "rank",
+                ],
                 "default": "text_to_video",
             },
             "aspect_ratio": {
@@ -81,6 +89,22 @@ class VideoSelector(BaseTool):
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Local reference image paths for providers that support reference-conditioned video.",
+            },
+            "first_frame_url": {
+                "type": "string",
+                "description": "First-frame URL for providers with an explicit first/last-frame contract.",
+            },
+            "first_frame_path": {
+                "type": "string",
+                "description": "Local first-frame path for providers with an explicit first/last-frame contract.",
+            },
+            "last_frame_url": {
+                "type": "string",
+                "description": "Last-frame URL for providers with an explicit first/last-frame contract.",
+            },
+            "last_frame_path": {
+                "type": "string",
+                "description": "Local last-frame path for providers with an explicit first/last-frame contract.",
             },
             "image_url": {
                 "type": "string",
@@ -302,6 +326,22 @@ class VideoSelector(BaseTool):
                     filtered.append(tool)
                 continue
 
+            if operation == "first_last_frame_to_video":
+                operation_schema = props.get("operation", {})
+                declared_operations = operation_schema.get("enum", [])
+                has_frame_fields = (
+                    ("first_frame_url" in props or "first_frame_path" in props)
+                    and ("last_frame_url" in props or "last_frame_path" in props)
+                )
+                if supports.get("first_last_frame_to_video") or (
+                    "first_last_frame_to_video" in declared_operations
+                    and has_frame_fields
+                ):
+                    filtered.append(tool)
+                continue
+
             filtered.append(tool)
 
+        if operation == "first_last_frame_to_video":
+            return filtered
         return filtered or candidates

@@ -15,7 +15,7 @@ export function RequireAdmin() {
     return (
       <section aria-labelledby="not-authorized-title">
         <h1 id="not-authorized-title">Not authorized</h1>
-        <p>This account cannot access billing administration.</p>
+        <p>This account cannot access administration.</p>
       </section>
     );
   }

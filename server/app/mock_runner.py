@@ -177,8 +177,18 @@ def update_mock_shot(
     edits: dict[str, Any],
     source: str = "prompt_edit",
 ) -> dict[str, Any]:
-    clearable_keys = {"location", "shot_intent", "shot_language"}
-    editable_keys = ("prompt", "characters", "location", "props", "asset_ids", "shot_intent", "shot_language")
+    clearable_keys = {"episode_number", "location", "shot_intent", "shot_language"}
+    editable_keys = (
+        "episode_number",
+        "prompt",
+        "characters",
+        "location",
+        "props",
+        "asset_ids",
+        "shot_intent",
+        "shot_language",
+        "continuity",
+    )
     for shot in storyboard.get("shots", []):
         if shot.get("id") != shot_id:
             continue
@@ -207,15 +217,21 @@ def update_mock_shot(
                 "asset_ids": list(shot.get("asset_ids", [])),
                 "shot_intent": shot.get("shot_intent"),
                 "shot_language": shot.get("shot_language"),
+                "continuity": shot.get("continuity") or {
+                    "mode": "cut",
+                    "inherit_previous_tail": False,
+                },
                 "updated_at": _utc_now(),
             }
         )
         for key, value in changed_fields.items():
             shot[key] = value
-        shot["output_path"] = None
-        shot["output_url"] = None
         shot["version"] = version
-        shot["status"] = "ready"
+        shot["status"] = (
+            "complete"
+            if shot.get("output_path") or shot.get("output_url")
+            else "ready"
+        )
         shot["history"] = history
         return shot
     raise KeyError(f"Shot '{shot_id}' not found")

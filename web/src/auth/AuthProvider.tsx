@@ -43,33 +43,61 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const mountedRef = useRef(false);
   const generationRef = useRef(0);
   const csrfRef = useRef<string | null>(null);
-  const csrfPromiseRef = useRef<Promise<void> | null>(null);
+  const csrfVersionRef = useRef(0);
+  const csrfPromiseRef = useRef<{ promise: Promise<void>; version: number } | null>(null);
 
   const rememberCsrf = useCallback((token: string | null) => {
     csrfRef.current = token;
     setCsrfToken(token);
   }, []);
 
+  const invalidateCsrf = useCallback(() => {
+    csrfVersionRef.current += 1;
+    rememberCsrf(null);
+  }, [rememberCsrf]);
+
+  const adoptCsrf = useCallback((token: string) => {
+    csrfVersionRef.current += 1;
+    rememberCsrf(token);
+  }, [rememberCsrf]);
+
   const acquireCsrf = useCallback(async (force = false) => {
     if (!force && csrfRef.current) return;
-    if (csrfPromiseRef.current) return csrfPromiseRef.current;
 
-    const request = authRequest<CsrfResponse>(
-      "/api/auth/csrf",
-      undefined,
-      { notifyUnauthorized: false },
-    ).then((response) => {
-      if (mountedRef.current) rememberCsrf(response.csrf_token);
-    }).finally(() => {
-      if (csrfPromiseRef.current === request) csrfPromiseRef.current = null;
-    });
-    csrfPromiseRef.current = request;
-    return request;
+    while (true) {
+      const version = csrfVersionRef.current;
+      const pending = csrfPromiseRef.current;
+      if (pending) {
+        if (pending.version === version) return pending.promise;
+        try {
+          await pending.promise;
+        } catch {
+          // A superseded request cannot satisfy the current session generation.
+        }
+        continue;
+      }
+
+      const request = authRequest<CsrfResponse>(
+        "/api/auth/csrf",
+        undefined,
+        { notifyUnauthorized: false },
+      ).then((response) => {
+        if (mountedRef.current && version === csrfVersionRef.current) {
+          rememberCsrf(response.csrf_token);
+        }
+      });
+      let trackedRequest: Promise<void>;
+      trackedRequest = request.finally(() => {
+        if (csrfPromiseRef.current?.promise === trackedRequest) csrfPromiseRef.current = null;
+      });
+      csrfPromiseRef.current = { promise: trackedRequest, version };
+      return trackedRequest;
+    }
   }, [rememberCsrf]);
 
   const recoverAnonymousSession = useCallback(() => {
     const generation = ++generationRef.current;
-    rememberCsrf(null);
+    invalidateCsrf();
     setUser(null);
     setLoading(true);
     void acquireCsrf(true)
@@ -77,7 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => {
         if (mountedRef.current && generation === generationRef.current) setLoading(false);
       });
-  }, [acquireCsrf, rememberCsrf]);
+  }, [acquireCsrf, invalidateCsrf]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -103,7 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!mountedRef.current || generation !== generationRef.current) return;
       setUser(currentUser);
-      if (responseToken) rememberCsrf(responseToken);
+      if (responseToken) adoptCsrf(responseToken);
       try {
         await acquireCsrf();
       } catch {
@@ -116,85 +144,104 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       mountedRef.current = false;
       generationRef.current += 1;
       unsubscribe();
-      rememberCsrf(null);
+      invalidateCsrf();
     };
-  }, [acquireCsrf, recoverAnonymousSession, rememberCsrf]);
+  }, [acquireCsrf, adoptCsrf, invalidateCsrf, recoverAnonymousSession]);
 
   const applyAuthenticatedResponse = useCallback((response: AuthResponse, generation: number) => {
     if (!mountedRef.current || generation !== generationRef.current) return;
-    rememberCsrf(response.csrf_token);
+    adoptCsrf(response.csrf_token);
     setUser(response.user);
-  }, [rememberCsrf]);
+  }, [adoptCsrf]);
+
+  const requestAuthMutation = useCallback(async <ResponseBody,>(
+    path: string,
+    body?: unknown,
+  ): Promise<ResponseBody> => {
+    const init = { method: "POST", body: JSON.stringify(body) };
+    try {
+      return await authRequest<ResponseBody>(path, init, { notifyUnauthorized: false });
+    } catch (error) {
+      const recoverable = error instanceof AuthRequestError
+        && (error.code === "session_invalid" || error.code === "csrf_invalid");
+      if (!recoverable) throw error;
+
+      invalidateCsrf();
+      await acquireCsrf(true);
+      return authRequest<ResponseBody>(path, init, { notifyUnauthorized: false });
+    }
+  }, [acquireCsrf, invalidateCsrf]);
 
   const login = useCallback(async (input: LoginInput) => {
     const generation = ++generationRef.current;
-    const response = await authRequest<AuthResponse>(
+    const response = await requestAuthMutation<AuthResponse>(
       "/api/auth/login",
-      { method: "POST", body: JSON.stringify(input) },
-      { notifyUnauthorized: false },
+      input,
     );
     applyAuthenticatedResponse(response, generation);
-  }, [applyAuthenticatedResponse]);
+  }, [applyAuthenticatedResponse, requestAuthMutation]);
 
   const register = useCallback(async (input: RegisterInput) => {
     const generation = ++generationRef.current;
-    const response = await authRequest<AuthResponse>(
+    const response = await requestAuthMutation<AuthResponse>(
       "/api/auth/register",
-      { method: "POST", body: JSON.stringify(input) },
-      { notifyUnauthorized: false },
+      input,
     );
     applyAuthenticatedResponse(response, generation);
-  }, [applyAuthenticatedResponse]);
+  }, [applyAuthenticatedResponse, requestAuthMutation]);
 
   const logout = useCallback(async () => {
     const generation = ++generationRef.current;
-    await authRequest("/api/auth/logout", { method: "POST" }, { notifyUnauthorized: false });
+    try {
+      await requestAuthMutation<void>("/api/auth/logout");
+    } catch (error) {
+      if (!(error instanceof AuthRequestError) || error.code !== "session_invalid") throw error;
+    }
     if (!mountedRef.current || generation !== generationRef.current) return;
 
     setUser(null);
     setLoading(true);
-    rememberCsrf(null);
+    invalidateCsrf();
     try {
       await acquireCsrf(true);
     } finally {
       if (mountedRef.current && generation === generationRef.current) setLoading(false);
     }
-  }, [acquireCsrf, rememberCsrf]);
-
-  const sendVerification = useCallback(async (email: string) => {
-    await authRequest(
-      "/api/auth/email-verifications",
-      { method: "POST", body: JSON.stringify({ email }) },
-      { notifyUnauthorized: false },
-    );
-  }, []);
-
-  const requestPasswordReset = useCallback(async (email: string) => {
-    await authRequest(
-      "/api/auth/password-reset/request",
-      { method: "POST", body: JSON.stringify({ email }) },
-      { notifyUnauthorized: false },
-    );
-  }, []);
+  }, [acquireCsrf, invalidateCsrf, requestAuthMutation]);
 
   const resetPassword = useCallback(async (input: ResetPasswordInput) => {
     const generation = ++generationRef.current;
-    await authRequest(
+    await requestAuthMutation<void>(
       "/api/auth/password-reset/confirm",
-      { method: "POST", body: JSON.stringify(input) },
-      { notifyUnauthorized: false },
+      input,
     );
     if (mountedRef.current && generation === generationRef.current) {
       setUser(null);
       setLoading(true);
-      rememberCsrf(null);
+      invalidateCsrf();
     }
     try {
       await acquireCsrf(true);
     } finally {
       if (mountedRef.current && generation === generationRef.current) setLoading(false);
     }
-  }, [acquireCsrf, rememberCsrf]);
+  }, [acquireCsrf, invalidateCsrf, requestAuthMutation]);
+
+  const sendVerification = useCallback(
+    (email: string) => requestAuthMutation<void>(
+      "/api/auth/email-verifications",
+      { email },
+    ),
+    [requestAuthMutation],
+  );
+
+  const requestPasswordReset = useCallback(
+    (email: string) => requestAuthMutation<void>(
+      "/api/auth/password-reset/request",
+      { email },
+    ),
+    [requestAuthMutation],
+  );
 
   const value = useMemo<AuthContextValue>(() => ({
     user,

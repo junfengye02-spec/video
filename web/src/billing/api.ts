@@ -1,14 +1,20 @@
 import { authRequest } from "../api/client";
 import type {
+  AdminUserWalletView,
+  AdjustUserBalanceRequest,
+  BillingAdminSummary,
   BillingAdminSnapshot,
   BillingReconciliationView,
   BillingSettingsView,
   PaymentGatewayAction,
+  PaymentOrderListQuery,
   PaymentOrderAdminView,
   PaymentOrderStatus,
   PaymentOrderView,
   ReconciliationRetryResponse,
+  TopupProductView,
   UpdateMultiplierRequest,
+  UserBalanceAdjustmentView,
   WalletEntryAdminView,
   WalletEntryView,
   WalletSummary,
@@ -73,7 +79,35 @@ function paymentOrderView(value: unknown): PaymentOrderView {
     amount_cny_fen: numberField(record, "amount_cny_fen") || numberField(record, "price_cny_fen"),
     credit_units: numberField(record, "credit_units"),
     status: statusField(record),
+    expires_at: stringField(record, "expires_at"),
+    paid_at: nullableStringField(record, "paid_at"),
     created_at: stringField(record, "created_at"),
+    updated_at: stringField(record, "updated_at"),
+  };
+}
+
+function topupProduct(value: unknown): TopupProductView {
+  const record = asObject(value);
+  return {
+    id: stringField(record, "id"),
+    title: stringField(record, "title"),
+    price_cny_fen: numberField(record, "price_cny_fen"),
+    credit_units: numberField(record, "credit_units"),
+  };
+}
+
+function adminSummary(value: unknown): BillingAdminSummary {
+  const record = asObject(value);
+  return {
+    gross_paid_cny_fen: numberField(record, "gross_paid_cny_fen"),
+    total_orders: numberField(record, "total_orders"),
+    pending_orders: numberField(record, "pending_orders"),
+    paid_orders: numberField(record, "paid_orders"),
+    failed_orders: numberField(record, "failed_orders"),
+    expired_orders: numberField(record, "expired_orders"),
+    wallet_balance_units: numberField(record, "wallet_balance_units"),
+    wallet_held_units: numberField(record, "wallet_held_units"),
+    wallet_available_units: numberField(record, "wallet_available_units"),
   };
 }
 
@@ -142,6 +176,21 @@ function adminWalletEntry(value: unknown): WalletEntryAdminView {
   };
 }
 
+function adminUserWallet(value: unknown): AdminUserWalletView {
+  const record = asObject(value);
+  return {
+    id: stringField(record, "id"),
+    email: stringField(record, "email"),
+    role: stringField(record, "role"),
+    status: stringField(record, "status"),
+    wallet_id: nullableStringField(record, "wallet_id"),
+    balance_units: numberField(record, "balance_units"),
+    held_units: numberField(record, "held_units"),
+    available_units: numberField(record, "available_units"),
+    created_at: stringField(record, "created_at"),
+  };
+}
+
 function adminReconciliation(value: unknown): BillingReconciliationView {
   const record = asObject(value);
   return {
@@ -161,15 +210,21 @@ export async function getWallet(): Promise<WalletSummary> {
   return walletSummary(await authRequest("/api/wallet"));
 }
 
-export async function listWalletEntries(limit = 50): Promise<WalletEntryView[]> {
-  return asArray(await authRequest(`/api/wallet/entries?limit=${limit}`))
+export async function listWalletEntries(limit = 50, offset = 0): Promise<WalletEntryView[]> {
+  return asArray(await authRequest(`/api/wallet/entries?limit=${limit}&offset=${offset}`))
     .map(walletEntryView);
 }
 
-export async function createPaymentOrder(amountCnyFen: number): Promise<PaymentGatewayAction> {
+export async function listTopupProducts(): Promise<TopupProductView[]> {
+  return asArray(await authRequest("/api/topup-products")).map(topupProduct);
+}
+
+export async function createPaymentOrder(
+  source: { amount_cny_fen: number } | { product_id: string },
+): Promise<PaymentGatewayAction> {
   const response = asObject(await authRequest("/api/payment-orders", {
     method: "POST",
-    body: postBody({ amount_cny_fen: amountCnyFen }),
+    body: postBody(source),
   }));
   const orderSource = response.order ?? response;
   return {
@@ -179,8 +234,17 @@ export async function createPaymentOrder(amountCnyFen: number): Promise<PaymentG
   };
 }
 
-export async function listPaymentOrders(): Promise<PaymentOrderView[]> {
-  return asArray(await authRequest("/api/payment-orders"))
+export async function listPaymentOrders(
+  query: PaymentOrderListQuery = {},
+): Promise<PaymentOrderView[]> {
+  const params = new URLSearchParams({
+    limit: String(query.limit ?? 20),
+    offset: String(query.offset ?? 0),
+  });
+  const search = query.search?.trim();
+  if (search) params.set("search", search);
+  if (query.status && query.status !== "all") params.set("status", query.status);
+  return asArray(await authRequest(`/api/payment-orders?${params.toString()}`))
     .map(paymentOrderView);
 }
 
@@ -192,22 +256,68 @@ export async function getPaymentOrder(orderId: string): Promise<PaymentOrderView
 
 export async function getBillingAdmin(): Promise<BillingAdminSnapshot> {
   const [
+    summary,
     settings,
+    users,
     orders,
     walletEntries,
     reconciliations,
   ] = await Promise.all([
+    authRequest("/api/admin/billing/summary"),
     authRequest("/api/admin/billing/settings"),
+    authRequest("/api/admin/users?limit=100"),
     authRequest("/api/admin/payment-orders?limit=50"),
     authRequest("/api/admin/wallet-entries?limit=50"),
     authRequest("/api/admin/billing-reconciliations?limit=50"),
   ]);
 
   return {
+    summary: adminSummary(summary),
     settings: adminSettings(settings),
+    users: asArray(users).map(adminUserWallet),
     orders: asArray(orders).map(adminOrder),
     wallet_entries: asArray(walletEntries).map(adminWalletEntry),
     reconciliations: asArray(reconciliations).map(adminReconciliation),
+  };
+}
+
+export async function listAdminOrders(
+  query: PaymentOrderListQuery = {},
+): Promise<PaymentOrderAdminView[]> {
+  const params = new URLSearchParams({
+    limit: String(query.limit ?? 50),
+    offset: String(query.offset ?? 0),
+  });
+  const search = query.search?.trim();
+  if (search) params.set("search", search);
+  if (query.status && query.status !== "all") params.set("status", query.status);
+  return asArray(await authRequest(`/api/admin/payment-orders?${params.toString()}`))
+    .map(adminOrder);
+}
+
+export async function listAdminUsers(search = ""): Promise<AdminUserWalletView[]> {
+  const params = new URLSearchParams({ limit: "100" });
+  const normalizedSearch = search.trim();
+  if (normalizedSearch) params.set("search", normalizedSearch);
+  return asArray(await authRequest(`/api/admin/users?${params.toString()}`))
+    .map(adminUserWallet);
+}
+
+export async function adjustUserBalance(
+  userId: string,
+  payload: AdjustUserBalanceRequest,
+): Promise<UserBalanceAdjustmentView> {
+  const response = asObject(await authRequest(
+    `/api/admin/users/${encodeURIComponent(userId)}/balance-adjustments`,
+    {
+      method: "POST",
+      body: postBody(payload),
+    },
+  ));
+  return {
+    ...adminUserWallet(response),
+    entry_id: stringField(response, "entry_id"),
+    adjustment_amount_units: numberField(response, "adjustment_amount_units"),
   };
 }
 
@@ -222,9 +332,10 @@ export async function updateMultiplier(
 
 export async function retryReconciliation(
   reconciliationId: string,
+  reason: string,
 ): Promise<ReconciliationRetryResponse> {
   return asObject(await authRequest(
     `/api/admin/billing-reconciliations/${encodeURIComponent(reconciliationId)}/retry`,
-    { method: "POST" },
+    { method: "POST", body: postBody({ reason }) },
   )) as unknown as ReconciliationRetryResponse;
 }

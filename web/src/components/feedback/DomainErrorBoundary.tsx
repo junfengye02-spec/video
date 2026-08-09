@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { projectRoutes } from "../../app/routes";
+import { formatCnyUnits } from "../../billing/money";
 
 const defaultTitle = "\u5f53\u524d\u533a\u57df\u9047\u5230\u9519\u8bef";
 const defaultMessage = "\u6b64\u533a\u57df\u6682\u65f6\u65e0\u6cd5\u663e\u793a\uff0c\u5176\u4ed6\u9875\u9762\u4ecd\u53ef\u4f7f\u7528\u3002";
@@ -28,7 +29,12 @@ interface DomainErrorBoundaryState {
 
 export type CommandError =
   | { kind: "message"; message: string }
-  | { kind: "payment"; availableUnits: number | null; requiredUnits: number | null };
+  | {
+    kind: "payment";
+    availableUnits: number | null;
+    requiredUnits: number | null;
+    billingJobId: string | null;
+  };
 
 export interface CommandErrorOptions {
   fallback: string;
@@ -59,17 +65,33 @@ function errorCode(error: unknown): string | null {
   return error.code;
 }
 
+function errorRecords(error: unknown): Record<string, unknown>[] {
+  if (!isRecord(error)) return [];
+  const records = [error];
+  if (isRecord(error.details)) records.push(error.details);
+  return records;
+}
+
 function numericField(error: unknown, fields: readonly string[]): number | null {
-  if (!isRecord(error)) return null;
-  for (const field of fields) {
-    const value = error[field];
-    if (Number.isFinite(value)) return value as number;
+  for (const record of errorRecords(error)) {
+    for (const field of fields) {
+      const value = record[field];
+      if (Number.isFinite(value)) return value as number;
+    }
+  }
+  return null;
+}
+
+function billingJobId(error: unknown): string | null {
+  for (const record of errorRecords(error)) {
+    const value = record.billing_job_id ?? record.billingJobId;
+    if (typeof value === "string" && /^[0-9a-f]{32}$/.test(value)) return value;
   }
   return null;
 }
 
 function formatUnits(value: number | null): string {
-  return value === null ? unknownBalanceText : value.toLocaleString("zh-CN");
+  return value === null ? unknownBalanceText : formatCnyUnits(value);
 }
 
 function isPaymentRequired(error: unknown): boolean {
@@ -97,6 +119,7 @@ export function commandErrorFrom(
         ?? options.walletAvailableUnits
         ?? null,
       requiredUnits: numericField(error, ["requiredUnits", "required_units", "requiredUnitsMax"]),
+      billingJobId: billingJobId(error),
     };
   }
 
@@ -106,7 +129,13 @@ export function commandErrorFrom(
   };
 }
 
-export function CommandErrorNotice({ error }: { error: CommandError | null }) {
+export function CommandErrorNotice({
+  error,
+  walletLinkTarget,
+}: {
+  error: CommandError | null;
+  walletLinkTarget?: "_blank";
+}) {
   if (!error) return null;
 
   if (error.kind === "payment") {
@@ -119,7 +148,13 @@ export function CommandErrorNotice({ error }: { error: CommandError | null }) {
             ? paymentRequiredUnknownText
             : `${requiredBalanceLabel} ${formatUnits(error.requiredUnits)}`}
         </p>
-        <Link to={projectRoutes.wallet}>{walletLinkText}</Link>
+        <Link
+          to={projectRoutes.wallet}
+          target={walletLinkTarget}
+          rel={walletLinkTarget === "_blank" ? "noopener noreferrer" : undefined}
+        >
+          {walletLinkText}
+        </Link>
       </div>
     );
   }

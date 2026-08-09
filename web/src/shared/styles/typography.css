@@ -1,0 +1,25 @@
+:root {
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  color: var(--color-ink);
+  font-size: var(--text-title-size);
+  font-weight: 680;
+  line-height: var(--text-title-line);
+}
+
+h2 {
+  color: var(--color-ink);
+  font-size: var(--text-heading-size);
+  font-weight: 660;
+  line-height: var(--text-heading-line);
+}

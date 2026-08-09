@@ -117,6 +117,17 @@ describe("MediaRepository", () => {
     expect(createObjectURL).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects a cached mp4 whose bytes do not match its committed metadata", async () => {
+    const ref = mediaRef("corrupt");
+    const record = { ...mediaRecord("corrupt", "p1"), sizeBytes: 20 };
+    const repo = repository({
+      loadMediaBlob: vi.fn(async () => new Blob(["not-an-mp4-payload!!"], { type: "video/mp4" })),
+      loadMediaRecord: vi.fn(async () => record),
+    });
+
+    await expect(repo.resolve(ref)).resolves.toBeNull();
+  });
+
   it("revokes only object URLs owned by a switched project", async () => {
     const loadMediaBlob = vi.fn(async () => new Blob(["video"]));
     const loadMediaRecord = vi.fn(async (ref: LocalMediaRef) => (

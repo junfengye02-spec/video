@@ -91,6 +91,111 @@ class CloseTrackingTransport(SequenceTransport):
         self.close_calls += 1
 
 
+def test_list_models_uses_current_capability_token_and_returns_sorted_unique_ids(settings):
+    transport = SequenceTransport([
+        httpx.Response(200, json={
+            "object": "list",
+            "data": [
+                {"id": "video-z", "object": "model", "owned_by": "provider"},
+                {"id": "Video-a", "object": "model", "owned_by": "provider"},
+                {"id": "video-z", "object": "model", "owned_by": "provider"},
+            ],
+        }),
+    ])
+
+    with NewApiClient(settings, transport=transport) as client:
+        result = client.list_models("video")
+
+    assert result == ["Video-a", "video-z"]
+    assert transport.requests[0].method == "GET"
+    assert str(transport.requests[0].url) == "https://newapi.example/v1/models"
+    assert transport.requests[0].headers["Authorization"] == "Bearer video-secret"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"data": "not-a-list"},
+        {"data": [{"id": "  invalid-model  "}]},
+        {"data": [{"id": "valid-model"}, {"missing": "id"}]},
+    ],
+)
+def test_list_models_rejects_invalid_provider_payloads(settings, payload):
+    transport = SequenceTransport([httpx.Response(200, json=payload)])
+
+    with NewApiClient(settings, transport=transport) as client:
+        with pytest.raises(InvalidNewApiResponse):
+            client.list_models("image")
+
+
+def test_image_content_download_streams_public_https_without_authorization(settings):
+    content = b"generated-image-content"
+    transport = SequenceTransport([httpx.Response(200, content=content)])
+
+    with NewApiClient(settings, transport=transport) as client:
+        downloaded = client.download_image_content(
+            "https://1.1.1.1/generated/image.png",
+            max_bytes=len(content),
+        )
+
+    assert downloaded == content
+    assert str(transport.requests[0].url) == "https://1.1.1.1/generated/image.png"
+    assert "Authorization" not in transport.requests[0].headers
+
+
+def test_image_content_download_revalidates_relative_redirect(settings):
+    transport = SequenceTransport(
+        [
+            httpx.Response(302, headers={"Location": "/final/image.png"}),
+            httpx.Response(200, content=b"image"),
+        ]
+    )
+
+    with NewApiClient(settings, transport=transport) as client:
+        downloaded = client.download_image_content(
+            "https://1.1.1.1/start",
+            max_bytes=5,
+        )
+
+    assert downloaded == b"image"
+    assert [str(request.url) for request in transport.requests] == [
+        "https://1.1.1.1/start",
+        "https://1.1.1.1/final/image.png",
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://1.1.1.1/image.png",
+        "https://user:password@1.1.1.1/image.png",
+        "https://127.0.0.1/image.png",
+        "https://169.254.169.254/latest/meta-data",
+        "https://1.1.1.1:8443/image.png",
+    ],
+)
+def test_image_content_download_rejects_unsafe_urls_before_network(settings, url):
+    transport = SequenceTransport([])
+
+    with NewApiClient(settings, transport=transport) as client:
+        with pytest.raises(InvalidNewApiResponse):
+            client.download_image_content(url, max_bytes=1024)
+
+    assert transport.requests == []
+
+
+def test_image_content_download_rejects_oversized_response(settings):
+    transport = SequenceTransport([httpx.Response(200, content=b"too-large")])
+
+    with NewApiClient(settings, transport=transport) as client:
+        with pytest.raises(InvalidNewApiResponse):
+            client.download_image_content(
+                "https://1.1.1.1/image.png",
+                max_bytes=3,
+            )
+
+
 class ChunksThenError(httpx.SyncByteStream):
     def __init__(self, chunks: list[bytes], error: Exception) -> None:
         self.chunks = chunks
@@ -264,7 +369,8 @@ def test_token_keyrings_reject_unsafe_aliases_and_blank_or_unbounded_keys(
         )
 
 
-def test_billing_provider_safety_defaults_are_exact():
+def test_billing_provider_safety_defaults_are_exact(monkeypatch):
+    monkeypatch.delenv("NEWAPI_VIDEO_DOWNLOAD_HOST", raising=False)
     settings = AppSettings(_env_file=None, auth_hmac_secret="x" * 32)
 
     assert settings.billing_reference_recovery_seconds == 86_400
@@ -273,6 +379,7 @@ def test_billing_provider_safety_defaults_are_exact():
     assert settings.billing_quote_stale_retries == 2
     assert settings.billing_max_video_bytes == 536_870_912
     assert settings.billing_default_multiplier_bps is None
+    assert settings.newapi_video_download_host is None
 
 
 def test_billing_provider_safety_settings_parse_documented_environment_strings(
@@ -325,6 +432,35 @@ def test_newapi_base_url_accepts_http_origins_and_strips_trailing_slash():
     )
 
     assert settings.newapi_base_url == "https://provider.example:8443"
+
+
+def test_video_download_host_parses_and_normalizes_environment_value(monkeypatch):
+    monkeypatch.setenv("NEWAPI_VIDEO_DOWNLOAD_HOST", "MEDIA.EXAMPLE")
+
+    settings = AppSettings(_env_file=None, auth_hmac_secret="x" * 32)
+
+    assert settings.newapi_video_download_host == "media.example"
+
+
+@pytest.mark.parametrize(
+    "hostname",
+    [
+        "https://media.example",
+        "media.example:443",
+        "localhost",
+        "127.0.0.1",
+        "media..example",
+        " media.example",
+        "media.example/path",
+    ],
+)
+def test_video_download_host_rejects_non_dns_hostname_values(hostname):
+    with pytest.raises(ValidationError):
+        AppSettings(
+            _env_file=None,
+            auth_hmac_secret="x" * 32,
+            newapi_video_download_host=hostname,
+        )
 
 
 def test_env_example_documents_nonsecret_newapi_keyrings_and_billing_defaults():
@@ -416,13 +552,14 @@ def test_billing_provider_safety_settings_require_positive_integers(field, value
     ("provider_cost_micro", "multiplier_bps", "expected"),
     [
         (0, 15_000, 0),
-        (1, 1, 1),
-        (2_898_000, 15_000, 4_347_000),
-        (2_898_001, 15_000, 4_347_002),
+        (1, 1, 10_000),
+        (2_898_000, 15_000, 4_350_000),
+        (2_898_001, 15_000, 4_350_000),
+        (7_223_000, 10_000, 7_230_000),
         (10**30, 10_001, 1_000_100_000_000_000_000_000_000_000_000),
     ],
 )
-def test_provider_micro_to_charge_units_uses_exact_integer_ceiling(
+def test_provider_micro_to_charge_units_rounds_up_to_whole_cny_fen(
     provider_cost_micro, multiplier_bps, expected
 ):
     assert (
@@ -754,6 +891,9 @@ def test_video_task_status_uses_strict_error_object_and_hides_result_metadata():
             "completed_at": 120,
             "error": {"message": "upstream failed", "code": "provider_error"},
             "metadata": {"url": result_url},
+            "url": result_url,
+            "video_url": result_url,
+            "image_url": "https://provider-result.example/private-poster.png",
         }
     )
     minimal = VideoTaskStatus.model_validate(
@@ -781,7 +921,7 @@ def test_video_task_status_accepts_provider_unknown_fallback_only():
         {"error": {"message": "failed", "code": "x", "url": "private"}},
         {"status": "SUCCESS"},
         {"id": "../task"},
-        {"url": "https://provider-result.example/private-video.mp4"},
+        {"result_url": "https://provider-result.example/private-video.mp4"},
     ],
 )
 def test_video_task_status_rejects_wrong_error_and_envelope_shapes(patch):
@@ -829,6 +969,189 @@ def test_quote_and_execute_reuse_exact_body_route_and_capability_token(settings)
     assert "X-OneAPI-Quote-Only" not in executed.headers
     assert quoted.headers["Authorization"] == executed.headers["Authorization"]
     assert quoted.headers["Authorization"] == "Bearer video-secret"
+
+
+def test_image_execution_extends_only_the_read_timeout(settings):
+    image_quote = {
+        **QUOTE,
+        "model": "gpt-image-2",
+        "fixed_group": "openmontage-image",
+        "relay_format": "openai_image",
+        "other_ratios": {"n": 1},
+    }
+    transport = SequenceTransport(
+        [
+            httpx.Response(200, json=image_quote),
+            httpx.Response(
+                200,
+                json={"data": []},
+                headers={"X-Oneapi-Request-Id": REQUEST_ID},
+            ),
+        ]
+    )
+    request = PreparedNewApiRequest.json(
+        "POST",
+        "/v1/images/generations",
+        {"model": "gpt-image-2", "prompt": "frame"},
+    )
+    client = NewApiClient(settings, transport=transport)
+
+    scoped_quote = client.quote("image", request)
+    client.execute_quoted(
+        "image",
+        scoped_quote.token_alias,
+        request,
+        scoped_quote.quote.quote_id,
+    )
+
+    quoted, executed = transport.requests
+    assert quoted.extensions["timeout"] == {
+        "connect": 30.0,
+        "read": 30.0,
+        "write": 30.0,
+        "pool": 30.0,
+    }
+    assert executed.extensions["timeout"] == {
+        "connect": 30.0,
+        "read": 180.0,
+        "write": 30.0,
+        "pool": 30.0,
+    }
+
+
+def test_text_execution_extends_only_the_read_timeout(settings):
+    text_quote = {
+        **QUOTE,
+        "model": "gpt-5.5",
+        "fixed_group": "openmontage-text",
+        "relay_format": "openai",
+        "other_ratios": {},
+    }
+    transport = SequenceTransport(
+        [
+            httpx.Response(200, json=text_quote),
+            httpx.Response(
+                200,
+                json={"choices": []},
+                headers={"X-Oneapi-Request-Id": REQUEST_ID},
+            ),
+        ]
+    )
+    request = PreparedNewApiRequest.json(
+        "POST",
+        "/v1/chat/completions",
+        {"model": "gpt-5.5", "messages": []},
+    )
+    client = NewApiClient(settings, transport=transport)
+
+    scoped_quote = client.quote("text", request)
+    client.execute_quoted(
+        "text",
+        scoped_quote.token_alias,
+        request,
+        scoped_quote.quote.quote_id,
+    )
+
+    quoted, executed = transport.requests
+    assert quoted.extensions["timeout"] == {
+        "connect": 30.0,
+        "read": 30.0,
+        "write": 30.0,
+        "pool": 30.0,
+    }
+    assert executed.extensions["timeout"] == {
+        "connect": 30.0,
+        "read": 600.0,
+        "write": 30.0,
+        "pool": 30.0,
+    }
+
+
+def test_streamed_text_execution_is_reassembled_as_chat_completion(settings):
+    text_quote = {
+        **QUOTE,
+        "model": "gpt-5.4",
+        "fixed_group": "openmontage-text",
+        "relay_format": "openai",
+        "other_ratios": {},
+    }
+    stream_body = (
+        b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":" world"}}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    transport = SequenceTransport(
+        [
+            httpx.Response(200, json=text_quote),
+            httpx.Response(
+                200,
+                content=stream_body,
+                headers={
+                    "Content-Type": "text/event-stream; charset=utf-8",
+                    "X-Oneapi-Request-Id": REQUEST_ID,
+                },
+            ),
+        ]
+    )
+    request = PreparedNewApiRequest.json(
+        "POST",
+        "/v1/chat/completions",
+        {"model": "gpt-5.4", "messages": [], "stream": True},
+    )
+    client = NewApiClient(settings, transport=transport)
+
+    scoped_quote = client.quote("text", request)
+    result = client.execute_quoted(
+        "text",
+        scoped_quote.token_alias,
+        request,
+        scoped_quote.quote.quote_id,
+    )
+
+    assert result.reference_id == REQUEST_ID
+    assert result.response.headers["content-type"] == "application/json"
+    assert result.response.json() == {
+        "choices": [{"message": {"content": "hello world"}}]
+    }
+
+
+def test_malformed_streamed_text_execution_is_ambiguous(settings):
+    text_quote = {
+        **QUOTE,
+        "model": "gpt-5.4",
+        "fixed_group": "openmontage-text",
+        "relay_format": "openai",
+        "other_ratios": {},
+    }
+    transport = SequenceTransport(
+        [
+            httpx.Response(200, json=text_quote),
+            httpx.Response(
+                200,
+                content=b"data: not-json\n\n",
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "X-Oneapi-Request-Id": REQUEST_ID,
+                },
+            ),
+        ]
+    )
+    request = PreparedNewApiRequest.json(
+        "POST",
+        "/v1/chat/completions",
+        {"model": "gpt-5.4", "messages": [], "stream": True},
+    )
+    client = NewApiClient(settings, transport=transport)
+
+    scoped_quote = client.quote("text", request)
+
+    with pytest.raises(AmbiguousNewApiResult):
+        client.execute_quoted(
+            "text",
+            scoped_quote.token_alias,
+            request,
+            scoped_quote.quote.quote_id,
+        )
 
 
 def test_prepared_request_model_is_derived_from_frozen_json_bytes():
@@ -1574,6 +1897,92 @@ def test_video_content_download_streams_relative_route_and_atomically_replaces(
     assert transport.requests[0].url.path == f"/v1/videos/{TASK_ID}/content"
     assert transport.requests[0].headers["Authorization"] == "Bearer old-video"
     assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []
+
+
+def test_video_content_download_uses_configured_https_fallback_after_proxy_5xx(
+    settings, tmp_path
+):
+    configured = settings.model_copy(
+        update={"newapi_video_download_host": "media.example"}
+    )
+    transport = SequenceTransport(
+        [
+            httpx.Response(502, json={"error": {"type": "server_error"}}),
+            httpx.Response(200, stream=httpx.ByteStream(b"fallback-video")),
+        ]
+    )
+    destination = tmp_path / "recovered.mp4"
+
+    NewApiClient(configured, transport=transport).download_video_content(
+        "video-v1",
+        TASK_ID,
+        destination,
+        fallback_url="https://media.example/generated/recovered.mp4",
+    )
+
+    assert destination.read_bytes() == b"fallback-video"
+    assert transport.requests[0].url.path == f"/v1/videos/{TASK_ID}/content"
+    assert transport.requests[0].headers["Authorization"] == "Bearer video-secret"
+    assert str(transport.requests[1].url) == (
+        "https://media.example/generated/recovered.mp4"
+    )
+    assert "Authorization" not in transport.requests[1].headers
+
+
+@pytest.mark.parametrize(
+    "fallback_url",
+    [
+        "http://media.example/generated/video.mp4",
+        "https://other.example/generated/video.mp4",
+        "https://user:password@media.example/generated/video.mp4",
+        "https://media.example:444/generated/video.mp4",
+        "https://media.example/generated/video.bin",
+        "https://media.example/generated/video.mp4?token=secret",
+        "https://media.example/generated/video.mp4#fragment",
+        "/generated/video.mp4",
+    ],
+)
+def test_video_content_download_rejects_unsafe_fallback_urls(
+    settings, tmp_path, fallback_url
+):
+    configured = settings.model_copy(
+        update={"newapi_video_download_host": "media.example"}
+    )
+    transport = SequenceTransport([httpx.Response(502)])
+
+    with pytest.raises(NewApiCallError, match="request failed"):
+        NewApiClient(configured, transport=transport).download_video_content(
+            "video-v1",
+            TASK_ID,
+            tmp_path / "video.mp4",
+            fallback_url=fallback_url,
+        )
+
+    assert len(transport.requests) == 1
+
+
+def test_video_content_download_does_not_follow_fallback_redirects(
+    settings, tmp_path
+):
+    configured = settings.model_copy(
+        update={"newapi_video_download_host": "media.example"}
+    )
+    transport = SequenceTransport(
+        [
+            httpx.Response(502),
+            httpx.Response(302, headers={"Location": "https://other.example/video.mp4"}),
+        ]
+    )
+
+    with pytest.raises(NewApiCallError, match="request failed"):
+        NewApiClient(configured, transport=transport).download_video_content(
+            "video-v1",
+            TASK_ID,
+            tmp_path / "video.mp4",
+            fallback_url="https://media.example/generated/video.mp4",
+        )
+
+    assert len(transport.requests) == 2
 
 
 @pytest.mark.parametrize("failure_mode", ["oversized", "disconnect"])

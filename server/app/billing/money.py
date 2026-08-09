@@ -1,3 +1,7 @@
+WALLET_UNITS_PER_CNY = 1_000_000
+WALLET_UNITS_PER_FEN = WALLET_UNITS_PER_CNY // 100
+
+
 def ceil_div(numerator: int, denominator: int) -> int:
     if (
         type(numerator) is not int
@@ -19,4 +23,5 @@ def provider_micro_to_charge_units(
         or multiplier_bps <= 0
     ):
         raise ValueError("invalid integer ratio")
-    return ceil_div(provider_cost_micro * multiplier_bps, 10_000)
+    raw_units = ceil_div(provider_cost_micro * multiplier_bps, 10_000)
+    return ceil_div(raw_units, WALLET_UNITS_PER_FEN) * WALLET_UNITS_PER_FEN

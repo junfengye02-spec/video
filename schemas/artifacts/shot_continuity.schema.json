@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "shot_continuity.schema.json",
+  "title": "Shot continuity and keyframe references",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "mode",
+    "inherit_previous_tail",
+    "explicit_user_first_frame_asset_id",
+    "inherited_first_frame_asset_id",
+    "last_frame_asset_id",
+    "first_frame",
+    "last_frame",
+    "stale"
+  ],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["carry", "cut", "match_cut"]
+    },
+    "inherit_previous_tail": {
+      "type": "boolean"
+    },
+    "explicit_user_first_frame_asset_id": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "inherited_first_frame_asset_id": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "last_frame_asset_id": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "first_frame": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/frameReference"}
+      ]
+    },
+    "last_frame": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/frameReference"}
+      ]
+    },
+    "stale": {
+      "type": "boolean"
+    },
+    "composition": {"type": "string"},
+    "subject_pose": {"type": "string"},
+    "gaze": {"type": "string"},
+    "motion_direction": {"type": "string"},
+    "lighting": {"type": "string"},
+    "scene_state": {"type": "string"}
+  },
+  "$defs": {
+    "frameReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id", "version", "status", "source"],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "version": {"type": "integer", "minimum": 1},
+        "status": {
+          "type": "string",
+          "enum": ["ready", "generating", "failed", "stale"]
+        },
+        "source": {
+          "type": "string",
+          "enum": ["user", "video_extract", "ai_generated", "inherited"]
+        },
+        "generation_job_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "origin_shot_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "origin_shot_version": {"type": "integer", "minimum": 1},
+        "origin_frame_version": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

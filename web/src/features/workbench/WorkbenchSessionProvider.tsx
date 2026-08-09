@@ -11,17 +11,38 @@
 } from "react";
 import { matchPath, useInRouterContext, useLocation } from "react-router-dom";
 import type {
+  AddAssetToProjectResponse,
+  AssetRecord,
   ContinuityPlan,
-  ConsistencyReport,
+  CreativePlanReviseRequest,
+  DraftProjectRequest,
+  GenerateImagesRequest,
+  GenerateImagesResponse,
+  GenerationPlan,
+  GenerationPlanPreviewRequest,
+  GenerationUnitsGenerateRequest,
+  GenerationUnitsGenerateResponse,
+  InspirationChatRequest,
+  InspirationIntentUpdateRequest,
   JobEvent,
+  ListAssetsRequest,
+  ListAssetsResponse,
+  MediaAsset,
+  MediaAssetKind,
+  PlanSectionId,
+  PlanSectionUpdateRequest,
   PromptOptimizeResponse,
+  ProductionConnectionState,
   ReferenceImageUploadRequest,
+  ReferenceImageUploadResponse,
+  RenderPreparation,
   RenderProjectResponse,
   RenderReport,
   ShortDramaProjectResponse,
   Shot,
   ShotSaveRequest,
-  Storyboard,
+  TaskBatch,
+  TaskListResponse,
 } from "../../domain/types";
 import {
   generationService as defaultGenerationService,
@@ -54,6 +75,11 @@ import {
   type OperationToken,
   type WorkbenchState,
 } from "./reducer";
+import {
+  createWorkbenchCommandContract,
+  saveSnapshotIfVersionCurrent,
+  type WorkbenchCommandContract,
+} from "./commandContract";
 
 const CREATE_PROJECT_TOKEN_ID = "__create__";
 
@@ -61,6 +87,7 @@ const INITIAL_TARGETS = {
   optimizingShotId: null as string | null,
   regeneratingShotId: null as string | null,
   savingShotId: null as string | null,
+  updatingPlanSection: null as PlanSectionId | null,
 };
 
 type BackgroundCacheJobToken = {
@@ -103,50 +130,48 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+function isCreativePlanConflict(error: unknown): boolean {
+  if (!isRecord(error) || error.status !== 409) return false;
+  return error.code === "plan_section_revision_conflict"
+    || error.code === "creative_plan_revision_conflict";
+}
+
+function mediaAssetRecord(asset: MediaAsset): AssetRecord {
+  return {
+    id: asset.id,
+    kind: asset.kind,
+    label: asset.label,
+    description: asset.description,
+    prompt: asset.prompt,
+    reference_images: asset.status === "ready" && asset.media_url ? [asset.media_url] : [],
+    media_urls: [],
+    origin_project_id: asset.origin_project_id,
+    source_type: asset.source_type,
+    model: asset.model,
+    generation_job_id: asset.generation_job_id,
+    media_url: asset.media_url,
+    status: asset.status,
+    created_at: asset.created_at,
+    provenance: asset.provenance ?? null,
+    version: 1,
+  };
+}
+
+function mergeAssetRecords(current: AssetRecord[], incoming: AssetRecord[]): AssetRecord[] {
+  const merged = new Map(current.map((asset) => [asset.id, asset]));
+  for (const asset of incoming) merged.set(asset.id, asset);
+  return Array.from(merged.values());
+}
+
 function sanitizeDownloadName(value: string | null | undefined): string {
   return (value?.trim() || "openmontage")
     .replace(/[\\/:*?"<>|]+/g, "-")
     .replace(/\s+/g, " ")
     .slice(0, 80);
-}
-
-function mergeRegeneratedSnapshot(
-  latest: ShortDramaProjectResponse,
-  storyboard: Storyboard,
-  cachedShot: Shot,
-  consistencyReport: ConsistencyReport,
-  preserveLatest = true,
-): ShortDramaProjectResponse {
-  if (!preserveLatest) {
-    return {
-      ...latest,
-      storyboard: {
-        ...storyboard,
-        shots: storyboard.shots.map((item) => item.id === cachedShot.id ? cachedShot : item),
-      },
-      consistency_report: consistencyReport,
-    };
-  }
-
-  const latestShot = latest.storyboard.shots.find((item) => item.id === cachedShot.id);
-  const mergedShot = latestShot
-    ? {
-        ...cachedShot,
-        ...latestShot,
-        output_path: cachedShot.output_path,
-        output_url: cachedShot.output_url,
-        status: cachedShot.status,
-        consistency_score: cachedShot.consistency_score,
-        version: cachedShot.version,
-      }
-    : cachedShot;
-  return {
-    ...latest,
-    storyboard: {
-      ...latest.storyboard,
-      shots: latest.storyboard.shots.map((item) => item.id === mergedShot.id ? mergedShot : item),
-    },
-  };
 }
 
 function mergeRenderResponse(
@@ -179,6 +204,16 @@ function isCompleteRenderSource(
   ));
 }
 
+function compositionIdempotencyKey(
+  projectId: string,
+  selectedShotIds?: string[],
+): string {
+  const randomId = globalThis.crypto?.randomUUID?.().replace(/-/g, "")
+    ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  const scope = selectedShotIds?.length ?? 0;
+  return `composition:${projectId.slice(0, 32)}:${scope}:${randomId}`;
+}
+
 function ProjectLoadRouteObserver({
   onRouteProjectChange,
 }: {
@@ -209,8 +244,10 @@ export function WorkbenchSessionProvider({
   const [state, dispatch] = useReducer(reduceWorkbench, initialWorkbenchState);
   const stateRef = useRef<WorkbenchState>(state);
   const snapshotRevisionRef = useRef(0);
-  const operationGenerationRef = useRef(0);
-  const operationSequencesRef = useRef<Partial<Record<OperationToken["kind"], number>>>({});
+  const planningRequestRef = useRef<{
+    projectId: string;
+    promise: Promise<ShortDramaProjectResponse>;
+  } | null>(null);
   const pendingOpenRef = useRef<OperationToken | null>(null);
   const storageVersionRef = useRef<{
     projectId: string | null;
@@ -218,6 +255,11 @@ export function WorkbenchSessionProvider({
   }>({ projectId: null, version: null });
   const mountedRef = useRef(true);
   const previousProjectIdRef = useRef<string | null>(null);
+  const productionConnectionRef = useRef<ProductionConnectionState>("connecting");
+  const refreshProductionInFlightRef = useRef<{
+    projectId: string;
+    promise: Promise<void>;
+  } | null>(null);
   const resolvingMediaRefsRef = useRef(new Set<string>());
   const failedMediaRefsRef = useRef(new Set<string>());
   const mediaGenerationRef = useRef(0);
@@ -225,11 +267,17 @@ export function WorkbenchSessionProvider({
   const nextBackgroundCacheJobRef = useRef(0);
   const backgroundCacheJobsRef = useRef(new Map<number, LocalBackupStatus>());
   const scheduledBackgroundTasksRef = useRef(new Set<ReturnType<typeof setTimeout>>());
+  const scheduledFinalCachesRef = useRef(new Set<string>());
   const [operationTargets, setOperationTargets] = useState(INITIAL_TARGETS);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [localMediaUrls, setLocalMediaUrls] = useState<Partial<Record<LocalMediaRef, string>>>({});
   const [mediaWakeVersion, setMediaWakeVersion] = useState(0);
   const [localBackupStatus, setLocalBackupStatus] = useState<LocalBackupStatus>("idle");
+  const [productionConnection, setProductionConnection] = useState<ProductionConnectionState>("connecting");
+  const commandContractRef = useRef<WorkbenchCommandContract | null>(null);
+  if (!commandContractRef.current) {
+    commandContractRef.current = createWorkbenchCommandContract(() => mountedRef.current);
+  }
 
   useEffect(() => {
     stateRef.current = state;
@@ -290,8 +338,8 @@ export function WorkbenchSessionProvider({
   }, [media]);
 
   const invalidateSession = useCallback(() => {
-    operationGenerationRef.current += 1;
-    operationSequencesRef.current = {};
+    commandContractRef.current?.invalidate();
+    planningRequestRef.current = null;
     pendingOpenRef.current = null;
     clearScheduledBackgroundTasks();
     resetLocalBackupState();
@@ -302,16 +350,11 @@ export function WorkbenchSessionProvider({
   const beginToken = useCallback((
     projectId: string,
     kind: OperationToken["kind"],
-  ): OperationToken => {
-    const generation = ++operationGenerationRef.current;
-    operationSequencesRef.current[kind] = generation;
-    return { projectId, kind, generation };
-  }, []);
+  ): OperationToken => commandContractRef.current!.begin(projectId, kind), []);
 
   const isCurrent = useCallback((token: OperationToken): boolean => (
-    mountedRef.current
+    Boolean(commandContractRef.current?.isCurrent(token))
     && (token.kind !== "open" || pendingOpenRef.current === token)
-    && operationSequencesRef.current[token.kind] === token.generation
   ), []);
 
   const ensureWritable = useCallback(() => {
@@ -354,11 +397,20 @@ export function WorkbenchSessionProvider({
     await Promise.all(collectRemoteMediaSourcePaths(snapshot).map(async (sourcePath) => {
       try {
         const record = await media.findCommitted(projectId, sourcePath, projectIncarnation);
+        const finalOutput = snapshot.final_path === sourcePath
+          ? snapshot.render_report?.outputs.find((output) => (
+            output.path === sourcePath || output.media_url === sourcePath
+          ))
+          : undefined;
+        const expectedSize = Number.isSafeInteger(finalOutput?.file_size_bytes)
+          ? finalOutput?.file_size_bytes
+          : null;
         if (
           record
           && record.projectId === projectId
           && record.sourcePath === sourcePath
           && (record.state === undefined || record.state === "committed")
+          && (expectedSize === null || record.sizeBytes === expectedSize)
         ) {
           overlays.set(sourcePath, `local://media/${record.id}`);
         }
@@ -387,13 +439,22 @@ export function WorkbenchSessionProvider({
 
     const memoryRevision = snapshotRevisionRef.current;
     const candidate = mutate(current);
-    let saved: LocalProjectVersion | null;
+    let saveResult;
     try {
-      saved = await projects.saveIfVersion(candidate, stored.version);
+      saveResult = await saveSnapshotIfVersionCurrent({
+        snapshot: candidate,
+        expectedVersion: stored.version,
+        isCurrent: () => (
+          stateRef.current.snapshot?.project.id === projectId
+          && isSnapshotCurrent()
+        ),
+        saveIfVersion: (next, expectedVersion) => projects.saveIfVersion(next, expectedVersion),
+      });
     } catch {
       return false;
     }
-    if (!saved) return true;
+    if (saveResult.status !== "committed") return true;
+    const saved = saveResult.version;
 
     const latest = stateRef.current.snapshot;
     if (
@@ -432,13 +493,74 @@ export function WorkbenchSessionProvider({
     return retryRevision === snapshotRevisionRef.current ? retry : stateRef.current.snapshot;
   }, [projects]);
 
-  const scheduleBackgroundTask = useCallback((task: () => void) => {
+  const refreshProductionSnapshot = useCallback(async (
+    projectId: string,
+  ): Promise<ShortDramaProjectResponse | null> => {
+    const snapshot = await refreshAuthoritativeProject(
+      projectId,
+      () => stateRef.current.snapshot?.project.id === projectId,
+    );
+    if (!snapshot || stateRef.current.snapshot?.project.id !== projectId) return null;
+    await persistSnapshot(
+      projectId,
+      snapshot,
+      () => stateRef.current.snapshot?.project.id === projectId,
+    );
+    if (stateRef.current.snapshot?.project.id !== projectId) return null;
+    send({
+      type: "snapshotUpdated",
+      projectId,
+      snapshot,
+      merge: "render-result",
+    });
+    return snapshot;
+  }, [persistSnapshot, refreshAuthoritativeProject, send]);
+
+  const refreshTaskSnapshot = useCallback(async (
+    projectId: string,
+  ): Promise<ShortDramaProjectResponse | null> => {
+    const snapshot = await refreshAuthoritativeProject(
+      projectId,
+      () => stateRef.current.snapshot?.project.id === projectId,
+    );
+    if (!snapshot || stateRef.current.snapshot?.project.id !== projectId) return null;
+    const current = stateRef.current.snapshot;
+    const merged = current
+      ? mergeAuthoritativeMediaOverlays(snapshot, current)
+      : snapshot;
+    send({ type: "snapshotUpdated", projectId, snapshot: merged });
+    return merged;
+  }, [refreshAuthoritativeProject, send]);
+
+  const recoverCreativePlanConflict = useCallback(async (
+    error: unknown,
+    token: OperationToken,
+  ): Promise<boolean> => {
+    if (!isCreativePlanConflict(error)) return false;
+    try {
+      const authoritative = await projects.refresh(token.projectId);
+      if (!isCurrent(token)) return true;
+      const current = stateRef.current.snapshot;
+      const snapshot = current
+        ? mergeAuthoritativeMediaOverlays(authoritative, current)
+        : authoritative;
+      send({ type: "operationSucceeded", token, snapshot });
+      await persistSnapshot(token.projectId, snapshot, () => (
+        isCurrent(token) && stateRef.current.snapshot?.project.id === token.projectId
+      ));
+      return true;
+    } catch {
+      return false;
+    }
+  }, [isCurrent, persistSnapshot, projects, send]);
+
+  const scheduleBackgroundTask = useCallback((task: () => void, delayMs = 0) => {
     const generation = backgroundCacheGenerationRef.current;
     const timer = setTimeout(() => {
       scheduledBackgroundTasksRef.current.delete(timer);
       if (!mountedRef.current || generation !== backgroundCacheGenerationRef.current) return;
       task();
-    }, 0);
+    }, delayMs);
     scheduledBackgroundTasksRef.current.add(timer);
   }, []);
 
@@ -461,6 +583,142 @@ export function WorkbenchSessionProvider({
     else backgroundCacheJobsRef.current.delete(token.id);
     updateLocalBackupStatus();
   }, [updateLocalBackupStatus]);
+
+  const scheduleAssetMediaCache = useCallback((
+    projectId: string,
+    assetId: string,
+    sourcePath: string,
+  ) => {
+    const url = media.remoteUrl(sourcePath, projectId);
+    if (!url || !sourcePath) return;
+    const projectIncarnation = storageVersionRef.current.projectId === projectId
+      ? storageVersionRef.current.version?.incarnation
+      : undefined;
+    const cacheJob = beginBackgroundCacheJob();
+    scheduleBackgroundTask(() => {
+      void (async () => {
+        try {
+          const localRef = await media.cacheRemote(url, {
+            projectId,
+            projectIncarnation,
+            sourcePath,
+          });
+          if (!localRef) throw new Error("Resource media was not cached");
+          const isAssetCurrent = () => {
+            if (stateRef.current.snapshot?.project.id !== projectId) return false;
+            const current = stateRef.current.snapshot.series_bible.assets?.find(
+              (asset) => asset.id === assetId,
+            );
+            return Boolean(
+              current
+              && (
+                current.media_url === sourcePath
+                || current.reference_images.includes(sourcePath)
+                || current.media_urls?.includes(sourcePath)
+              ),
+            );
+          };
+          const persisted = await persistBackgroundIfCurrent(
+            projectId,
+            (snapshot) => ({
+              ...snapshot,
+              series_bible: {
+                ...snapshot.series_bible,
+                assets: snapshot.series_bible.assets?.map((asset) => (
+                  asset.id !== assetId
+                    ? asset
+                    : {
+                      ...asset,
+                      media_url: asset.media_url === sourcePath ? localRef : asset.media_url,
+                      reference_images: asset.reference_images.map((value) => (
+                        value === sourcePath ? localRef : value
+                      )),
+                      media_urls: asset.media_urls?.map((value) => (
+                        value === sourcePath ? localRef : value
+                      )),
+                    }
+                )),
+              },
+            }),
+            isAssetCurrent,
+          );
+          finishBackgroundCacheJob(cacheJob, !persisted);
+        } catch {
+          finishBackgroundCacheJob(cacheJob, true);
+        }
+      })();
+    });
+  }, [
+    beginBackgroundCacheJob,
+    finishBackgroundCacheJob,
+    media,
+    persistBackgroundIfCurrent,
+    scheduleBackgroundTask,
+  ]);
+
+  const scheduleFinalMediaCache = useCallback((
+    projectId: string,
+    sourcePath: string,
+    renderReport: RenderReport,
+  ) => {
+    if (!sourcePath || isLocalMediaRef(sourcePath)) return;
+    const url = media.remoteUrl(sourcePath, projectId);
+    if (!url) return;
+    const entityVersion = JSON.stringify(renderReport.outputs);
+    const cacheKey = `${projectId}:${sourcePath}:${entityVersion}`;
+    if (scheduledFinalCachesRef.current.has(cacheKey)) return;
+    scheduledFinalCachesRef.current.add(cacheKey);
+    const projectIncarnation = storageVersionRef.current.projectId === projectId
+      ? storageVersionRef.current.version?.incarnation
+      : undefined;
+    const cacheJob = beginBackgroundCacheJob();
+    scheduleBackgroundTask(() => {
+      void (async () => {
+        try {
+          const localRef = await media.cacheRemote(url, {
+            projectId,
+            projectIncarnation,
+            sourcePath,
+          });
+          if (!localRef) throw new Error("Final render was not cached");
+          const isFinalCurrent = () => (
+            stateRef.current.snapshot?.project.id === projectId
+            && stateRef.current.snapshot.final_path === sourcePath
+            && JSON.stringify(stateRef.current.snapshot.render_report?.outputs ?? [])
+              === entityVersion
+          );
+          if (!isFinalCurrent()) {
+            finishBackgroundCacheJob(cacheJob, false);
+            return;
+          }
+          const persisted = await persistBackgroundIfCurrent(
+            projectId,
+            (snapshot) => ({ ...snapshot, final_path: localRef }),
+            isFinalCurrent,
+          );
+          finishBackgroundCacheJob(cacheJob, !persisted);
+        } catch {
+          finishBackgroundCacheJob(cacheJob, true);
+        }
+      })();
+    });
+  }, [
+    beginBackgroundCacheJob,
+    finishBackgroundCacheJob,
+    media,
+    persistBackgroundIfCurrent,
+    scheduleBackgroundTask,
+  ]);
+
+  useEffect(() => {
+    const snapshot = state.snapshot;
+    if (!snapshot?.final_path || !snapshot.render_report) return;
+    scheduleFinalMediaCache(
+      snapshot.project.id,
+      snapshot.final_path,
+      snapshot.render_report,
+    );
+  }, [scheduleFinalMediaCache, state.snapshot]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -488,18 +746,66 @@ export function WorkbenchSessionProvider({
   useEffect(() => {
     const projectId = state.snapshot?.project.id;
     if (!projectId) return undefined;
+    productionConnectionRef.current = "connecting";
+    setProductionConnection("connecting");
+    let subscriptionActive = true;
     try {
-      return generation.subscribe(projectId, (event: JobEvent) => {
+      const unsubscribe = generation.subscribe(projectId, (event: JobEvent) => {
+        if (!subscriptionActive) return;
         send({ type: "eventReceived", event });
+        if (event.stage === "render" && ["complete", "failed"].includes(event.status)) {
+          void refreshProductionSnapshot(projectId).catch(() => undefined);
+        }
+        if (event.stage === "task_item"
+          && ["complete", "failed", "cancelled"].includes(event.status)) {
+          void refreshTaskSnapshot(projectId).catch(() => undefined);
+        }
+      }, {
+        onConnectionChange: (next) => {
+          if (!subscriptionActive || stateRef.current.snapshot?.project.id !== projectId) return;
+          const reconnecting = productionConnectionRef.current === "disconnected"
+            && next === "connected";
+          productionConnectionRef.current = next;
+          setProductionConnection(next);
+          if (reconnecting) {
+            void refreshProductionSnapshot(projectId).catch(() => undefined);
+            void refreshTaskSnapshot(projectId).catch(() => undefined);
+          }
+        },
       });
+      return () => {
+        subscriptionActive = false;
+        unsubscribe();
+      };
     } catch (subscriptionError) {
+      productionConnectionRef.current = "disconnected";
+      setProductionConnection("disconnected");
       send({
         type: "errorRaised",
         error: errorMessage(subscriptionError, strings.errors.renderFallback),
       });
       return undefined;
     }
-  }, [generation, state.snapshot?.project.id, strings.errors.renderFallback]);
+  }, [generation, refreshProductionSnapshot, refreshTaskSnapshot, send, state.snapshot?.project.id, strings.errors.renderFallback]);
+
+  useEffect(() => {
+    const projectId = state.snapshot?.project.id;
+    if (!projectId || productionConnection !== "disconnected") return undefined;
+    let active = true;
+    const poll = () => {
+      if (!active || stateRef.current.snapshot?.project.id !== projectId) return;
+      void Promise.all([
+        refreshTaskSnapshot(projectId),
+        refreshProductionSnapshot(projectId),
+      ]).catch(() => undefined);
+    };
+    poll();
+    const timer = globalThis.setInterval(poll, 2_000);
+    return () => {
+      active = false;
+      globalThis.clearInterval(timer);
+    };
+  }, [productionConnection, refreshProductionSnapshot, refreshTaskSnapshot, state.snapshot?.project.id]);
 
   useEffect(() => {
     const snapshot = state.snapshot;
@@ -556,8 +862,7 @@ export function WorkbenchSessionProvider({
     const pending = pendingOpenRef.current;
     if (!pending || pending.projectId === routeProjectId) return;
     pendingOpenRef.current = null;
-    operationGenerationRef.current += 1;
-    delete operationSequencesRef.current.open;
+    commandContractRef.current?.invalidateKind("open");
   }, []);
 
   const openLocalProject = useCallback(async (projectId: string): Promise<boolean> => {
@@ -646,6 +951,302 @@ export function WorkbenchSessionProvider({
     }
   }, [beginToken, invalidateSession, isCurrent, persistSnapshot, projects, strings.errors]);
 
+  const createDraft = useCallback(async (
+    input: DraftProjectRequest,
+  ): Promise<ShortDramaProjectResponse> => {
+    invalidateSession();
+    const token = beginToken(CREATE_PROJECT_TOKEN_ID, "create");
+    send({ type: "operationStarted", token });
+    try {
+      const result = await projects.createDraft(input);
+      if (isCurrent(token)) {
+        const snapshot = { ...result, final_path: null };
+        send({ type: "operationSucceeded", token, snapshot });
+        await persistSnapshot(result.project.id, snapshot, () => (
+          stateRef.current.snapshot?.project.id === result.project.id
+        ));
+      }
+      return result;
+    } catch (creationError) {
+      const message = errorMessage(creationError, strings.errors.createProjectFallback);
+      if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+      throw creationError instanceof Error ? creationError : new Error(message);
+    }
+  }, [beginToken, invalidateSession, isCurrent, persistSnapshot, projects, strings.errors]);
+
+  const planStoryboard = useCallback(async (
+    prompt: string,
+    controlEndFrames?: boolean,
+    textModel?: string,
+  ): Promise<ShortDramaProjectResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.createProjectFallback);
+    const pending = planningRequestRef.current;
+    if (pending?.projectId === current.project.id) return pending.promise;
+    ensureWritable();
+    const normalizedPrompt = prompt.trim();
+    if (!normalizedPrompt) {
+      throw new Error(strings.errors.createStoryboardRequiresPrompt);
+    }
+
+    const request = (async () => {
+      const token = beginToken(current.project.id, "create");
+      send({ type: "operationStarted", token });
+      try {
+        const planInput: Parameters<typeof projects.planStoryboard>[1] = {
+          prompt: normalizedPrompt,
+          project_type: current.project.project_type
+            ?? current.continuity_plan?.project_type
+            ?? "single_video",
+          control_end_frames: controlEndFrames
+            ?? current.creative_workflow?.control_end_frames
+            ?? false,
+        };
+        const normalizedTextModel = textModel?.trim();
+        if (normalizedTextModel) planInput.text_model = normalizedTextModel;
+        const result = await projects.planStoryboard(current.project.id, planInput);
+        if (isCurrent(token)) {
+          const snapshot = { ...result, final_path: null };
+          send({
+            type: "operationSucceeded",
+            token,
+            snapshot,
+            selectedShotId: snapshot.storyboard.shots[0]?.id ?? null,
+          });
+          await persistSnapshot(result.project.id, snapshot, () => (
+            stateRef.current.snapshot?.project.id === result.project.id
+          ));
+        }
+        return result;
+      } catch (planningError) {
+        const message = errorMessage(planningError, strings.errors.createProjectFallback);
+        if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+        throw planningError instanceof Error ? planningError : new Error(message);
+      }
+    })();
+    const pendingRequest = { projectId: current.project.id, promise: request };
+    planningRequestRef.current = pendingRequest;
+    try {
+      return await request;
+    } finally {
+      if (planningRequestRef.current === pendingRequest) planningRequestRef.current = null;
+    }
+  }, [
+    beginToken,
+    ensureWritable,
+    isCurrent,
+    persistSnapshot,
+    projects,
+    strings.errors,
+  ]);
+
+  const developInspiration = useCallback(async (
+    input: InspirationChatRequest,
+  ): Promise<ShortDramaProjectResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.createProjectFallback);
+    ensureWritable();
+    if (!input.messages.length) {
+      throw new Error(strings.errors.createStoryboardRequiresPrompt);
+    }
+
+    const token = beginToken(current.project.id, "inspiration");
+    send({ type: "operationStarted", token });
+    try {
+      const result = await projects.developInspiration(current.project.id, input);
+      if (isCurrent(token)) {
+        const snapshot = { ...result, final_path: result.final_path ?? null };
+        send({ type: "operationSucceeded", token, snapshot });
+        await persistSnapshot(result.project.id, snapshot, () => (
+          stateRef.current.snapshot?.project.id === result.project.id
+        ));
+      }
+      return result;
+    } catch (inspirationError) {
+      const message = errorMessage(inspirationError, strings.errors.createProjectFallback);
+      if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+      throw inspirationError instanceof Error ? inspirationError : new Error(message);
+    }
+  }, [
+    beginToken,
+    ensureWritable,
+    isCurrent,
+    persistSnapshot,
+    projects,
+    strings.errors,
+  ]);
+
+  const updateInspirationIntent = useCallback(async (
+    input: InspirationIntentUpdateRequest,
+  ): Promise<ShortDramaProjectResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.createProjectFallback);
+    ensureWritable();
+    const projectId = current.project.id;
+    const result = await projects.updateInspirationIntent(projectId, input);
+    if (stateRef.current.snapshot?.project.id === projectId) {
+      const snapshot = { ...result, final_path: result.final_path ?? null };
+      send({ type: "snapshotUpdated", projectId, snapshot });
+      await persistSnapshot(projectId, snapshot, () => (
+        stateRef.current.snapshot?.project.id === projectId
+      ));
+    }
+    return result;
+  }, [
+    ensureWritable,
+    persistSnapshot,
+    projects,
+    send,
+    strings.errors.createProjectFallback,
+  ]);
+
+  const approveStoryboard = useCallback(async (): Promise<ShortDramaProjectResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.createProjectFallback);
+    ensureWritable();
+
+    const token = beginToken(current.project.id, "approve-plan");
+    send({ type: "operationStarted", token });
+    try {
+      const result = await projects.approveStoryboard(current.project.id);
+      if (isCurrent(token)) {
+        const snapshot = { ...result, final_path: result.final_path ?? null };
+        send({ type: "operationSucceeded", token, snapshot });
+        await persistSnapshot(result.project.id, snapshot, () => (
+          stateRef.current.snapshot?.project.id === result.project.id
+        ));
+      }
+      return result;
+    } catch (approvalError) {
+      const message = errorMessage(approvalError, strings.errors.createProjectFallback);
+      if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+      throw approvalError instanceof Error ? approvalError : new Error(message);
+    }
+  }, [
+    beginToken,
+    ensureWritable,
+    isCurrent,
+    persistSnapshot,
+    projects,
+    strings.errors.createProjectFallback,
+  ]);
+
+  const updatePlanSection = useCallback(async (
+    section: PlanSectionId,
+    input: PlanSectionUpdateRequest,
+  ): Promise<ShortDramaProjectResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.createProjectFallback);
+    ensureWritable();
+
+    const token = beginToken(current.project.id, "update-plan-section");
+    setOperationTargets((targets) => ({ ...targets, updatingPlanSection: section }));
+    send({ type: "operationStarted", token });
+    try {
+      const result = await projects.updatePlanSection(current.project.id, section, input);
+      if (isCurrent(token)) {
+        const snapshot = { ...result, final_path: result.final_path ?? null };
+        send({ type: "operationSucceeded", token, snapshot });
+        await persistSnapshot(result.project.id, snapshot, () => (
+          stateRef.current.snapshot?.project.id === result.project.id
+        ));
+      }
+      return result;
+    } catch (updateError) {
+      if (await recoverCreativePlanConflict(updateError, token)) throw updateError;
+      const message = errorMessage(updateError, strings.errors.createProjectFallback);
+      if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+      throw updateError instanceof Error ? updateError : new Error(message);
+    }
+  }, [
+    beginToken,
+    ensureWritable,
+    isCurrent,
+    persistSnapshot,
+    projects,
+    recoverCreativePlanConflict,
+    strings.errors.createProjectFallback,
+  ]);
+
+  const reviseCreativePlan = useCallback(async (
+    input: CreativePlanReviseRequest,
+  ): Promise<ShortDramaProjectResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.createProjectFallback);
+    ensureWritable();
+
+    const token = beginToken(current.project.id, "revise-plan");
+    send({ type: "operationStarted", token });
+    try {
+      const result = await generation.reviseCreativePlan(current.project.id, input);
+      if (isCurrent(token)) {
+        const snapshot = { ...result, final_path: result.final_path ?? null };
+        send({ type: "operationSucceeded", token, snapshot });
+        await persistSnapshot(result.project.id, snapshot, () => (
+          stateRef.current.snapshot?.project.id === result.project.id
+        ));
+      }
+      return result;
+    } catch (revisionError) {
+      if (await recoverCreativePlanConflict(revisionError, token)) throw revisionError;
+      const message = errorMessage(revisionError, strings.errors.createProjectFallback);
+      if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+      throw revisionError instanceof Error ? revisionError : new Error(message);
+    }
+  }, [
+    beginToken,
+    ensureWritable,
+    generation,
+    isCurrent,
+    persistSnapshot,
+    recoverCreativePlanConflict,
+    strings.errors.createProjectFallback,
+  ]);
+
+  const runStoryboardRevisionTransition = useCallback(async (
+    transition: "begin" | "cancel",
+  ): Promise<ShortDramaProjectResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.createProjectFallback);
+    ensureWritable();
+
+    const token = beginToken(current.project.id, "revise-plan");
+    send({ type: "operationStarted", token });
+    try {
+      const result = transition === "begin"
+        ? await projects.beginStoryboardRevision(current.project.id)
+        : await projects.cancelStoryboardRevision(current.project.id);
+      if (isCurrent(token)) {
+        const snapshot = { ...result, final_path: result.final_path ?? null };
+        send({ type: "operationSucceeded", token, snapshot });
+        await persistSnapshot(result.project.id, snapshot, () => (
+          stateRef.current.snapshot?.project.id === result.project.id
+        ));
+      }
+      return result;
+    } catch (transitionError) {
+      const message = errorMessage(transitionError, strings.errors.createProjectFallback);
+      if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+      throw transitionError instanceof Error ? transitionError : new Error(message);
+    }
+  }, [
+    beginToken,
+    ensureWritable,
+    isCurrent,
+    persistSnapshot,
+    projects,
+    strings.errors.createProjectFallback,
+  ]);
+
+  const beginStoryboardRevision = useCallback(
+    () => runStoryboardRevisionTransition("begin"),
+    [runStoryboardRevisionTransition],
+  );
+  const cancelStoryboardRevision = useCallback(
+    () => runStoryboardRevisionTransition("cancel"),
+    [runStoryboardRevisionTransition],
+  );
+
   const optimizeShotPrompt = useCallback(async (
     shot: Shot,
     sourceText: string,
@@ -659,6 +1260,34 @@ export function WorkbenchSessionProvider({
     send({ type: "operationStarted", token });
     try {
       const result = await generation.optimize(current.project.id, shot.id, sourceText);
+      if (isCurrent(token)) send({ type: "operationSucceeded", token });
+      return result;
+    } catch (optimizationError) {
+      const message = errorMessage(optimizationError, strings.errors.optimizeShotFallback);
+      if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+      throw optimizationError instanceof Error ? optimizationError : new Error(message);
+    }
+  }, [beginToken, ensureWritable, generation, isCurrent, strings.errors.optimizeShotFallback]);
+
+  const optimizeImagePrompt = useCallback(async (
+    kind: MediaAssetKind,
+    sourceText: string,
+    billingJobId?: string,
+  ): Promise<PromptOptimizeResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.optimizeShotFallback);
+    ensureWritable();
+
+    const token = beginToken(current.project.id, "optimize");
+    setOperationTargets((targets) => ({ ...targets, optimizingShotId: null }));
+    send({ type: "operationStarted", token });
+    try {
+      const result = await generation.optimizeImagePrompt(
+        current.project.id,
+        kind,
+        sourceText,
+        billingJobId,
+      );
       if (isCurrent(token)) send({ type: "operationSucceeded", token });
       return result;
     } catch (optimizationError) {
@@ -708,91 +1337,23 @@ export function WorkbenchSessionProvider({
     }
   }, [beginToken, ensureWritable, generation, isCurrent, persistSnapshot, strings.errors.saveShotFallback]);
 
-  const regenerateSelectedShot = useCallback(async (shot: Shot): Promise<void> => {
+  const regenerateSelectedShot = useCallback(async (
+    shot: Shot,
+    videoModel?: string,
+  ): Promise<void> => {
     const current = stateRef.current.snapshot;
     if (!current) return;
     ensureWritable();
 
     const projectId = current.project.id;
     const token = beginToken(projectId, "regenerate");
-    const operationRevision = snapshotRevisionRef.current;
     setOperationTargets((targets) => ({ ...targets, regeneratingShotId: shot.id }));
     send({ type: "operationStarted", token });
     send({ type: "shotSelected", shotId: shot.id });
     try {
-      const result = await generation.regenerate(projectId, shot.id);
+      await generation.regenerate(projectId, shot.id, videoModel);
       if (!isCurrent(token)) return;
-      const latest = stateRef.current.snapshot;
-      if (!latest) return;
-      const snapshot = mergeRegeneratedSnapshot(
-        latest,
-        result.storyboard,
-        result.shot,
-        result.consistency_report,
-        operationRevision !== snapshotRevisionRef.current,
-      );
-      send({
-        type: "operationSucceeded",
-        token,
-        snapshot,
-        event: result.event,
-        selectedShotId: shot.id,
-      });
-      await persistSnapshot(projectId, snapshot, () => stateRef.current.snapshot?.project.id === projectId);
-      if (!isCurrent(token)) return;
-
-      const sourcePath = result.shot.output_path;
-      const url = sourcePath && !isLocalMediaRef(sourcePath)
-        ? media.remoteUrl(sourcePath, projectId)
-        : null;
-      if (!sourcePath || !url) return;
-      const entityId = result.shot.id;
-      const entityVersion = result.shot.version;
-      const publishedRevision = snapshotRevisionRef.current;
-      const projectIncarnation = storageVersionRef.current.projectId === projectId
-        ? storageVersionRef.current.version?.incarnation
-        : undefined;
-      const cacheJob = beginBackgroundCacheJob();
-      scheduleBackgroundTask(() => {
-        void (async () => {
-          try {
-            const localRef = await media.cacheRemote(url, {
-              projectId,
-              projectIncarnation,
-              sourcePath,
-            });
-            if (!localRef) throw new Error("Remote media was not cached");
-            const promotionIsCurrent = () => {
-              if (!isCurrent(token) || snapshotRevisionRef.current < publishedRevision) return false;
-              const currentShot = stateRef.current.snapshot?.storyboard.shots.find(
-                (item) => item.id === entityId,
-              );
-              return currentShot?.version === entityVersion
-                && currentShot.output_path === sourcePath;
-            };
-            if (!promotionIsCurrent()) {
-              finishBackgroundCacheJob(cacheJob, false);
-              return;
-            }
-            const persisted = await persistBackgroundIfCurrent(
-              projectId,
-              (currentSnapshot) => ({
-                ...currentSnapshot,
-                storyboard: {
-                  ...currentSnapshot.storyboard,
-                  shots: currentSnapshot.storyboard.shots.map((item) => item.id === entityId
-                    ? { ...item, output_path: localRef, output_url: null }
-                    : item),
-                },
-              }),
-              promotionIsCurrent,
-            );
-            finishBackgroundCacheJob(cacheJob, !persisted);
-          } catch {
-            finishBackgroundCacheJob(cacheJob, true);
-          }
-        })();
-      });
+      send({ type: "operationSucceeded", token, selectedShotId: shot.id });
     } catch (regenerationError) {
       const message = errorMessage(
         regenerationError,
@@ -802,17 +1363,11 @@ export function WorkbenchSessionProvider({
       throw regenerationError instanceof Error ? regenerationError : new Error(message);
     }
   }, [
-    beginBackgroundCacheJob,
     beginToken,
     ensureWritable,
-    finishBackgroundCacheJob,
     generation,
     isCurrent,
-    media,
-    persistBackgroundIfCurrent,
-    persistSnapshot,
-    scheduleBackgroundTask,
-    strings.errors,
+    strings.errors.regenerateShotFallback,
   ]);
 
   const saveContinuity = useCallback(async (plan: ContinuityPlan): Promise<void> => {
@@ -864,7 +1419,7 @@ export function WorkbenchSessionProvider({
 
   const uploadReference = useCallback(async (
     payload: ReferenceImageUploadRequest,
-  ): Promise<void> => {
+  ): Promise<ReferenceImageUploadResponse> => {
     const current = stateRef.current.snapshot;
     if (!current) throw new Error(strings.errors.uploadReferenceFallback);
     ensureWritable();
@@ -874,9 +1429,9 @@ export function WorkbenchSessionProvider({
     send({ type: "operationStarted", token });
     try {
       const result = await generation.uploadReference(projectId, payload);
-      if (!isCurrent(token)) return;
+      if (!isCurrent(token)) return result;
       const latest = stateRef.current.snapshot;
-      if (!latest) return;
+      if (!latest) return result;
       const uploadedAsset = {
         ...result.asset,
         media_urls: [...(result.asset.media_urls ?? []), result.media.media_url],
@@ -898,9 +1453,11 @@ export function WorkbenchSessionProvider({
       } catch {
         // The upload response is enough to keep the UI usable.
       }
-      if (!isCurrent(token)) return;
+      if (!isCurrent(token)) return result;
       send({ type: "operationSucceeded", token, snapshot });
       await persistSnapshot(projectId, snapshot, () => stateRef.current.snapshot?.project.id === projectId);
+      scheduleAssetMediaCache(projectId, uploadedAsset.id, result.media.media_url);
+      return result;
     } catch (uploadError) {
       const message = errorMessage(uploadError, strings.errors.uploadReferenceFallback);
       if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
@@ -913,10 +1470,156 @@ export function WorkbenchSessionProvider({
     isCurrent,
     persistSnapshot,
     refreshAuthoritativeProject,
+    scheduleAssetMediaCache,
     strings.errors.uploadReferenceFallback,
   ]);
 
-  const renderFinal = useCallback(async (): Promise<void> => {
+  const listAssets = useCallback(
+    (payload: ListAssetsRequest): Promise<ListAssetsResponse> => generation.listAssets(payload),
+    [generation],
+  );
+
+  const listTasks = useCallback((): Promise<TaskListResponse> => {
+    const projectId = stateRef.current.snapshot?.project.id;
+    if (!projectId) return Promise.resolve({ tasks: [] });
+    return generation.listTasks(projectId);
+  }, [generation]);
+
+  const retryTaskItem = useCallback((taskId: string, itemId: string): Promise<TaskBatch> => {
+    const projectId = stateRef.current.snapshot?.project.id;
+    if (!projectId) throw new Error(strings.resources.generateError);
+    ensureWritable();
+    return generation.retryTaskItem(projectId, taskId, itemId);
+  }, [ensureWritable, generation, strings.resources.generateError]);
+
+  const generateImages = useCallback(async (
+    payload: GenerateImagesRequest,
+  ): Promise<GenerateImagesResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.resources.generateError);
+    ensureWritable();
+    const projectId = current.project.id;
+    return generation.generateImages(projectId, payload);
+  }, [
+    ensureWritable,
+    generation,
+    strings.resources.generateError,
+  ]);
+
+  const generateGenerationUnits = useCallback(async (
+    payload: GenerationUnitsGenerateRequest,
+  ): Promise<GenerationUnitsGenerateResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.regenerateShotFallback(""));
+    ensureWritable();
+    const projectId = current.project.id;
+    const response = await generation.generateGenerationUnits(projectId, payload);
+    await refreshTaskSnapshot(projectId).catch(() => undefined);
+    return response;
+  }, [ensureWritable, generation, refreshTaskSnapshot, strings.errors]);
+
+  const previewGenerationPlan = useCallback(async (
+    payload: GenerationPlanPreviewRequest,
+  ): Promise<GenerationPlan> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.regenerateShotFallback(""));
+    ensureWritable();
+    return generation.previewGenerationPlan(current.project.id, payload);
+  }, [ensureWritable, generation, strings.errors]);
+
+  const addAssetToProject = useCallback(async (
+    assetId: string,
+  ): Promise<AddAssetToProjectResponse> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.resources.addError);
+    ensureWritable();
+    const projectId = current.project.id;
+    const result = await generation.addAssetToProject(projectId, assetId);
+    const latest = stateRef.current.snapshot;
+    if (latest?.project.id !== projectId) return result;
+    const libraryMetadata = mediaAssetRecord(result.library_asset);
+    const projectAsset: AssetRecord = {
+      ...libraryMetadata,
+      ...result.asset,
+      reference_images: result.asset.reference_images.length
+        ? result.asset.reference_images
+        : libraryMetadata.reference_images,
+    };
+    const snapshot: ShortDramaProjectResponse = {
+      ...latest,
+      series_bible: {
+        ...latest.series_bible,
+        assets: mergeAssetRecords(latest.series_bible.assets ?? [], [projectAsset]),
+      },
+    };
+    send({ type: "snapshotUpdated", projectId, snapshot });
+    await persistSnapshot(projectId, snapshot, () => stateRef.current.snapshot?.project.id === projectId);
+    return result;
+  }, [ensureWritable, generation, persistSnapshot, send, strings.resources.addError]);
+
+  const prepareFinalRender = useCallback(async (selectedShotIds?: string[]): Promise<RenderPreparation> => {
+    const current = stateRef.current.snapshot;
+    if (!current?.storyboard.shots.length) {
+      const message = strings.errors.renderRequiresStoryboard;
+      send({ type: "errorRaised", error: message });
+      throw new Error(message);
+    }
+    ensureWritable();
+    const projectId = current.project.id;
+    const token = beginToken(projectId, "prepare-render");
+    send({ type: "operationStarted", token });
+    try {
+      const preparation = await generation.prepareRender(projectId, selectedShotIds);
+      if (isCurrent(token)) send({ type: "operationSucceeded", token });
+      return preparation;
+    } catch (prepareError) {
+      const message = errorMessage(prepareError, strings.errors.renderFallback);
+      if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+      throw prepareError instanceof Error ? prepareError : new Error(message);
+    }
+  }, [beginToken, ensureWritable, generation, isCurrent, send, strings.errors]);
+
+  const refreshProduction = useCallback(async (): Promise<void> => {
+    const current = stateRef.current.snapshot;
+    if (!current) return;
+    const projectId = current.project.id;
+    const inFlight = refreshProductionInFlightRef.current;
+    if (inFlight?.projectId === projectId) {
+      await inFlight.promise;
+      return;
+    }
+    const token = beginToken(projectId, "refresh-production");
+    send({ type: "operationStarted", token });
+    const promise = (async () => {
+      try {
+        const snapshot = await refreshAuthoritativeProject(
+          projectId,
+          () => isCurrent(token),
+        );
+        if (!snapshot || !isCurrent(token)) return;
+        send({
+          type: "operationSucceeded",
+          token,
+          snapshot,
+          merge: "render-result",
+        });
+      } catch (refreshError) {
+        const message = errorMessage(refreshError, strings.errors.renderFallback);
+        if (isCurrent(token)) send({ type: "operationFailed", token, error: message });
+        throw refreshError instanceof Error ? refreshError : new Error(message);
+      }
+    })();
+    refreshProductionInFlightRef.current = { projectId, promise };
+    try {
+      await promise;
+    } finally {
+      if (refreshProductionInFlightRef.current?.promise === promise) {
+        refreshProductionInFlightRef.current = null;
+      }
+    }
+  }, [beginToken, isCurrent, refreshAuthoritativeProject, send, strings.errors.renderFallback]);
+
+  const renderFinal = useCallback(async (selectedShotIds?: string[]): Promise<void> => {
     const current = stateRef.current.snapshot;
     if (!current?.storyboard.shots.length) {
       const message = strings.errors.renderRequiresStoryboard;
@@ -928,116 +1631,15 @@ export function WorkbenchSessionProvider({
     const projectId = current.project.id;
     const token = beginToken(projectId, "render");
     send({ type: "operationStarted", token });
-    const responseBaseRevision = snapshotRevisionRef.current;
     try {
-      const result = await generation.render(projectId);
-      if (!isCurrent(token)) return;
-      const latest = stateRef.current.snapshot;
-      if (!latest) return;
-      const snapshot = mergeRenderResponse(
-        latest,
-        result,
-        responseBaseRevision !== snapshotRevisionRef.current,
-      );
-      if (!isCurrent(token)) return;
-      send({
-        type: "operationSucceeded",
-        token,
-        snapshot,
-        event: result.event,
+      await generation.compose(projectId, {
+        ...(selectedShotIds ? { selected_shot_ids: selectedShotIds } : {}),
+        idempotency_key: compositionIdempotencyKey(projectId, selectedShotIds),
       });
-      await persistSnapshot(projectId, snapshot, () => stateRef.current.snapshot?.project.id === projectId);
       if (!isCurrent(token)) return;
-
-      const publishedRevision = snapshotRevisionRef.current;
-      const responseSource = result.final_path;
-      const responseEntityVersion = JSON.stringify(result.render_report.outputs);
-      const projectIncarnation = storageVersionRef.current.projectId === projectId
-        ? storageVersionRef.current.version?.incarnation
-        : undefined;
-      const cacheJob = beginBackgroundCacheJob();
+      send({ type: "operationSucceeded", token });
       scheduleBackgroundTask(() => {
-        void (async () => {
-          try {
-            let selectedSource = responseSource;
-            let selectedReport = result.render_report;
-            const responseIsCurrent = () => (
-              isCurrent(token)
-              && snapshotRevisionRef.current >= publishedRevision
-              && stateRef.current.snapshot?.final_path === responseSource
-              && JSON.stringify(stateRef.current.snapshot.render_report?.outputs ?? [])
-                === responseEntityVersion
-            );
-
-            let authoritative: ShortDramaProjectResponse | null = null;
-            try {
-              authoritative = await refreshAuthoritativeProject(projectId, responseIsCurrent);
-            } catch {
-              // The persisted POST result remains authoritative when refresh is unavailable.
-            }
-            if (!isCurrent(token)) {
-              finishBackgroundCacheJob(cacheJob, false);
-              return;
-            }
-            if (
-              authoritative
-              && isCompleteRenderSource(authoritative.final_path, authoritative.render_report)
-              && responseIsCurrent()
-            ) {
-              const currentSnapshot = stateRef.current.snapshot;
-              if (!currentSnapshot) {
-                finishBackgroundCacheJob(cacheJob, false);
-                return;
-              }
-              selectedSource = authoritative.final_path as string;
-              selectedReport = authoritative.render_report as RenderReport;
-              const persisted = await persistBackgroundIfCurrent(
-                projectId,
-                (latestSnapshot) => ({
-                  ...latestSnapshot,
-                  render_report: selectedReport,
-                  final_path: selectedSource,
-                }),
-                responseIsCurrent,
-              );
-              if (!persisted) throw new Error("Render reconciliation was not persisted");
-            }
-
-            const sourceRevision = snapshotRevisionRef.current;
-            const selectedEntityVersion = JSON.stringify(selectedReport.outputs);
-            const promotionIsCurrent = () => (
-              isCurrent(token)
-              && snapshotRevisionRef.current >= sourceRevision
-              && stateRef.current.snapshot?.final_path === selectedSource
-              && JSON.stringify(stateRef.current.snapshot.render_report?.outputs ?? [])
-                === selectedEntityVersion
-            );
-            if (!promotionIsCurrent()) {
-              finishBackgroundCacheJob(cacheJob, false);
-              return;
-            }
-            const url = media.remoteUrl(selectedSource, projectId);
-            if (!url) throw new Error("Final render URL is unavailable");
-            const localRef = await media.cacheRemote(url, {
-              projectId,
-              projectIncarnation,
-              sourcePath: selectedSource,
-            });
-            if (!localRef) throw new Error("Final render was not cached");
-            if (!promotionIsCurrent()) {
-              finishBackgroundCacheJob(cacheJob, false);
-              return;
-            }
-            const persisted = await persistBackgroundIfCurrent(
-              projectId,
-              (currentSnapshot) => ({ ...currentSnapshot, final_path: localRef }),
-              promotionIsCurrent,
-            );
-            finishBackgroundCacheJob(cacheJob, !persisted);
-          } catch {
-            finishBackgroundCacheJob(cacheJob, true);
-          }
-        })();
+        void refreshProductionSnapshot(projectId).catch(() => undefined);
       });
     } catch (renderError) {
       const message = errorMessage(renderError, strings.errors.renderFallback);
@@ -1045,17 +1647,13 @@ export function WorkbenchSessionProvider({
       throw renderError instanceof Error ? renderError : new Error(message);
     }
   }, [
-    beginBackgroundCacheJob,
     beginToken,
     ensureWritable,
-    finishBackgroundCacheJob,
     generation,
     isCurrent,
-    media,
-    persistBackgroundIfCurrent,
-    persistSnapshot,
-    refreshAuthoritativeProject,
+    refreshProductionSnapshot,
     scheduleBackgroundTask,
+    send,
     strings.errors,
   ]);
 
@@ -1066,28 +1664,33 @@ export function WorkbenchSessionProvider({
     setDownloadBusy(true);
     send({ type: "errorCleared" });
     try {
-      let blob: Blob | null;
+      const sourceFilename = finalPath.split("/").pop() || "final.mp4";
+      const filename = `${sanitizeDownloadName(current.project.title || current.project.id)}-${
+        /^episode-\d+\.mp4$/i.test(sourceFilename) ? sourceFilename : "final.mp4"
+      }`;
+      const clickDownload = (href: string) => {
+        const link = document.createElement("a");
+        link.href = href;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      };
       if (isLocalMediaRef(finalPath)) {
-        blob = await media.load(finalPath);
+        const blob = await media.load(finalPath);
+        if (!blob || typeof URL.createObjectURL !== "function") {
+          throw new Error(strings.errors.downloadFinalVideoFallback);
+        }
+        if (stateRef.current.snapshot?.project.id !== current.project.id) return;
+        const url = URL.createObjectURL(blob);
+        clickDownload(url);
+        URL.revokeObjectURL(url);
       } else {
         const url = media.remoteUrl(finalPath, current.project.id);
         if (!url) throw new Error(strings.errors.downloadFinalVideoFallback);
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(strings.errors.downloadFinalVideoFallback);
-        blob = await response.blob();
+        if (stateRef.current.snapshot?.project.id !== current.project.id) return;
+        clickDownload(url);
       }
-      if (!blob || typeof URL.createObjectURL !== "function") {
-        throw new Error(strings.errors.downloadFinalVideoFallback);
-      }
-      if (stateRef.current.snapshot?.project.id !== current.project.id) return;
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${sanitizeDownloadName(current.project.title || current.project.id)}-final.mp4`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
     } catch (downloadError) {
       const message = errorMessage(downloadError, strings.errors.downloadFinalVideoFallback);
       send({ type: "errorRaised", error: message });
@@ -1116,20 +1719,29 @@ export function WorkbenchSessionProvider({
   );
 
   const busy = useMemo<WorkbenchBusyState>(() => ({
+    approvingPlan: Boolean(state.operations["approve-plan"]),
     creating: Boolean(state.operations.create),
+    developingIdea: Boolean(state.operations.inspiration),
     downloading: downloadBusy,
+    preparingRender: Boolean(state.operations["prepare-render"]),
+    refreshingProduction: Boolean(state.operations["refresh-production"]),
     optimizingShotId: state.operations.optimize ? operationTargets.optimizingShotId : null,
     regeneratingShotId: state.operations.regenerate ? operationTargets.regeneratingShotId : null,
     rendering: Boolean(state.operations.render),
+    revisingPlan: Boolean(state.operations["revise-plan"]),
     savingContinuity: Boolean(state.operations["save-continuity"]),
     savingShotId: state.operations["save-shot"] ? operationTargets.savingShotId : null,
     uploadingReference: Boolean(state.operations.upload),
+    updatingPlanSection: state.operations["update-plan-section"]
+      ? operationTargets.updatingPlanSection
+      : null,
   }), [downloadBusy, operationTargets, state.operations]);
 
   const value: WorkbenchContextValue = {
     snapshot: state.snapshot,
     selectedShotId: state.selectedShotId,
     events: state.events,
+    productionConnection,
     error: state.error,
     load: state.load,
     readOnly: state.load === "stale",
@@ -1139,12 +1751,31 @@ export function WorkbenchSessionProvider({
     busy,
     openLocalProject,
     createProject,
+    createDraft,
+    developInspiration,
+    updateInspirationIntent,
+    planStoryboard,
+    approveStoryboard,
+    beginStoryboardRevision,
+    cancelStoryboardRevision,
+    updatePlanSection,
+    reviseCreativePlan,
     selectShot: (shotId) => send({ type: "shotSelected", shotId }),
     optimizeShotPrompt,
+    optimizeImagePrompt,
     saveShotChanges,
     regenerateSelectedShot,
     saveContinuity,
+    listAssets,
+    listTasks,
+    generateImages,
+    previewGenerationPlan,
+    generateGenerationUnits,
+    retryTaskItem,
+    addAssetToProject,
     uploadReference,
+    prepareFinalRender,
+    refreshProduction,
     renderFinal,
     downloadFinal,
     resolveShotMedia,

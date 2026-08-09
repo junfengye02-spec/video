@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from server.app.media_retention import cleanup_expired_media
+
+
+NOW = datetime(2026, 7, 8, tzinfo=UTC)
+OLD_TIME = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
+FRESH_TIME = datetime(2026, 7, 8, tzinfo=UTC).timestamp()
+RETENTION = timedelta(days=3)
+
+
+def _write_file(path: Path, data: bytes = b"media") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _set_mtime(path: Path, timestamp: float) -> None:
+    os.utime(path, (timestamp, timestamp))
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    except (NotImplementedError, OSError) as exc:
+        if os.name != "nt":
+            pytest.skip(f"directory symlinks are not available: {exc}")
+
+    import subprocess
+
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"directory links are not available: {result.stderr or result.stdout}")
+
+
+def test_cleanup_preserves_old_durable_media_and_deletes_only_hidden_results(tmp_path):
+    projects_root = tmp_path / "projects"
+    project = projects_root / "p1"
+    old_image = _write_file(project / "assets" / "images" / "character" / "lin.png")
+    old_video = _write_file(project / "assets" / "video" / "shot.mp4")
+    old_audio = _write_file(project / "assets" / "audio" / "voice.wav")
+    old_render = _write_file(project / "renders" / "final.mp4")
+    hidden_video = _write_file(
+        project / "assets" / "video" / ".hidden" / ("a" * 32) / "video.mp4"
+    )
+    hidden_provider_result = _write_file(
+        project / ".billing-results" / ("b" * 32) / "response.bin"
+    )
+    video_intent = _write_file(
+        project / ".billing-results" / "video-intents" / f"{'c' * 32}.json",
+        b"{}",
+    )
+    fresh_video = _write_file(project / "assets" / "video" / "fresh.mp4")
+    artifact = _write_file(project / "artifacts" / "episode_storyboard.json", b"{}")
+    outside_media_dir = _write_file(project / "assets" / "documents" / "notes.mp4")
+
+    for path in [
+        old_image,
+        old_video,
+        old_audio,
+        old_render,
+        hidden_video,
+        hidden_provider_result,
+        video_intent,
+        artifact,
+        outside_media_dir,
+    ]:
+        _set_mtime(path, OLD_TIME)
+    _set_mtime(fresh_video, FRESH_TIME)
+
+    deleted = cleanup_expired_media(projects_root, now=NOW, retention=RETENTION)
+
+    assert set(deleted) == {hidden_video, hidden_provider_result}
+    for path in [
+        old_image,
+        old_video,
+        old_audio,
+        old_render,
+        fresh_video,
+        artifact,
+        outside_media_dir,
+        video_intent,
+    ]:
+        assert path.exists()
+
+
+def test_repeated_cleanup_never_deletes_durable_media_older_than_retention(tmp_path):
+    projects_root = tmp_path / "projects"
+    project = projects_root / "p1"
+    durable_files = [
+        _write_file(project / "assets" / "images" / "generated" / "old.png"),
+        _write_file(project / "assets" / "video" / "shot.mp4"),
+        _write_file(project / "assets" / "audio" / "voice.wav"),
+        _write_file(project / "renders" / "final.mp4"),
+    ]
+    for path in durable_files:
+        _set_mtime(path, OLD_TIME)
+
+    assert cleanup_expired_media(projects_root, now=NOW, retention=RETENTION) == []
+    assert cleanup_expired_media(projects_root, now=NOW, retention=RETENTION) == []
+    assert all(path.exists() for path in durable_files)
+
+
+def test_cleanup_does_not_follow_project_symlink_outside_projects_root(tmp_path):
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    outside_project = tmp_path / "outside-project"
+    outside_video = _write_file(outside_project / "assets" / "video" / "escape.mp4")
+    _set_mtime(outside_video, OLD_TIME)
+
+    linked_project = projects_root / "linked"
+    _link_directory(linked_project, outside_project)
+
+    deleted = cleanup_expired_media(projects_root, now=NOW, retention=RETENTION)
+
+    assert deleted == []
+    assert outside_video.exists()

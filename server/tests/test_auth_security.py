@@ -1,10 +1,16 @@
 import re
+import smtplib
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from server.app.auth.mailer import MemoryMailer, SmtpMailer
+from server.app.auth.mailer import (
+    MemoryMailer,
+    RecipientDomainUnavailable,
+    SmtpMailer,
+    ensure_recipient_domain,
+)
 from server.app.auth.security import (
     hash_password,
     normalize_email,
@@ -28,6 +34,7 @@ class RecordingSmtp:
         self.starttls_context = None
         self.login_args = None
         self.messages = []
+        self.send_message_result = None
         type(self).instances.append(self)
 
     def __enter__(self):
@@ -47,6 +54,7 @@ class RecordingSmtp:
 
     def send_message(self, message):
         self.messages.append(message)
+        return self.send_message_result
 
 
 def test_password_uses_argon2id_and_email_is_normalized():
@@ -112,6 +120,28 @@ def test_smtp_settings_reject_plaintext_mode():
         )
 
 
+def test_recipient_domain_rejects_explicit_null_mx(monkeypatch):
+    class NullMxRecord:
+        exchange = "."
+
+    class NullMxResolver:
+        timeout = 0.0
+        lifetime = 0.0
+
+        def resolve(self, domain, record_type):
+            assert domain == "example.com"
+            assert record_type == "MX"
+            return [NullMxRecord()]
+
+    monkeypatch.setattr(
+        "server.app.auth.mailer.dns.resolver.Resolver",
+        NullMxResolver,
+    )
+
+    with pytest.raises(RecipientDomainUnavailable, match="does not accept mail"):
+        ensure_recipient_domain("person@example.com")
+
+
 def test_smtp_ssl_sends_verification_with_optional_login(monkeypatch, caplog):
     RecordingSmtp.instances.clear()
     monkeypatch.setattr("server.app.auth.mailer.smtplib.SMTP_SSL", RecordingSmtp)
@@ -134,8 +164,14 @@ def test_smtp_ssl_sends_verification_with_optional_login(monkeypatch, caplog):
     assert (smtp.host, smtp.port) == ("smtp.example.com", 465)
     assert smtp.login_args == ("mailer", "unrelated-smtp-secret")
     assert smtp.starttls_context is None
-    assert message["From"] == "no-reply@example.com"
+    assert message["From"] == "mise studio <no-reply@example.com>"
     assert message["To"] == "person@example.com"
+    assert message["Subject"] == "mise studio registration code"
+    assert message["Date"]
+    assert message["Message-ID"]
+    assert message["Reply-To"] == "no-reply@example.com"
+    assert message["Auto-Submitted"] == "auto-generated"
+    assert "mise studio" in message.get_content()
     assert "registration" in message.get_content().lower()
     assert "123456" in message.get_content()
     assert "10 minutes" in message.get_content()
@@ -154,6 +190,8 @@ def test_smtp_starttls_sends_password_reset_without_login(monkeypatch):
         smtp_host="smtp.example.com",
         smtp_port=587,
         smtp_from_address="no-reply@example.com",
+        smtp_username=None,
+        smtp_password=None,
         smtp_tls_mode="starttls",
     )
 
@@ -166,6 +204,30 @@ def test_smtp_starttls_sends_password_reset_without_login(monkeypatch):
     assert smtp.login_args is None
     assert "password reset" in message.get_content().lower()
     assert "654321" in message.get_content()
+
+
+def test_smtp_rejects_partial_recipient_refusal(monkeypatch):
+    RecordingSmtp.instances.clear()
+    monkeypatch.setattr("server.app.auth.mailer.smtplib.SMTP_SSL", RecordingSmtp)
+    settings = AppSettings(
+        _env_file=None,
+        auth_hmac_secret="x" * 32,
+        smtp_host="smtp.example.com",
+        smtp_port=465,
+        smtp_from_address="no-reply@example.com",
+        smtp_username="mailer",
+        smtp_password="smtp-password",
+        smtp_tls_mode="ssl",
+    )
+    class RefusingSmtp(RecordingSmtp):
+        def __init__(self, host, port, **kwargs):
+            super().__init__(host, port, **kwargs)
+            self.send_message_result = {"person@example.com": (550, "mailbox unavailable")}
+
+    monkeypatch.setattr("server.app.auth.mailer.smtplib.SMTP_SSL", RefusingSmtp)
+
+    with pytest.raises(smtplib.SMTPRecipientsRefused):
+        SmtpMailer(settings).send_verification("person@example.com", "123456")
 
 
 def test_memory_mailer_records_purpose_email_and_code():

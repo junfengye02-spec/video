@@ -25,7 +25,9 @@
           "seed": { "type": "integer", "description": "Seed if applicable" },
           "model": { "type": "string", "description": "Model used for generation" },
           "cost_usd": { "type": "number", "minimum": 0 },
-          "duration_seconds": { "type": "number", "minimum": 0 },
+          "duration_seconds": { "type": "number", "minimum": 0, "description": "Legacy alias for the probed source duration." },
+          "requested_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+          "source_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
           "resolution": { "type": "string" },
           "format": { "type": "string" },
           "quality_score": { "type": "number", "minimum": 0, "maximum": 1 },
@@ -33,7 +35,8 @@
           "generation_summary": { "type": "string", "description": "Brief summary of how the asset was generated or sourced" },
           "provider": { "type": "string", "description": "Provider name (e.g. pixabay, google_imagen)" },
           "license": { "type": "string", "description": "License type (e.g. Pixabay License, CC0)" },
-          "original_url": { "type": "string", "description": "Source URL if downloaded from a stock service" }
+          "original_url": { "type": "string", "description": "Source URL if downloaded from a stock service" },
+          "metadata": { "type": "object", "description": "Stable source bindings, including generation-unit revision and ordered shot/beat mappings." }
         },
         "additionalProperties": false
       }

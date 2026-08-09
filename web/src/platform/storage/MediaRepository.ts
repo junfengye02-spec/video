@@ -62,6 +62,21 @@ interface MediaRepositoryOptions {
 const ERROR_RETRY_BASE_MS = 1_000;
 const ERROR_RETRY_MAX_MS = 30_000;
 
+async function cachedBlobMatchesRecord(record: LocalMediaRecord | null, blob: Blob): Promise<boolean> {
+  if (!record || blob.size <= 0 || blob.size !== record.sizeBytes) return false;
+  const contentType = (blob.type || record.contentType).toLowerCase();
+  const sourcePath = record.sourcePath.toLowerCase();
+  if (/\.(?:mp4|mov|webm)$/.test(sourcePath) && !contentType.startsWith("video/")) return false;
+  if (/\.(?:png|jpe?g|webp)$/.test(sourcePath) && !contentType.startsWith("image/")) return false;
+  if (!sourcePath.endsWith(".mp4") || blob.size < 12) return true;
+  try {
+    const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+    return header[4] === 0x66 && header[5] === 0x74 && header[6] === 0x79 && header[7] === 0x70;
+  } catch {
+    return false;
+  }
+}
+
 export class LocalMediaRepository implements MediaRepository {
   private readonly cacheRemoteMedia: typeof cacheRemoteMedia;
   private readonly findCommittedMedia: typeof findCommittedMedia;
@@ -200,7 +215,7 @@ export class LocalMediaRepository implements MediaRepository {
     }
     if (generation !== this.cacheGeneration) return null;
     this.failedResolutions.delete(ref);
-    if (!blob) {
+    if (!blob || !await cachedBlobMatchesRecord(record, blob)) {
       this.resolvedUrls.set(ref, { projectId: record?.projectId ?? null, url: null });
       return null;
     }

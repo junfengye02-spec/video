@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from server.app.billing.models import GenerationJob
+from server.app.billing.health import require_billing_worker_healthy
 from server.app.billing.bootstrap import ensure_billing_settings
 from server.app.billing.lease import (
     FencedReconciliationClaim,
@@ -54,7 +55,9 @@ class StagedProviderResult:
 
 
 class ProviderResultPending(RuntimeError):
-    pass
+    def __init__(self, message: str, job_id: str | None = None):
+        super().__init__(message)
+        self.job_id = job_id
 
 
 class ProviderResultUnavailable(RuntimeError):
@@ -181,11 +184,14 @@ def execute_billed_provider_call(
     artifact_inspector: ArtifactInspector, user_id: str, project_id: str,
     parent_job_id: str | None, capability: TokenKind, operation: str,
     request: PreparedNewApiRequest, retry_job_id: str | None = None,
+    job_id: str | None = None,
     prepare_reservation: Callable[[str], None] | None = None,
     reservation_validator: Callable[[str], None] | None = None,
     discard_reservation: Callable[[str], None] | None = None,
     now: datetime | None = None,
 ) -> ProviderCallContext:
+    if capability == "video":
+        require_billing_worker_healthy(db, settings)
     bootstrap_before_quote = db.get_bind().dialect.name == "postgresql"
     if bootstrap_before_quote:
         ensure_billing_settings(db, settings)
@@ -197,7 +203,7 @@ def execute_billed_provider_call(
             raise ProviderPricingUnavailable("provider pricing is unavailable") from None
         if not bootstrap_before_quote:
             ensure_billing_settings(db, settings)
-        proposed_job_id = uuid.uuid4().hex
+        proposed_job_id = job_id or uuid.uuid4().hex
         if prepare_reservation is not None:
             prepare_reservation(proposed_job_id)
         try:

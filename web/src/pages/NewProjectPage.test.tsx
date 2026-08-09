@@ -3,161 +3,131 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStrings } from "../i18n";
 import { createProjectResponse } from "../test/fixtures";
+import { chooseSelectMenuOption } from "../test/selectMenu";
+import { buildInitialIdea } from "../components/projects/ProjectComposer";
 import { NewProjectPage, type NewProjectPageProps } from "./NewProjectPage";
 
-function renderPage(props: NewProjectPageProps) {
+const startAction = "\u5f00\u59cb\u804a\u7075\u611f";
+const startingAction = "\u6b63\u5728\u51c6\u5907\u521b\u4f5c\u7a7a\u95f4...";
+const ideaLabel = "\u4f60\u60f3\u505a\u4e00\u652f\u4ec0\u4e48\u6837\u7684\u89c6\u9891\uff1f";
+
+function renderPage(props: Partial<NewProjectPageProps> = {}) {
   return render(
     <MemoryRouter>
-      <NewProjectPage {...props} />
+      <NewProjectPage
+        onCreateDraft={vi.fn()}
+        onStarted={vi.fn()}
+        {...props}
+      />
     </MemoryRouter>,
   );
 }
 
-afterEach(() => {
-  cleanup();
-});
+afterEach(cleanup);
 
 describe("NewProjectPage", () => {
-  it("navigates back to projects through the React Router session", async () => {
+  it("navigates back to projects through React Router", async () => {
     render(
       <MemoryRouter initialEntries={["/projects/new"]}>
         <Routes>
-          <Route
-            path="/projects/new"
-            element={(
-              <NewProjectPage
-                onCreate={vi.fn()}
-                onCreated={vi.fn()}
-              />
-            )}
-          />
+          <Route path="/projects/new" element={<NewProjectPage onCreateDraft={vi.fn()} onStarted={vi.fn()} />} />
           <Route path="/projects" element={<h1>Projects destination</h1>} />
         </Routes>
       </MemoryRouter>,
     );
 
-    fireEvent.click(screen.getByRole("link", {
-      name: getStrings("zh").newProjectPage.backToProjects,
-    }));
+    fireEvent.click(screen.getByRole("link", { name: getStrings("zh").newProjectPage.backToProjects }));
 
     expect(await screen.findByRole("heading", { name: "Projects destination" })).toBeInTheDocument();
   });
 
-  it("submits title, project type and master prompt without a shot count", async () => {
-    const onCreate = vi.fn().mockResolvedValue(createProjectResponse({ shotCount: 2 }));
-    const onCreated = vi.fn();
-    renderPage({ onCreate, onCreated });
+  it("creates a draft from the first chat message before opening inspiration", async () => {
+    const draft = createProjectResponse({ shotCount: 0 });
+    const onCreateDraft = vi.fn().mockResolvedValue(draft);
+    const onStarted = vi.fn();
+    const strings = getStrings("zh").newProjectPage;
+    renderPage({ onCreateDraft, onStarted });
 
-    fireEvent.change(screen.getByLabelText("项目标题"), { target: { value: "雨夜来信" } });
-    fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "一封信改变两个人的命运" } });
-    fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
-
-    await waitFor(() => expect(onCreate).toHaveBeenCalled());
-    expect(onCreate.mock.calls[0][0]).toEqual({
-      title: "雨夜来信",
-      prompt: "一封信改变两个人的命运",
-      project_type: "single_video",
+    fireEvent.click(screen.getByRole("button", { name: "创作设置" }));
+    fireEvent.change(screen.getByLabelText(strings.projectTitleLabel), {
+      target: { value: "\u660e\u65e5\u6765\u4fe1" },
     });
-    expect(onCreate.mock.calls[0][0]).not.toHaveProperty("shot_count");
-    expect(onCreated).toHaveBeenCalledWith("p1", 2);
-  });
+    chooseSelectMenuOption(strings.projectTypeLabel, strings.miniSeries);
+    fireEvent.change(screen.getByLabelText(ideaLabel), {
+      target: { value: "  \u5feb\u9012\u5458\u6536\u5230\u4e00\u5c01\u6765\u81ea\u660e\u5929\u7684\u4fe1  " },
+    });
+    fireEvent.change(screen.getByLabelText("\u7075\u611f\u6587\u672c\u6a21\u578b"), {
+      target: { value: "text-model-v2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: startAction }));
 
-  it("uses a trimmed prompt and an untitled fallback", async () => {
-    const onCreate = vi.fn().mockResolvedValue(createProjectResponse());
-    renderPage({ onCreate, onCreated: vi.fn() });
-
-    fireEvent.change(screen.getByLabelText("项目标题"), { target: { value: "   " } });
-    fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "  雨夜追踪  " } });
-    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "mini_series" } });
-    fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
-
-    await waitFor(() => expect(onCreate).toHaveBeenCalledWith({
-      title: "未命名项目",
-      prompt: "雨夜追踪",
+    const initialMessage = buildInitialIdea(
+      "\u5feb\u9012\u5458\u6536\u5230\u4e00\u5c01\u6765\u81ea\u660e\u5929\u7684\u4fe1",
+      "story",
+      "16:9",
+    );
+    await waitFor(() => expect(onCreateDraft).toHaveBeenCalledWith({
+      title: "\u660e\u65e5\u6765\u4fe1",
       project_type: "mini_series",
+      prompt: initialMessage,
     }));
+    expect(onStarted).toHaveBeenCalledWith(
+      draft.project.id,
+      initialMessage,
+      "text-model-v2",
+    );
   });
 
-  it("does not expose provider configuration before AI creation", () => {
-    renderPage({ onCreate: vi.fn(), onCreated: vi.fn() });
+  it("keeps duration in the creative brief instead of limiting it to presets", () => {
+    renderPage();
 
-    expect(screen.getByRole("button", { name: "AI 规划分镜" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "打开接口配置" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
-    expect(document.querySelector('[name="shot_count"]')).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "\u65f6\u957f" })).not.toBeInTheDocument();
+    expect(buildInitialIdea("\u751f\u6210 20 \u79d2\u821e\u8e48\u77ed\u7247", "concept", "9:16")).toContain(
+      "\u751f\u6210 20 \u79d2\u821e\u8e48\u77ed\u7247",
+    );
   });
 
-  it("rejects an empty trimmed prompt with an accessible error", async () => {
-    const onCreate = vi.fn();
-    renderPage({ onCreate, onCreated: vi.fn() });
-    fireEvent.change(screen.getByLabelText("故事与画面要求"), { target: { value: "   " } });
+  it("requires a first message", async () => {
+    const onCreateDraft = vi.fn();
+    renderPage({ onCreateDraft });
 
-    fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
+    fireEvent.click(screen.getByRole("button", { name: startAction }));
 
-    expect(onCreate).not.toHaveBeenCalled();
+    expect(onCreateDraft).not.toHaveBeenCalled();
     expect(await screen.findByRole("alert")).toHaveTextContent(
       getStrings("zh").errors.createStoryboardRequiresPrompt,
     );
   });
 
-  it("shows wallet recovery details for payment-required creation", async () => {
-    const strings = getStrings("zh").newProjectPage;
-    const onCreate = vi.fn().mockRejectedValue({
-      code: "payment_required",
-      required_units: 1200,
-      status: 402,
-    });
-    renderPage({
-      onCreate,
-      onCreated: vi.fn(),
-      walletAvailableUnits: 800,
-    });
-
-    fireEvent.change(screen.getByLabelText(strings.promptLabel), {
-      target: { value: "\u9700\u8981\u751f\u6210\u7684\u6545\u4e8b" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: strings.createAction }));
-
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("\u4f59\u989d\u4e0d\u8db3");
-    expect(alert).toHaveTextContent("\u53ef\u7528\u4f59\u989d 800");
-    expect(alert).toHaveTextContent("\u672c\u6b21\u6700\u591a\u9700\u8981 1,200");
-    expect(screen.getByRole("link", { name: "\u524d\u5f80\u94b1\u5305" })).toHaveAttribute("href", "/wallet");
-  });
-
-  it("hands unauthorized creation failures to session recovery", async () => {
-    const strings = getStrings("zh").newProjectPage;
-    const onSessionExpired = vi.fn();
-    const onCreate = vi.fn().mockRejectedValue({ code: "unauthorized", status: 401 });
-    renderPage({ onCreate, onCreated: vi.fn(), onSessionExpired });
-
-    fireEvent.change(screen.getByLabelText(strings.promptLabel), {
-      target: { value: "\u9700\u8981\u767b\u5f55\u7684\u6545\u4e8b" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: strings.createAction }));
-
-    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("shows creation progress and recovers from a rejected request", async () => {
+  it("shows progress and recovers when draft creation fails", async () => {
     let rejectCreate: (reason: unknown) => void = () => undefined;
-    const onCreate = vi.fn().mockReturnValue(new Promise((_, reject) => {
+    const onCreateDraft = vi.fn().mockReturnValue(new Promise((_, reject) => {
       rejectCreate = reject;
     }));
-    renderPage({ onCreate, onCreated: vi.fn() });
-
-    fireEvent.change(screen.getByLabelText("故事与画面要求"), {
-      target: { value: "雨夜追踪" },
+    renderPage({ onCreateDraft });
+    fireEvent.change(screen.getByLabelText(ideaLabel), {
+      target: { value: "\u96e8\u591c\u60ac\u7591\u6545\u4e8b" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "AI 规划分镜" }));
-    expect(screen.getByRole("button", { name: "正在规划分镜..." })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "正在规划分镜..." })).toHaveClass("async-action");
+    fireEvent.click(screen.getByRole("button", { name: startAction }));
+    expect(screen.getByRole("button", { name: startingAction })).toBeDisabled();
+    rejectCreate(new Error("Draft failed"));
 
-    rejectCreate(new Error("AI 规划失败"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Draft failed");
+    expect(screen.getByRole("button", { name: startAction })).toBeEnabled();
+  });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("AI 规划失败");
-    expect(screen.getByRole("button", { name: "AI 规划分镜" })).toBeEnabled();
+  it("hands unauthorized failures to session recovery", async () => {
+    const onSessionExpired = vi.fn();
+    renderPage({
+      onCreateDraft: vi.fn().mockRejectedValue({ code: "unauthorized", status: 401 }),
+      onSessionExpired,
+    });
+    fireEvent.change(screen.getByLabelText(ideaLabel), {
+      target: { value: "\u9700\u8981\u767b\u5f55\u7684\u6545\u4e8b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: startAction }));
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
   });
 });

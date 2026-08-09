@@ -61,6 +61,19 @@ describe("assetLibrary", () => {
     ]);
   });
 
+  it("filters AI generated and uploaded sources independently", () => {
+    const sourcedAssets = [
+      { ...assets[0], source_type: "upload" as const },
+      { ...assets[1], source_type: "ai_generated" as const },
+    ];
+
+    expect(filterAssets(sourcedAssets, {
+      kind: "all",
+      query: "",
+      sourceType: "ai_generated",
+    })).toEqual([sourcedAssets[1]]);
+  });
+
   it("does not mutate asset binding metadata while filtering", () => {
     const asset = { ...assets[0], shot_ids: ["legacy-shot"] };
     const originalShotIds = asset.shot_ids;
@@ -89,8 +102,9 @@ describe("assetLibrary", () => {
       { mode: "closed" },
       { mode: "detail", assetId: "asset-char-1" },
       { mode: "upload" },
+      { mode: "generate" },
     ];
 
-    expect(states.map((state) => state.mode)).toEqual(["closed", "detail", "upload"]);
+    expect(states.map((state) => state.mode)).toEqual(["closed", "detail", "upload", "generate"]);
   });
 });

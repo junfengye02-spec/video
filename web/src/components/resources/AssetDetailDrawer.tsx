@@ -1,14 +1,17 @@
-import { AlertTriangle, Link2, Unlink, X } from "lucide-react";
+import { AlertTriangle, ImageOff, Link2, Unlink, X } from "lucide-react";
 import type { RefObject } from "react";
-import type { AssetRecord, ConsistencyReport, Shot } from "../../domain/types";
+import type { ConsistencyReport, Shot } from "../../domain/types";
 import { getStrings, type UIStrings } from "../../i18n";
 import { useModalFocus } from "../accessibility/useModalFocus";
-import { countLinkedShots } from "./assetLibrary";
+import { countLinkedShots, type ResourceLibraryAsset } from "./assetLibrary";
+import { AssetKindLabel } from "./AssetKindLabel";
+import { AssetMediaPreview } from "./AssetMediaPreview";
 
 export interface AssetDetailDrawerProps {
-  asset: AssetRecord;
+  asset: ResourceLibraryAsset;
   binding: boolean;
   bindingError: string | null;
+  canBind?: boolean;
   consistencyReport: ConsistencyReport | null;
   currentShotId: string | null;
   panelLocked: boolean;
@@ -19,14 +22,11 @@ export interface AssetDetailDrawerProps {
   onClose: () => void;
 }
 
-function isVideoUrl(url: string): boolean {
-  return /\.(?:mp4|mov|webm)(?:[?#]|$)/i.test(url);
-}
-
 export function AssetDetailDrawer({
   asset,
   binding,
   bindingError,
+  canBind = true,
   consistencyReport,
   currentShotId,
   panelLocked,
@@ -44,6 +44,7 @@ export function AssetDetailDrawer({
   const relevantIssues = consistencyReport?.issues.filter(
     (issue) => Boolean(issue.shot_id && linkedShotIds.has(issue.shot_id)),
   ) ?? [];
+  const unavailable = asset.status !== "ready";
   const { panelRef, onKeyDown } = useModalFocus<HTMLDialogElement>({
     open: true,
     onEscape: () => {
@@ -55,7 +56,6 @@ export function AssetDetailDrawer({
   return (
     <dialog
       ref={panelRef}
-      open
       aria-modal="true"
       aria-labelledby="resource-detail-title"
       onCancel={(event) => {
@@ -81,46 +81,62 @@ export function AssetDetailDrawer({
 
       <h3>{asset.label}</h3>
       {asset.description ? <p>{asset.description}</p> : null}
+      <dl className="asset-detail-meta">
+        <div>
+          <dt>{strings.kindLabel}</dt>
+          <dd><AssetKindLabel kind={asset.kind} strings={strings} /></dd>
+        </div>
+        <div>
+          <dt>{strings.sourceLabel}</dt>
+          <dd>{strings.sourceLabels[asset.source_type]}</dd>
+        </div>
+        <div>
+          <dt>{strings.createdAtTitle}</dt>
+          <dd>{asset.created_at || strings.unknownCreatedAt}</dd>
+        </div>
+      </dl>
       <section aria-labelledby="resource-prompt-title">
         <h4 id="resource-prompt-title">{strings.promptLabel}</h4>
         <p>{asset.prompt || strings.noPrompt}</p>
       </section>
       <p>{strings.linkedShotCount(countLinkedShots(asset.id, shots))}</p>
 
-      {asset.reference_images.length > 0 ? (
+      {unavailable ? (
+        <p className="asset-file-status" role="status">
+          <ImageOff aria-hidden="true" size={18} />
+          {asset.status === "missing" ? strings.fileMissing : strings.fileDeleted}
+        </p>
+      ) : null}
+
+      {!unavailable && asset.reference_images.length > 0 ? (
         <section aria-labelledby="resource-references-title">
           <h4 id="resource-references-title">{strings.referencesTitle}</h4>
           <div className="asset-list">
             {asset.reference_images.map((url, index) => (
-              <img
+              <AssetMediaPreview
                 key={`${url}-${index}`}
-                src={url}
-                alt={`${asset.label} ${strings.referenceImageLabel(index + 1)}`}
+                url={url}
+                controls
+                label={`${asset.label} ${strings.referenceImageLabel(index + 1)}`}
+                strings={strings}
               />
             ))}
           </div>
         </section>
       ) : null}
 
-      {asset.media_urls?.length ? (
+      {!unavailable && asset.media_urls?.length ? (
         <section aria-labelledby="resource-media-title">
           <h4 id="resource-media-title">{strings.mediaTitle}</h4>
           <div className="asset-list">
             {asset.media_urls.map((url, index) => (
-              isVideoUrl(url) ? (
-                <video
-                  key={`${url}-${index}`}
-                  src={url}
-                  controls
-                  aria-label={`${asset.label} ${strings.mediaItemLabel(index + 1)}`}
-                />
-              ) : (
-                <img
-                  key={`${url}-${index}`}
-                  src={url}
-                  alt={`${asset.label} ${strings.mediaItemLabel(index + 1)}`}
-                />
-              )
+              <AssetMediaPreview
+                key={`${url}-${index}`}
+                url={url}
+                controls
+                label={`${asset.label} ${strings.mediaItemLabel(index + 1)}`}
+                strings={strings}
+              />
             ))}
           </div>
         </section>
@@ -141,10 +157,11 @@ export function AssetDetailDrawer({
       ) : null}
 
       {bindingError ? <p role="alert">{bindingError}</p> : null}
+      {!canBind ? <p className="empty-state">{strings.addBeforeBinding}</p> : null}
       <button
         className="async-action"
         type="button"
-        disabled={!currentShot || panelLocked}
+        disabled={!currentShot || panelLocked || !canBind || unavailable}
         onClick={() => onBind(!boundToCurrentShot)}
       >
         {boundToCurrentShot ? <Unlink aria-hidden="true" size={16} /> : <Link2 aria-hidden="true" size={16} />}

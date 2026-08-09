@@ -1,11 +1,21 @@
 import json
 import os
 
+import pytest
+
 from server.app.billing.service import ProviderPricingUnavailable
+from server.app.video_model_profiles import (
+    VideoModelDurationConfiguration,
+    VideoModelProfile,
+    video_model_profile as build_video_model_profile,
+)
 from server.app.openmontage_runner import (
+    _scope_edit_decisions_to_storyboard,
     build_pipeline_inputs,
+    build_video_selector_inputs,
     compile_shot_prompt,
     compose_final_video,
+    prepare_billed_shot_request,
     prepare_video_generation_request,
     render_short_drama_project,
     run_single_shot_generation,
@@ -13,18 +23,505 @@ from server.app.openmontage_runner import (
 )
 
 
+@pytest.fixture(autouse=True)
+def verified_test_video_profiles(monkeypatch):
+    def resolve(model_id, operation, *, provider="newapi", db=None):
+        if model_id in {"omni_flash-10s", "sora_v2"}:
+            duration = 10 if model_id == "omni_flash-10s" else 12
+            return build_video_model_profile(
+                model_id,
+                operation,
+                provider=provider,
+                duration_configuration=VideoModelDurationConfiguration(
+                    provider=provider,
+                    model_id=model_id,
+                    call_duration_seconds=duration,
+                    version=1,
+                ),
+            )
+        if model_id in {"veo_3_1-lite", "veo_3_1-fast-fl", "video-model"}:
+            return VideoModelProfile(
+                provider=provider,
+                model_id=model_id,
+                operation=operation,
+                duration_mode="flexible",
+                min_duration_seconds=1,
+                max_duration_seconds=60,
+                contract_source="verified_override",
+                profile_revision="test-flexible-v1",
+            )
+        return build_video_model_profile(model_id, operation, provider=provider)
+
+    monkeypatch.setattr("server.app.openmontage_runner.video_model_profile", resolve)
+
+
+def _write_keyframe(tmp_path, name):
+    path = tmp_path / "assets" / "images" / "generated" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"image")
+    return path
+
+
+def test_selector_inputs_use_explicit_first_last_fields_only_for_capable_provider(tmp_path):
+    first = _write_keyframe(tmp_path, "first.png")
+    last = _write_keyframe(tmp_path, "last.png")
+    shot = {
+        "id": "s2",
+        "continuity": {
+            "mode": "carry",
+            "first_frame": {"asset_id": "first", "status": "ready"},
+            "last_frame": {"asset_id": "last", "status": "ready"},
+        },
+    }
+    inputs = build_video_selector_inputs(
+        project_dir=tmp_path,
+        shot=shot,
+        prompt="continue the action",
+        video_model="veo_3_1-fast-fl",
+        output_path=tmp_path / "assets" / "video" / "s2.mp4",
+        asset_lookup={
+            "first": {"reference_images": ["assets/images/generated/first.png"]},
+            "last": {"reference_images": ["assets/images/generated/last.png"]},
+        },
+        providers=[{"supports": {"first_last_frame_to_video": True}}],
+    )
+
+    assert inputs["operation"] == "first_last_frame_to_video"
+    assert inputs["first_frame_path"] == str(first.resolve())
+    assert inputs["last_frame_path"] == str(last.resolve())
+    assert "reference_image_paths" not in inputs
+
+
+def test_selector_inputs_inherit_project_aspect_ratio_and_generation_size(tmp_path):
+    inputs = build_video_selector_inputs(
+        project_dir=tmp_path,
+        shot={"id": "s1"},
+        prompt="wide establishing shot",
+        video_model="omni_flash-10s",
+        output_path=tmp_path / "assets" / "video" / "s1.mp4",
+        asset_lookup={},
+        project_aspect_ratio="16:9",
+    )
+
+    assert inputs["aspect_ratio"] == "16:9"
+    assert inputs["size"] == "1280x720"
+
+
+def test_explicit_shot_aspect_ratio_overrides_project_default(tmp_path):
+    inputs = build_video_selector_inputs(
+        project_dir=tmp_path,
+        shot={"id": "s1", "aspect_ratio": "1:1"},
+        prompt="square insert shot",
+        video_model="omni_flash-10s",
+        output_path=tmp_path / "assets" / "video" / "s1.mp4",
+        asset_lookup={},
+        project_aspect_ratio="16:9",
+    )
+
+    assert inputs["aspect_ratio"] == "1:1"
+    assert inputs["size"] == "1080x1080"
+
+
+def test_selector_inputs_degrade_first_last_to_honest_reference_operation(tmp_path):
+    first = _write_keyframe(tmp_path, "first.png")
+    last = _write_keyframe(tmp_path, "last.png")
+    ordinary = _write_keyframe(tmp_path, "ordinary.png")
+    inputs = build_video_selector_inputs(
+        project_dir=tmp_path,
+        shot={
+            "id": "s2",
+            "asset_ids": ["ordinary"],
+            "continuity": {
+                "mode": "carry",
+                "first_frame": {"asset_id": "first", "status": "ready"},
+                "last_frame": {"asset_id": "last", "status": "ready"},
+            },
+        },
+        prompt="continue the action",
+        video_model="omni_flash-10s",
+        output_path=tmp_path / "assets" / "video" / "s2.mp4",
+        asset_lookup={
+            "first": {"reference_images": ["assets/images/generated/first.png"]},
+            "last": {"reference_images": ["assets/images/generated/last.png"]},
+            "ordinary": {"reference_images": ["assets/images/generated/ordinary.png"]},
+        },
+        providers=[{"supports": {"reference_to_video": True}}],
+    )
+
+    assert inputs["operation"] == "reference_to_video"
+    assert inputs["degraded_from_operation"] == "first_last_frame_to_video"
+    assert inputs["reference_image_paths"] == [
+        str(first.resolve()),
+        str(last.resolve()),
+        str(ordinary.resolve()),
+    ]
+    assert inputs["frame_reference_roles"] == ["start_frame", "end_frame"]
+    assert inputs["asset_reference_roles"] == [
+        {
+            "image_index": 3,
+            "asset_id": "ordinary",
+            "kind": "asset",
+            "label": "ordinary",
+        }
+    ]
+    assert "first_frame_path" not in inputs
+
+
+def test_user_first_frame_precedes_inherited_and_ordinary_references(tmp_path):
+    user = _write_keyframe(tmp_path, "user.png")
+    inherited = _write_keyframe(tmp_path, "inherited.png")
+    ordinary = _write_keyframe(tmp_path, "ordinary.png")
+    assets = {
+        "user": {"reference_images": ["assets/images/generated/user.png"]},
+        "inherited": {"reference_images": ["assets/images/generated/inherited.png"]},
+        "ordinary": {"reference_images": ["assets/images/generated/ordinary.png"]},
+    }
+    base_shot = {
+        "id": "s2",
+        "asset_ids": ["ordinary"],
+        "continuity": {
+            "mode": "carry",
+            "inherit_previous_tail": True,
+            "explicit_user_first_frame_asset_id": "user",
+            "inherited_first_frame_asset_id": "inherited",
+        },
+    }
+
+    explicit = build_video_selector_inputs(
+        project_dir=tmp_path,
+        shot=base_shot,
+        prompt="continue",
+        video_model="omni_flash-10s",
+        output_path=tmp_path / "assets" / "video" / "s2.mp4",
+        asset_lookup=assets,
+        providers=[{"supports": {"reference_to_video": True}}],
+    )
+    inherited_fallback = build_video_selector_inputs(
+        project_dir=tmp_path,
+        shot={
+            **base_shot,
+            "continuity": {
+                **base_shot["continuity"],
+                "explicit_user_first_frame_asset_id": None,
+            },
+        },
+        prompt="continue",
+        video_model="omni_flash-10s",
+        output_path=tmp_path / "assets" / "video" / "s2.mp4",
+        asset_lookup=assets,
+        providers=[{"supports": {"reference_to_video": True}}],
+    )
+
+    assert explicit["reference_image_paths"] == [str(user.resolve()), str(ordinary.resolve())]
+    assert explicit["referenced_asset_ids"] == ["user", "ordinary"]
+    assert explicit["frame_reference_roles"] == ["start_frame"]
+    assert str(inherited.resolve()) not in explicit["reference_image_paths"]
+    assert inherited_fallback["reference_image_paths"] == [
+        str(inherited.resolve()),
+        str(ordinary.resolve()),
+    ]
+    assert inherited_fallback["frame_reference_roles"] == ["start_frame"]
+
+
+def test_single_effective_first_frame_uses_image_to_video_when_supported(tmp_path):
+    first = _write_keyframe(tmp_path, "first.png")
+    inputs = build_video_selector_inputs(
+        project_dir=tmp_path,
+        shot={
+            "id": "s2",
+            "continuity": {"explicit_user_first_frame_asset_id": "first"},
+        },
+        prompt="continue",
+        video_model="omni_flash-10s",
+        output_path=tmp_path / "assets" / "video" / "s2.mp4",
+        asset_lookup={
+            "first": {"reference_images": ["assets/images/generated/first.png"]},
+        },
+        providers=[{"supports": {"image_to_video": True}}],
+    )
+
+    assert inputs["operation"] == "image_to_video"
+    assert inputs["reference_image_path"] == str(first.resolve())
+    assert inputs["referenced_asset_ids"] == ["first"]
+
+
+def test_billed_newapi_request_separates_boundary_and_character_image_roles(tmp_path):
+    _write_keyframe(tmp_path, "first.png")
+    _write_keyframe(tmp_path, "last.png")
+    _write_keyframe(tmp_path, "ordinary.png")
+    request = prepare_billed_shot_request(
+        project_dir=tmp_path,
+        shot={
+            "id": "s2",
+            "asset_ids": ["ordinary"],
+            "prompt": "Lin crosses the room.",
+            "continuity": {
+                "mode": "carry",
+                "first_frame": {"asset_id": "first", "status": "ready"},
+                "last_frame": {"asset_id": "last", "status": "ready"},
+            },
+        },
+        series_bible={
+            "characters": [],
+            "assets": [
+                {"id": "first", "reference_images": ["assets/images/generated/first.png"]},
+                {"id": "last", "reference_images": ["assets/images/generated/last.png"]},
+                {
+                    "id": "ordinary",
+                    "label": "unrelated character board",
+                    "kind": "character",
+                    "reference_images": ["assets/images/generated/ordinary.png"],
+                },
+            ],
+        },
+    )
+
+    body = json.loads(request.content)
+    assert len(body["images"]) == 3
+    assert "ATTACHED IMAGE 1 = START FRAME GUIDE" in body["prompt"]
+    assert "ATTACHED IMAGE 2 = END FRAME GUIDE" in body["prompt"]
+    assert (
+        "ATTACHED IMAGE 3 = CHARACTER IDENTITY REFERENCE for unrelated character board"
+        in body["prompt"]
+    )
+    assert "Never swap, merge, or average the two image roles" in body["prompt"]
+    assert "ordinary.png" not in body["prompt"]
+    assert "Ignore that image's pose, background, camera" in body["prompt"]
+
+
+def test_billed_newapi_request_guides_single_start_frame(tmp_path):
+    _write_keyframe(tmp_path, "first.png")
+
+    request = prepare_billed_shot_request(
+        project_dir=tmp_path,
+        shot={
+            "id": "s2",
+            "prompt": "Continue the movement.",
+            "continuity": {
+                "mode": "carry",
+                "inherit_previous_tail": True,
+                "first_frame": {
+                    "asset_id": "first",
+                    "status": "ready",
+                    "source": "inherited",
+                },
+            },
+        },
+        series_bible={
+            "characters": [],
+            "assets": [
+                {"id": "first", "reference_images": ["assets/images/generated/first.png"]},
+            ],
+        },
+    )
+
+    body = json.loads(request.content)
+    assert len(body["images"]) == 1
+    assert "ATTACHED IMAGE 1 = START FRAME GUIDE" in body["prompt"]
+    assert "END FRAME GUIDE" not in body["prompt"]
+
+
+def test_billed_start_frame_assigns_scene_and_prop_images_narrow_roles(tmp_path):
+    _write_keyframe(tmp_path, "first.png")
+    _write_keyframe(tmp_path, "station.png")
+    _write_keyframe(tmp_path, "station-alt.png")
+    _write_keyframe(tmp_path, "case.png")
+
+    request = prepare_billed_shot_request(
+        project_dir=tmp_path,
+        shot={
+            "id": "s2",
+            "asset_ids": ["station", "case"],
+            "prompt": "Lin opens the case in the station.",
+            "continuity": {
+                "mode": "carry",
+                "first_frame": {"asset_id": "first", "status": "ready"},
+            },
+        },
+        series_bible={
+            "characters": [],
+            "assets": [
+                {"id": "first", "reference_images": ["assets/images/generated/first.png"]},
+                {
+                    "id": "station",
+                    "kind": "scene",
+                    "label": "Central Station",
+                    "reference_images": [
+                        "assets/images/generated/station.png",
+                        "assets/images/generated/station-alt.png",
+                    ],
+                },
+                {
+                    "id": "case",
+                    "kind": "prop",
+                    "label": "sealed case",
+                    "reference_images": ["assets/images/generated/case.png"],
+                },
+            ],
+        },
+    )
+
+    body = json.loads(request.content)
+    assert len(body["images"]) == 4
+    assert "ATTACHED IMAGE 1 = START FRAME GUIDE" in body["prompt"]
+    assert "ATTACHED IMAGE 2 = SCENE IDENTITY REFERENCE for Central Station" in body["prompt"]
+    assert "ATTACHED IMAGE 3 = PROP APPEARANCE REFERENCE for sealed case" in body["prompt"]
+    assert "ATTACHED IMAGE 4 = SCENE IDENTITY REFERENCE for Central Station" in body["prompt"]
+    assert "station.png" not in body["prompt"]
+    assert "station-alt.png" not in body["prompt"]
+    assert "case.png" not in body["prompt"]
+
+
+def test_billed_request_includes_all_assets_linked_back_to_the_current_shot(tmp_path):
+    _write_keyframe(tmp_path, "first.png")
+    _write_keyframe(tmp_path, "hero.png")
+    _write_keyframe(tmp_path, "station.png")
+    _write_keyframe(tmp_path, "case.png")
+    _write_keyframe(tmp_path, "other-shot.png")
+
+    request = prepare_billed_shot_request(
+        project_dir=tmp_path,
+        shot={
+            "id": "s2",
+            "prompt": "The hero opens the case in the station.",
+            "continuity": {
+                "mode": "carry",
+                "first_frame": {"asset_id": "first", "status": "ready"},
+            },
+        },
+        series_bible={
+            "characters": [],
+            "assets": [
+                {
+                    "id": "first",
+                    "reference_images": ["assets/images/generated/first.png"],
+                },
+                {
+                    "id": "hero",
+                    "kind": "character",
+                    "label": "the hero",
+                    "shot_ids": ["s2"],
+                    "reference_images": ["assets/images/generated/hero.png"],
+                },
+                {
+                    "id": "station",
+                    "kind": "scene",
+                    "label": "Central Station",
+                    "shot_ids": ["s2"],
+                    "reference_images": ["assets/images/generated/station.png"],
+                },
+                {
+                    "id": "case",
+                    "kind": "prop",
+                    "label": "sealed case",
+                    "shot_ids": ["s2"],
+                    "reference_images": ["assets/images/generated/case.png"],
+                },
+                {
+                    "id": "unrelated",
+                    "kind": "prop",
+                    "label": "other shot prop",
+                    "shot_ids": ["s9"],
+                    "reference_images": ["assets/images/generated/other-shot.png"],
+                },
+            ],
+        },
+    )
+
+    body = json.loads(request.content)
+    assert len(body["images"]) == 4
+    assert "ATTACHED IMAGE 1 = START FRAME GUIDE" in body["prompt"]
+    assert "ATTACHED IMAGE 2 = CHARACTER IDENTITY REFERENCE for the hero" in body["prompt"]
+    assert "ATTACHED IMAGE 3 = SCENE IDENTITY REFERENCE for Central Station" in body["prompt"]
+    assert "ATTACHED IMAGE 4 = PROP APPEARANCE REFERENCE for sealed case" in body["prompt"]
+    assert "other shot prop" not in body["prompt"]
+
+
+def test_provider_declared_reference_image_limit_is_honored(tmp_path):
+    first = _write_keyframe(tmp_path, "first.png")
+    station = _write_keyframe(tmp_path, "station.png")
+    case = _write_keyframe(tmp_path, "case.png")
+    extra = _write_keyframe(tmp_path, "extra.png")
+
+    inputs = build_video_selector_inputs(
+        project_dir=tmp_path,
+        shot={
+            "id": "s2",
+            "asset_ids": ["station", "case", "extra"],
+            "continuity": {
+                "mode": "carry",
+                "first_frame": {"asset_id": "first", "status": "ready"},
+            },
+        },
+        prompt="Continue the action.",
+        video_model="omni_flash-10s",
+        output_path=tmp_path / "assets" / "video" / "s2.mp4",
+        asset_lookup={
+            "first": {"reference_images": ["assets/images/generated/first.png"]},
+            "station": {
+                "kind": "scene",
+                "reference_images": ["assets/images/generated/station.png"],
+            },
+            "case": {
+                "kind": "prop",
+                "reference_images": ["assets/images/generated/case.png"],
+            },
+            "extra": {
+                "kind": "prop",
+                "reference_images": ["assets/images/generated/extra.png"],
+            },
+        },
+        providers=[
+            {
+                "supports": {"reference_to_video": True},
+                "max_reference_images": 3,
+            }
+        ],
+    )
+
+    assert inputs["reference_image_paths"] == [
+        str(first.resolve()),
+        str(station.resolve()),
+        str(case.resolve()),
+    ]
+    assert str(extra.resolve()) not in inputs["reference_image_paths"]
+
+
+def test_compile_shot_prompt_includes_carry_locks():
+    prompt = compile_shot_prompt(
+        {
+            "prompt": "Lin exits the room.",
+            "characters": [],
+            "continuity": {
+                "mode": "carry",
+                "motion_direction": "screen-left to screen-right",
+                "subject_pose": "running with the envelope in her right hand",
+                "gaze": "toward the stairwell",
+                "lighting": "window light from camera left",
+                "scene_state": "door open behind her",
+            },
+        },
+        character_lookup={},
+        style_lock=None,
+    )
+
+    assert "Continuity locks:" in prompt
+    assert "Do not reverse the established motion direction" in prompt
+
+
 def test_prepare_video_generation_request_freezes_exact_server_payload():
     request = prepare_video_generation_request(
         model="omni_flash-10s",
         prompt="Lin runs",
         size="720x1280",
+        seconds=4,
         images=["data:image/png;base64,aW1hZ2U="],
     )
 
     assert request.path == "/v1/videos"
     assert request.content == (
         b'{"images":["data:image/png;base64,aW1hZ2U="],"model":"omni_flash-10s",'
-        b'"prompt":"Lin runs","size":"720x1280"}'
+        b'"prompt":"Lin runs","seconds":"4","size":"720x1280"}'
     )
     assert b"key" not in request.content.lower()
     assert b"base_url" not in request.content.lower()
@@ -67,6 +564,53 @@ def test_render_uses_one_billed_callback_per_missing_shot_and_reuses_existing(tm
 
     assert generated == ["s2", "s3"]
     assert [item["shot_id"] for item in result["outputs"]] == ["s1", "s2", "s3"]
+
+
+def test_render_regenerates_stale_shot_even_when_previous_video_exists(
+    tmp_path, monkeypatch
+):
+    existing = tmp_path / "assets" / "video" / "s1.mp4"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"old video")
+    storyboard = {
+        "shots": [
+            {
+                "id": "s1",
+                "index": 1,
+                "status": "stale",
+                "output_path": str(existing),
+                "output_url": None,
+            }
+        ]
+    }
+    generated = []
+
+    def generate_missing_shot(shot):
+        generated.append(shot["id"])
+        existing.write_bytes(b"new video")
+        return {
+            "shot_id": shot["id"],
+            "output_path": str(existing),
+            "tool_result": {"url": None},
+            "cost_usd": 0.0,
+        }
+
+    monkeypatch.setattr(
+        "server.app.openmontage_runner.compose_final_video",
+        lambda project_dir, storyboard: existing,
+    )
+
+    result = render_short_drama_project(
+        project_dir=tmp_path,
+        series_bible={"characters": []},
+        storyboard=storyboard,
+        generate_missing_shot=generate_missing_shot,
+    )
+
+    assert generated == ["s1"]
+    assert existing.read_bytes() == b"new video"
+    assert storyboard["shots"][0]["status"] == "complete"
+    assert result["outputs"][0]["tool_result"]["url"] is None
 
 
 def test_render_preserves_successful_children_when_another_child_fails_no_charge(
@@ -118,6 +662,100 @@ def test_build_pipeline_inputs_maps_storyboard_to_openmontage_artifacts():
 
     assert result["scene_plan"]["scenes"][0]["description"] == "Lin in red coat runs"
     assert result["proposal_packet"]["production_plan"]["render_runtime"] == "remotion"
+
+
+def test_build_pipeline_inputs_records_project_aspect_ratio():
+    result = build_pipeline_inputs(
+        {"characters": []},
+        {"shots": [{"id": "s1", "characters": []}]},
+        project_aspect_ratio="16:9",
+    )
+
+    assert result["scene_plan"]["scenes"][0]["metadata"]["aspect_ratio"] == "16:9"
+    assert result["asset_manifest"]["assets"][0]["resolution"] == "1280x720"
+
+
+def test_build_pipeline_inputs_uses_fixed_model_duration_over_legacy_storyboard_values():
+    storyboard = {
+        "shots": [
+            {"id": "s1", "index": 1, "duration_seconds": 4, "characters": []},
+            {"id": "s2", "index": 2, "duration_seconds": 6, "characters": []},
+        ]
+    }
+
+    result = build_pipeline_inputs({"characters": []}, storyboard)
+
+    scenes = result["scene_plan"]["scenes"]
+    assert [(scene["start_seconds"], scene["end_seconds"]) for scene in scenes] == [
+        (0, 10),
+        (10, 20),
+    ]
+    assert [
+        asset["requested_duration_seconds"]
+        for asset in result["asset_manifest"]["assets"]
+    ] == [
+        10,
+        10,
+    ]
+    assert all(
+        "duration_seconds" not in asset
+        for asset in result["asset_manifest"]["assets"]
+    )
+    assert [cut["out_seconds"] for cut in result["edit_decisions"]["cuts"]] == [10, 10]
+    assert result["proposal_packet"]["concept_options"][0]["target_duration_seconds"] == 20
+
+
+def test_scoped_edit_decisions_remove_unselected_cuts_and_rebase_the_timeline():
+    storyboard = {
+        "shots": [
+            {"id": "s1", "index": 1, "duration_seconds": 4, "characters": []},
+            {"id": "s2", "index": 2, "duration_seconds": 6, "characters": []},
+            {"id": "s3", "index": 3, "duration_seconds": 3, "characters": []},
+        ]
+    }
+    inputs = build_pipeline_inputs({"characters": []}, storyboard)
+
+    scoped = _scope_edit_decisions_to_storyboard(
+        inputs["edit_decisions"],
+        {"shots": [storyboard["shots"][0], storyboard["shots"][2]]},
+    )
+
+    assert [cut["id"] for cut in scoped["cuts"]] == ["cut-s1", "cut-s3"]
+    assert [cut["timeline_start_seconds"] for cut in scoped["cuts"]] == [0, 10]
+    assert scoped["total_duration_seconds"] == 20
+
+
+def test_build_pipeline_inputs_does_not_distribute_brief_duration_across_shots():
+    storyboard = {
+        "shots": [
+            {"id": "s1", "index": 1, "characters": []},
+            {"id": "s2", "index": 2, "characters": []},
+            {"id": "s3", "index": 3, "characters": []},
+        ]
+    }
+
+    result = build_pipeline_inputs(
+        {"characters": []}, storyboard, target_duration_seconds=12
+    )
+
+    assert [cut["timeline_duration_seconds"] for cut in result["edit_decisions"]["cuts"]] == [10, 10, 10]
+    assert result["edit_decisions"]["total_duration_seconds"] == 30
+    assert result["proposal_packet"]["concept_options"][0]["target_duration_seconds"] == 30
+
+
+def test_build_pipeline_inputs_does_not_mix_legacy_duration_with_fixed_model_duration():
+    storyboard = {
+        "shots": [
+            {"id": "s1", "index": 1, "duration_seconds": 5, "characters": []},
+            {"id": "s2", "index": 2, "characters": []},
+        ]
+    }
+
+    result = build_pipeline_inputs(
+        {"characters": []}, storyboard, target_duration_seconds=12
+    )
+
+    assert [cut["timeline_duration_seconds"] for cut in result["edit_decisions"]["cuts"]] == [10, 10]
 
 
 def test_build_pipeline_inputs_includes_shot_asset_references():
@@ -181,6 +819,8 @@ def test_write_pipeline_artifacts_writes_openmontage_json_files(tmp_path):
 
 
 def test_compose_final_video_uses_generated_shot_outputs(tmp_path, monkeypatch):
+    from server.app import openmontage_runner as runner
+
     shot_video = tmp_path / "assets" / "video" / "s1.mp4"
     shot_video.parent.mkdir(parents=True)
     shot_video.write_bytes(b"fake shot")
@@ -198,6 +838,11 @@ def test_compose_final_video_uses_generated_shot_outputs(tmp_path, monkeypatch):
         return Proc()
 
     monkeypatch.setattr("server.app.openmontage_runner.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        runner,
+        "_probe_compose_input",
+        lambda _path: {"has_audio": False, "duration_seconds": 10.0},
+    )
 
     final_path = compose_final_video(tmp_path, storyboard)
 
@@ -206,6 +851,8 @@ def test_compose_final_video_uses_generated_shot_outputs(tmp_path, monkeypatch):
 
 
 def test_compose_final_video_normalizes_and_reencodes_inputs(tmp_path, monkeypatch):
+    from server.app import openmontage_runner as runner
+
     first = tmp_path / "assets" / "video" / "s1.mp4"
     second = tmp_path / "assets" / "video" / "s2.mp4"
     first.parent.mkdir(parents=True)
@@ -232,13 +879,18 @@ def test_compose_final_video_normalizes_and_reencodes_inputs(tmp_path, monkeypat
         return Proc()
 
     monkeypatch.setattr("server.app.openmontage_runner.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        runner,
+        "_probe_compose_input",
+        lambda _path: {"has_audio": False, "duration_seconds": 10.0},
+    )
 
     compose_final_video(tmp_path, storyboard)
 
     cmd = captured["cmd"]
     assert cmd.count("-i") == 2
     assert "-filter_complex" in cmd
-    assert "scale=720:1280" in cmd[cmd.index("-filter_complex") + 1]
+    assert "scale=1080:1920" in cmd[cmd.index("-filter_complex") + 1]
     assert "concat=n=2:v=1:a=0" in cmd[cmd.index("-filter_complex") + 1]
     assert "libx264" in cmd
     assert not any(cmd[index:index + 2] == ["-c", "copy"] for index in range(len(cmd) - 1))
@@ -273,6 +925,11 @@ def test_compose_final_video_uses_remotion_bundled_ffmpeg_when_path_missing(tmp_
     monkeypatch.setattr("shutil.which", lambda _: None)
     monkeypatch.setattr(runner, "_remotion_compositor_dir", lambda: bundled_dir, raising=False)
     monkeypatch.setattr("server.app.openmontage_runner.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        runner,
+        "_probe_compose_input",
+        lambda _path: {"has_audio": False, "duration_seconds": 10.0},
+    )
 
     compose_final_video(tmp_path, storyboard)
 
@@ -293,6 +950,11 @@ def test_bundled_ffmpeg_compose_command_uses_supported_filters(tmp_path, monkeyp
     bundled_ffmpeg.parent.mkdir(parents=True)
     bundled_ffmpeg.write_bytes(b"fake ffmpeg")
     monkeypatch.setattr(runner, "_resolve_ffmpeg_executable", lambda: str(bundled_ffmpeg))
+    monkeypatch.setattr(
+        runner,
+        "_probe_compose_input",
+        lambda _path: {"has_audio": False, "duration_seconds": 10.0},
+    )
 
     cmd = runner._build_ffmpeg_compose_command(
         [tmp_path / "s1.mp4", tmp_path / "s2.mp4"],
@@ -300,11 +962,75 @@ def test_bundled_ffmpeg_compose_command_uses_supported_filters(tmp_path, monkeyp
     )
 
     filter_complex = cmd[cmd.index("-filter_complex") + 1]
-    assert "scale=720:1280" in filter_complex
+    assert "scale=1080:1920" in filter_complex
     assert "concat=n=2:v=1:a=0" in filter_complex
     assert "pad=" not in filter_complex
     assert "setsar" not in filter_complex
     assert "fps=" not in filter_complex
+
+
+def test_ffmpeg_compose_command_preserves_audio_and_fills_mute_clips(tmp_path, monkeypatch):
+    from server.app import openmontage_runner as runner
+
+    monkeypatch.setattr(runner, "_resolve_ffmpeg_executable", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        runner,
+        "_probe_compose_input",
+        lambda path: {
+            "has_audio": path.name == "s1.mp4",
+            "duration_seconds": 4.25 if path.name == "s1.mp4" else 3.5,
+        },
+        raising=False,
+    )
+
+    cmd = runner._build_ffmpeg_compose_command(
+        [tmp_path / "s1.mp4", tmp_path / "s2.mp4"],
+        tmp_path / "final.mp4",
+    )
+
+    filter_complex = cmd[cmd.index("-filter_complex") + 1]
+    assert "[0:a:0]" in filter_complex
+    assert "anullsrc=channel_layout=stereo:sample_rate=44100" in filter_complex
+    assert "atrim=0:3.500" in filter_complex
+    assert "concat=n=2:v=1:a=1[outv][outa]" in filter_complex
+    assert cmd[cmd.index("-map") + 1] == "[outv]"
+    assert cmd[cmd.index("-map", cmd.index("-map") + 1) + 1] == "[outa]"
+    assert "aac" in cmd
+
+
+def test_ffmpeg_compose_command_limits_each_clip_to_storyboard_duration(
+    tmp_path, monkeypatch
+):
+    from server.app import openmontage_runner as runner
+
+    monkeypatch.setattr(runner, "_resolve_ffmpeg_executable", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        runner,
+        "_probe_compose_input",
+        lambda _path: {"has_audio": True, "duration_seconds": 10.005},
+    )
+
+    cmd = runner._build_ffmpeg_compose_command(
+        [tmp_path / "s1.mp4", tmp_path / "s2.mp4"],
+        tmp_path / "final.mp4",
+        shot_durations=[4, 6],
+    )
+
+    filter_complex = cmd[cmd.index("-filter_complex") + 1]
+    assert cmd[cmd.index(str(tmp_path / "s1.mp4")) - 3 : cmd.index(str(tmp_path / "s1.mp4"))] == [
+        "-t",
+        "4.000",
+        "-i",
+    ]
+    assert cmd[cmd.index(str(tmp_path / "s2.mp4")) - 3 : cmd.index(str(tmp_path / "s2.mp4"))] == [
+        "-t",
+        "6.000",
+        "-i",
+    ]
+    assert "[0:a:0]aresample=44100" in filter_complex
+    assert "apad,atrim=0:4.000" in filter_complex
+    assert "apad,atrim=0:6.000" in filter_complex
+    assert cmd[-3:] == ["-t", "10.000", str(tmp_path / "final.mp4")]
 
 
 def test_render_short_drama_project_reports_probed_output_metadata(tmp_path, monkeypatch):

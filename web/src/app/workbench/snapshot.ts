@@ -31,6 +31,10 @@ export function collectRemoteMediaSourcePaths(
   for (const shot of snapshot.storyboard.shots) {
     add(shot.output_path ?? shot.output_url);
   }
+  for (const output of snapshot.render_report?.outputs ?? []) {
+    add(output.path);
+    add(output.media_url);
+  }
   add(snapshot.final_path);
   return Array.from(sources).sort();
 }
@@ -63,7 +67,7 @@ export function applyCommittedMediaOverlays(
         const localRef = isRemoteMediaSource(activeSource)
           ? overlays.get(activeSource)
           : undefined;
-        return localRef ? { ...shot, output_path: localRef, output_url: null } : shot;
+        return localRef ? { ...shot, output_path: localRef, output_url: activeSource } : shot;
       }),
     },
     final_path: isRemoteMediaSource(snapshot.final_path)
@@ -152,7 +156,11 @@ export function mergeAuthoritativeMediaOverlays(
           && isLocalMediaRef(currentShot.output_path)
           && Boolean(shot.output_path || shot.output_url);
         return compatible
-          ? { ...shot, output_path: currentShot.output_path, output_url: null }
+          ? {
+              ...shot,
+              output_path: currentShot.output_path,
+              output_url: shot.output_path ?? shot.output_url,
+            }
           : shot;
       }),
     },
@@ -171,6 +179,7 @@ export function emptyContinuityPlan(projectType: ProjectType): ContinuityPlan {
       main_arc: "",
       style_lock: "",
       visual_rules: "",
+      series_prompt: "",
       taboos: [],
       locations: [],
       props: [],
@@ -185,6 +194,21 @@ export function emptyContinuityPlan(projectType: ProjectType): ContinuityPlan {
       prop_state: [],
       character_status: [],
       current_locations: [],
+    },
+    sound: {
+      narration: "",
+      dialogue: "",
+      ambience: "",
+      music_direction: "",
+      prompt: "",
+      storyboard_prompt_integration: false,
+    },
+    generation_preferences: {
+      image_model: "gpt-image-2",
+      video_model: "omni_flash-10s",
+      image_size: "1024x1024",
+      image_quality: "standard",
+      aspect_ratio: "16:9",
     },
   };
 }

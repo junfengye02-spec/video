@@ -22,6 +22,8 @@ ARTIFACT_NAMES = [
     "action_timeline",
     "asset_manifest",
     "edit_decisions",
+    "generation_execution",
+    "generation_plan",
     "render_report",
     "publish_log",
     "review",
@@ -39,7 +41,7 @@ def load_schema(name: str) -> dict:
     path = SCHEMA_DIR / f"{name}.schema.json"
     if not path.exists():
         raise FileNotFoundError(f"Schema not found: {path}")
-    with open(path) as f:
+    with path.open(encoding="utf-8") as f:
         return json.load(f)
 
 

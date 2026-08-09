@@ -1,0 +1,472 @@
+.root {
+  display: grid;
+  container-name: shot-inspector;
+  container-type: inline-size;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border-left: 1px solid var(--color-line);
+  background: var(--color-surface);
+}
+
+.header {
+  display: flex;
+  min-width: 0;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 7px var(--space-4);
+  border-bottom: 1px solid var(--color-line);
+}
+
+.header > div {
+  min-width: 0;
+}
+
+.header h2 {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: .875rem;
+  font-weight: 650;
+}
+
+.header > div > span {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--color-ink-faint);
+  font-family: var(--font-mono);
+  font-size: .625rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirtyStatus {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: .6875rem;
+  font-weight: 650;
+}
+
+.dirtyStatus[data-state="dirty"],
+.dirtyStatus[data-state="outdated"] {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.body {
+  min-height: 0;
+  padding: 0 var(--space-4) var(--space-5);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.generationUnitSection {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.generationUnitHeading,
+.generationUnitHeading > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.generationUnitHeading {
+  justify-content: space-between;
+}
+
+.generationUnitHeading h3 {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: .8125rem;
+  font-weight: 650;
+}
+
+.generationUnitHeading > span {
+  flex: 0 0 auto;
+  color: var(--color-accent);
+  font-family: var(--font-mono);
+  font-size: .6875rem;
+  font-weight: 700;
+}
+
+.generationUnitDetails {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.generationUnitDetails > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: var(--space-2);
+}
+
+.generationUnitDetails dt,
+.generationUnitDetails dd {
+  margin: 0;
+  font-size: .75rem;
+  line-height: 1.45;
+}
+
+.generationUnitDetails dt {
+  color: var(--color-ink-muted);
+}
+
+.generationUnitDetails dd {
+  color: var(--color-ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.generationUnitSection > button {
+  width: 100%;
+}
+
+.section {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-5) 0;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.section > h3,
+.sectionHeading h3 {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: .8125rem;
+  font-weight: 650;
+}
+
+.sectionHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.sectionHeading > span {
+  color: var(--color-ink-faint);
+  font-size: .6875rem;
+}
+
+.readonlyField,
+.fields label,
+.cameraGrid label {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.readonlyField > span,
+.fields label > span,
+.cameraGrid label > span {
+  color: var(--color-ink-muted);
+  font-size: .75rem;
+  font-weight: 600;
+}
+
+.readonlyField p {
+  margin: 0;
+  color: var(--color-ink-secondary);
+  font-size: .8125rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.fields {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.fields input,
+.fields select,
+.fields textarea,
+.cameraGrid select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-2);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: .8125rem;
+  outline: none;
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard);
+}
+
+.fields input,
+.fields select,
+.cameraGrid select {
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.fields textarea {
+  min-height: 90px;
+  padding: 9px 10px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.fields input:focus,
+.fields select:focus,
+.fields textarea:focus,
+.cameraGrid select:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
+}
+
+.fields input:disabled,
+.fields select:disabled,
+.fields textarea:disabled,
+.cameraGrid select:disabled {
+  cursor: not-allowed;
+  opacity: .52;
+}
+
+.promptField textarea {
+  min-height: 128px;
+}
+
+.cameraGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bindingGroup {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.bindingOptions {
+  display: grid;
+  max-height: 220px;
+  overflow-y: auto;
+  border-block: 1px solid var(--color-line);
+}
+
+.bindingOptions label {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-2);
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--color-line);
+  color: var(--color-ink-secondary);
+  font-size: .75rem;
+}
+
+.bindingOptions label:last-child {
+  border-bottom: 0;
+}
+
+.bindingOptions input {
+  width: 16px;
+  min-height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--color-accent);
+}
+
+.bindingOptions span,
+.bindingOptions small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bindingOptions small {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-ink-faint);
+  font-size: .6875rem;
+}
+
+.generationMode {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 7px;
+  margin-top: var(--space-4);
+  padding: 7px 9px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-2);
+  background: var(--color-surface-raised);
+  color: var(--color-ink-muted);
+  font-size: .75rem;
+}
+
+.generationMode span {
+  overflow-wrap: anywhere;
+}
+
+.continuityControls,
+.keyframeActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.keyframeActions > button {
+  width: 100%;
+  min-width: 0;
+}
+
+.continuityControls label,
+.keyframeActions label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.continuityControls label > span,
+.keyframeActions label > span {
+  color: var(--color-ink-muted);
+  font-size: .75rem;
+  font-weight: 600;
+}
+
+.continuityControls select,
+.keyframeActions select,
+.keyframeActions input[type="file"] {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 9px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-2);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: .75rem;
+}
+
+.inheritToggle {
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-content: end;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 9px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-2);
+}
+
+.inheritToggle input {
+  width: 16px;
+  min-height: 16px;
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.keyframeGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.keyframeItem {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  background: var(--color-surface-raised);
+}
+
+.keyframeHeading {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--color-ink-secondary);
+  font-size: .75rem;
+  font-weight: 650;
+}
+
+.keyframePreview {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--color-canvas-deep);
+  color: var(--color-ink-faint);
+}
+
+.keyframePreview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.frameSource,
+.frameStatus {
+  color: var(--color-ink-muted);
+  font-size: .6875rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.frameError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--color-danger);
+  font-size: .75rem;
+}
+
+.empty {
+  margin: 0;
+  padding: var(--space-5) 0;
+  color: var(--color-ink-muted);
+  font-size: .8125rem;
+}
+
+@container shot-inspector (max-width: 340px) {
+  .keyframeActions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1179px) {
+  .root {
+    border-left: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .cameraGrid,
+  .continuityControls,
+  .keyframeActions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fields input,
+  .fields textarea,
+  .cameraGrid select {
+    transition-duration: .01ms;
+  }
+}

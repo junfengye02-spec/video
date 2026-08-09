@@ -1,0 +1,14 @@
+{
+  "path": "C:\\Users\\zhuba\\Desktop\\OpenMontage\\videro\\tmp\\generation-units-real-ffmpeg-final\\test_real_ffmpeg_generation_un0\\real-ffmpeg-project\\renders\\final.mp4",
+  "file_size_bytes": 8063,
+  "duration_seconds": 3.0,
+  "has_video": true,
+  "video_width": 320,
+  "video_height": 180,
+  "video_codec": "h264",
+  "fps": 30.0,
+  "has_audio": true,
+  "audio_codec": "aac",
+  "audio_channels": 2,
+  "audio_sample_rate": 48000
+}

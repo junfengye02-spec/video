@@ -63,8 +63,23 @@ class HiddenVideoArtifact:
 class VideoGenerationIntent:
     project_id: str
     job_id: str
-    shot_id: str
-    shot_version: int
+    shot_id: str | None = None
+    shot_version: int | None = None
+    generation_unit_id: str | None = None
+    generation_unit_revision: int | None = None
+    generation_key: str | None = None
+
+    @property
+    def target_entity_type(self) -> str:
+        return "generation_unit" if self.generation_unit_id is not None else "shot_video"
+
+    @property
+    def target_entity_id(self) -> str:
+        return str(self.generation_unit_id or self.shot_id or "")
+
+    @property
+    def target_entity_version(self) -> int:
+        return int(self.generation_unit_revision or self.shot_version or 0)
 
 
 class HiddenVideoDestination:
@@ -411,6 +426,16 @@ class WorkbenchStore:
             capability="video",
         )
 
+    def read_staged_sync_result(self, locator: str) -> bytes:
+        match = _HIDDEN_SYNC_LOCATOR.fullmatch(locator) if type(locator) is str else None
+        if match is None:
+            raise ValueError("Synchronous result locator is invalid")
+        project_id, job_id = match.groups()
+        self._inspect_hidden_sync_artifact(locator, project_id, job_id)
+        result_path = self._hidden_sync_dir(project_id, create=False) / job_id / "response.bin"
+        _require_regular_unlinked_file(result_path, "synchronous result")
+        return result_path.read_bytes()
+
     def stage_sync_result(
         self,
         *,
@@ -500,6 +525,7 @@ class WorkbenchStore:
         *,
         progress_callback: Callable[[], None] | None = None,
         commit_guard: Callable[[], None] | None = None,
+        replace_existing: bool = True,
     ) -> None:
         artifact = self.inspect_staged_artifact(locator)
         match = _HIDDEN_VIDEO_LOCATOR.fullmatch(locator)
@@ -509,6 +535,17 @@ class WorkbenchStore:
         source = self._hidden_video_dir(project_id, create=False) / artifact_id / "video.mp4"
         _require_regular_unlinked_file(source, "staged video")
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if not replace_existing and (
+                not destination.is_file()
+                or _is_link_or_junction(destination)
+                or _sha256_file(destination) != artifact.sha256
+            ):
+                raise ValueError("Published video revision conflicts with existing media")
+            if not replace_existing:
+                if commit_guard is not None:
+                    commit_guard()
+                return
         temporary = destination.with_name(
             f".{destination.name}.{uuid.uuid4().hex}.publish"
         )
@@ -524,10 +561,34 @@ class WorkbenchStore:
                 progress_callback()
             if commit_guard is not None:
                 commit_guard()
-            os.replace(temporary, destination)
+            if replace_existing:
+                os.replace(temporary, destination)
+            else:
+                try:
+                    os.link(temporary, destination)
+                except FileExistsError:
+                    if (
+                        not destination.is_file()
+                        or _is_link_or_junction(destination)
+                        or _sha256_file(destination) != artifact.sha256
+                    ):
+                        raise ValueError(
+                            "Published video revision conflicts with existing media"
+                        ) from None
+                temporary.unlink(missing_ok=True)
             _fsync_directory(destination.parent)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def staged_video_path(self, locator: str) -> Path:
+        artifact = self.inspect_staged_artifact(locator)
+        match = _HIDDEN_VIDEO_LOCATOR.fullmatch(locator)
+        if match is None or artifact.capability != "video":
+            raise ValueError("Staged video locator is invalid")
+        project_id, artifact_id = match.groups()
+        source = self._hidden_video_dir(project_id, create=False) / artifact_id / "video.mp4"
+        _require_regular_unlinked_file(source, "staged video")
+        return source
 
     def record_video_generation_intent(
         self,
@@ -563,6 +624,53 @@ class WorkbenchStore:
         _fsync_directory(root)
         return VideoGenerationIntent(canonical_id, job_id, shot_id, shot_version)
 
+    def record_generation_unit_video_intent(
+        self,
+        *,
+        project_id: str,
+        job_id: str,
+        generation_unit_id: str,
+        generation_unit_revision: int,
+        generation_key: str,
+    ) -> VideoGenerationIntent:
+        canonical_id = canonical_project_id(project_id)
+        if _OPERATION_ID_PATTERN.fullmatch(job_id) is None:
+            raise ValueError("Video billing job identifier is invalid")
+        if _SHOT_ID_PATTERN.fullmatch(generation_unit_id) is None:
+            raise ValueError("Video generation unit identifier is invalid")
+        if type(generation_unit_revision) is not int or generation_unit_revision < 1:
+            raise ValueError("Video generation unit revision is invalid")
+        if (
+            type(generation_key) is not str
+            or len(generation_key) != 64
+            or any(character not in "0123456789abcdef" for character in generation_key)
+        ):
+            raise ValueError("Video generation key is invalid")
+        root = self._video_intent_dir(canonical_id)
+        path = root / f"{job_id}.json"
+        payload = {
+            "project_id": canonical_id,
+            "job_id": job_id,
+            "generation_unit_id": generation_unit_id,
+            "generation_unit_revision": generation_unit_revision,
+            "generation_key": generation_key,
+        }
+        expected = VideoGenerationIntent(
+            canonical_id,
+            job_id,
+            generation_unit_id=generation_unit_id,
+            generation_unit_revision=generation_unit_revision,
+            generation_key=generation_key,
+        )
+        if path.exists():
+            existing = self.read_video_generation_intent(canonical_id, job_id)
+            if existing != expected:
+                raise ValueError("Video generation intent conflicts with existing binding")
+            return existing
+        _write_json_durable(path, payload)
+        _fsync_directory(root)
+        return expected
+
     def read_video_generation_intent(
         self, project_id: str, job_id: str
     ) -> VideoGenerationIntent:
@@ -575,24 +683,51 @@ class WorkbenchStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             raise ValueError("Video generation intent is invalid") from None
-        expected = {
+        shot_expected = {
             "project_id": canonical_id,
             "job_id": job_id,
             "shot_id": payload.get("shot_id"),
             "shot_version": payload.get("shot_version"),
         }
+        if payload == shot_expected:
+            if (
+                _SHOT_ID_PATTERN.fullmatch(payload.get("shot_id") or "") is None
+                or type(payload.get("shot_version")) is not int
+                or payload["shot_version"] < 1
+            ):
+                raise ValueError("Video generation intent is invalid")
+            return VideoGenerationIntent(
+                canonical_id,
+                job_id,
+                payload["shot_id"],
+                payload["shot_version"],
+            )
+
+        unit_expected = {
+            "project_id": canonical_id,
+            "job_id": job_id,
+            "generation_unit_id": payload.get("generation_unit_id"),
+            "generation_unit_revision": payload.get("generation_unit_revision"),
+            "generation_key": payload.get("generation_key"),
+        }
+        generation_key = payload.get("generation_key")
         if (
-            payload != expected
-            or _SHOT_ID_PATTERN.fullmatch(payload.get("shot_id") or "") is None
-            or type(payload.get("shot_version")) is not int
-            or payload["shot_version"] < 1
+            payload != unit_expected
+            or _SHOT_ID_PATTERN.fullmatch(payload.get("generation_unit_id") or "")
+            is None
+            or type(payload.get("generation_unit_revision")) is not int
+            or payload["generation_unit_revision"] < 1
+            or type(generation_key) is not str
+            or len(generation_key) != 64
+            or any(character not in "0123456789abcdef" for character in generation_key)
         ):
             raise ValueError("Video generation intent is invalid")
         return VideoGenerationIntent(
             canonical_id,
             job_id,
-            payload["shot_id"],
-            payload["shot_version"],
+            generation_unit_id=payload["generation_unit_id"],
+            generation_unit_revision=payload["generation_unit_revision"],
+            generation_key=generation_key,
         )
 
     def delete_video_generation_intent(self, project_id: str, job_id: str) -> None:

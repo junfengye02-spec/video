@@ -26,6 +26,10 @@ export interface LocalProjectSummary {
   updatedAt: string;
   shotCount: number;
   hasFinalRender: boolean;
+  cover?: {
+    kind: "image" | "video";
+    source: string;
+  } | null;
 }
 
 export interface LocalSettingsRecord {

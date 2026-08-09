@@ -1,7 +1,15 @@
-import { Download, FilePlus2, FolderOpen, Trash2, Upload, X } from "lucide-react";
-import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import {
+  FolderOpen,
+  Search,
+  Upload,
+  X,
+} from "lucide-react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import { projectRoutes } from "../app/routes";
+import { ProjectComposer } from "../components/projects/ProjectComposer";
+import { ProjectCard } from "../components/projects/ProjectCard";
+import type { DraftProjectRequest, ShortDramaProjectResponse } from "../domain/types";
 import { projectRepository } from "../features/projects/ProjectRepository";
 import { getStrings } from "../i18n";
 import { ProjectImportConflictError } from "../localdb/exportProject";
@@ -9,6 +17,8 @@ import { BackupWorkerUnavailableError } from "../localdb/backupArchiveClient";
 import type { BackupReadProgress } from "../localdb/backupFormat";
 import type { LocalProjectSummary } from "../localdb/types";
 import { downloadBlob } from "../utils/downloadBlob";
+import { Button, Dialog } from "../shared/ui";
+import styles from "./ProjectsPage.module.css";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -25,10 +35,25 @@ type ImportSource =
 
 const directoryPickerAttributes = { webkitdirectory: "" } as const;
 
-export function ProjectsPage() {
+export interface ProjectsPageProps {
+  onCreateDraft?: (input: DraftProjectRequest) => Promise<ShortDramaProjectResponse>;
+  onStarted?: (projectId: string, initialMessage: string, textModel: string) => void;
+  onSessionExpired?: () => void;
+  walletAvailableUnits?: number | null;
+  autoFocusComposer?: boolean;
+}
+
+export function ProjectsPage({
+  autoFocusComposer = false,
+  onCreateDraft = (input) => projectRepository.createDraft(input),
+  onSessionExpired,
+  onStarted,
+  walletAvailableUnits = null,
+}: ProjectsPageProps = {}) {
   const strings = getStrings("zh").projectsPage;
   const navigate = useNavigate();
   const [projects, setProjects] = useState<LocalProjectSummary[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<LocalProjectSummary | null>(null);
@@ -81,11 +106,8 @@ export function ProjectsPage() {
     }
   }
 
-  function openDeleteDialog(
-    event: MouseEvent<HTMLButtonElement>,
-    project: LocalProjectSummary,
-  ) {
-    deleteOpenerRef.current = event.currentTarget;
+  function openDeleteDialog(project: LocalProjectSummary, opener: HTMLButtonElement) {
+    deleteOpenerRef.current = opener;
     setDeleteTarget(project);
   }
 
@@ -95,13 +117,6 @@ export function ProjectsPage() {
     }
     setDeleteTarget(null);
     window.queueMicrotask(() => deleteOpenerRef.current?.focus());
-  }
-
-  function handleDeleteDialogKeyDown(event: KeyboardEvent<HTMLDialogElement>) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeDeleteDialog();
-    }
   }
 
   async function handleExport(project: LocalProjectSummary) {
@@ -181,151 +196,147 @@ export function ProjectsPage() {
     await runImport(source, true);
   }
 
+  const normalizedQuery = searchQuery.trim().toLocaleLowerCase("zh-CN");
+  const visibleProjects = normalizedQuery
+    ? projects.filter((project) => project.title.toLocaleLowerCase("zh-CN").includes(normalizedQuery))
+    : projects;
+  const startProject = onStarted ?? ((projectId: string, initialMessage: string, textModel: string) => {
+    navigate(projectRoutes.idea(projectId), { state: { initialMessage, textModel } });
+  });
+
   return (
     <section className="projects-page" aria-labelledby="projects-title">
-      <div className="page-heading">
-        <div>
-          <h1 id="projects-title">{strings.title}</h1>
-          <p>{strings.localStorageNote}</p>
-        </div>
-        <div className="page-actions">
-          <label className={`button-like async-action ${workerUnavailable ? "secondary-import-action" : ""}`}>
-            <Upload aria-hidden="true" size={16} />
-            {importing ? strings.importingAction : strings.importAction}
-            <input
-              className="sr-only"
-              type="file"
-              accept=".omproj,.zip"
-              aria-label={strings.importAction}
-              disabled={importing}
-              onChange={handleArchiveImport}
-            />
-          </label>
-          <label className={`button-like async-action ${workerUnavailable ? "primary-import-action" : ""}`}>
-            <FolderOpen aria-hidden="true" size={16} />
-            {strings.importDirectoryAction}
-            <input
-              {...directoryPickerAttributes}
-              className="sr-only"
-              type="file"
-              multiple
-              aria-label={strings.importDirectoryAction}
-              disabled={importing}
-              onChange={handleDirectoryImport}
-            />
-          </label>
-          {importing ? (
-            <button
-              className="cancel-import-action"
-              type="button"
-              onClick={() => importControllerRef.current?.abort()}
-            >
-              <X aria-hidden="true" size={16} />
-              {strings.cancelImportAction}
-            </button>
-          ) : null}
-          <Link to={projectRoutes.create}>
-            <FilePlus2 aria-hidden="true" size={16} />
-            {strings.createAction}
-          </Link>
-        </div>
-      </div>
+      <section className="projects-creation-focus">
+        <header className="projects-hero-heading">
+          <span>mise studio</span>
+          <h1 id="projects-title">让想法入镜</h1>
+        </header>
+        <ProjectComposer
+          autoFocus={autoFocusComposer}
+          onCreateDraft={onCreateDraft}
+          onStarted={startProject}
+          onSessionExpired={onSessionExpired}
+          walletAvailableUnits={walletAvailableUnits}
+        />
+      </section>
 
-      {error ? <p role="alert">{error}</p> : null}
-      {importProgress ? (
-        <p className="import-progress" role="status" aria-live="polite">
-          {strings.importProgress(
-            importProgress.bytesRead,
-            importProgress.totalBytes,
-            importProgress.entriesRead,
-            importProgress.totalEntries,
-          )}
-        </p>
-      ) : null}
-      {loading ? <p>{strings.loading}</p> : null}
-      {!loading && projects.length === 0 ? <p>{strings.emptyState}</p> : null}
+      <section className="project-history" aria-labelledby="project-history-title">
+        <header className="project-history-heading">
+          <div>
+            <h2 id="project-history-title">最近项目</h2>
+            <p>{projects.length} 个项目 · {strings.localStorageNote}</p>
+          </div>
+          <div className="project-history-tools">
+            <label className="project-search">
+              <Search aria-hidden="true" size={15} />
+              <span className="sr-only">搜索项目</span>
+              <input
+                type="search"
+                value={searchQuery}
+                placeholder="搜索项目"
+                onChange={(event) => setSearchQuery(event.target.value)}
+              />
+            </label>
+            <label className={`button-like ${workerUnavailable ? "secondary-import-action" : ""}`}>
+              <Upload aria-hidden="true" size={15} />
+              {importing ? strings.importingAction : strings.importAction}
+              <input
+                className="sr-only"
+                type="file"
+                accept=".omproj,.zip"
+                aria-label={strings.importAction}
+                disabled={importing}
+                onChange={handleArchiveImport}
+              />
+            </label>
+            <label className={`button-like ${workerUnavailable ? "primary-import-action" : ""}`}>
+              <FolderOpen aria-hidden="true" size={15} />
+              {strings.importDirectoryAction}
+              <input
+                {...directoryPickerAttributes}
+                className="sr-only"
+                type="file"
+                multiple
+                aria-label={strings.importDirectoryAction}
+                disabled={importing}
+                onChange={handleDirectoryImport}
+              />
+            </label>
+            {importing ? (
+              <button
+                className="cancel-import-action"
+                type="button"
+                onClick={() => importControllerRef.current?.abort()}
+              >
+                <X aria-hidden="true" size={15} />
+                {strings.cancelImportAction}
+              </button>
+            ) : null}
+          </div>
+        </header>
 
-      {!loading && projects.length > 0 ? (
-        <ul className="project-list">
-          {projects.map((project) => (
-            <li key={project.id} className="project-list-item project-item">
-              <div>
-                <h2>{project.title}</h2>
-                <p>{strings.shotCount(project.shotCount)}</p>
-                <time dateTime={project.updatedAt}>
-                  {strings.updatedAt(new Date(project.updatedAt).toLocaleString("zh-CN"))}
-                </time>
-                <span className={`status-pill ${project.hasFinalRender ? "status-complete" : "status-pending"}`}>
-                  {project.hasFinalRender ? "已有成片" : "未生成成片"}
-                </span>
-              </div>
-              <div className="project-actions">
-                <Link
-                  to={projectRoutes.storyboard(project.id)}
-                  aria-label={strings.openProject(project.title)}
-                >
-                  <FolderOpen aria-hidden="true" size={16} />
-                  {strings.openAction}
-                </Link>
-                <button
-                  className="async-action"
-                  type="button"
-                  aria-label={strings.exportProject(project.title)}
-                  disabled={exportingIds.has(project.id)}
-                  onClick={() => void handleExport(project)}
-                >
-                  <Download aria-hidden="true" size={16} />
-                  {exportingIds.has(project.id) ? strings.exportingAction : strings.exportAction}
-                </button>
-                <button
-                  type="button"
-                  aria-label={strings.deleteProject(project.title)}
-                  onClick={(event) => openDeleteDialog(event, project)}
-                >
-                  <Trash2 aria-hidden="true" size={16} />
-                  {strings.deleteAction}
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      ) : null}
+        {error ? <p role="alert">{error}</p> : null}
+        {importProgress ? (
+          <p className="import-progress" role="status" aria-live="polite">
+            {strings.importProgress(
+              importProgress.bytesRead,
+              importProgress.totalBytes,
+              importProgress.entriesRead,
+              importProgress.totalEntries,
+            )}
+          </p>
+        ) : null}
+        {loading ? <p className="project-history-state">{strings.loading}</p> : null}
+        {!loading && projects.length === 0 ? (
+          <p className="project-history-state">{strings.emptyState}</p>
+        ) : null}
+        {!loading && projects.length > 0 && visibleProjects.length === 0 ? (
+          <p className="project-history-state">没有匹配的项目。</p>
+        ) : null}
 
-      {deleteTarget ? (
-        <dialog
-          open
-          aria-modal="true"
-          aria-labelledby="delete-project-title"
-          onCancel={(event) => {
-            event.preventDefault();
-            closeDeleteDialog();
-          }}
-          onKeyDown={handleDeleteDialogKeyDown}
-        >
-          <h2 id="delete-project-title">{strings.deleteDialogTitle}</h2>
+        {!loading && visibleProjects.length > 0 ? (
+          <ul className={styles.projectGrid}>
+            {visibleProjects.map((project) => (
+              <ProjectCard
+                key={project.id}
+                project={project}
+                exporting={exportingIds.has(project.id)}
+                onExport={(item) => void handleExport(item)}
+                onDelete={openDeleteDialog}
+              />
+            ))}
+          </ul>
+        ) : null}
+      </section>
+
+      <Dialog
+        open={Boolean(deleteTarget)}
+        title={strings.deleteDialogTitle}
+        openerRef={deleteOpenerRef}
+        onClose={closeDeleteDialog}
+      >
+        {deleteTarget ? (
+          <>
           <p>{strings.deleteDialogBody(deleteTarget.title)}</p>
           <div>
-            <button type="button" autoFocus disabled={deleting} onClick={closeDeleteDialog}>
+            <Button type="button" disabled={deleting} onClick={closeDeleteDialog}>
               {strings.cancelAction}
-            </button>
-            <button className="async-action" type="button" disabled={deleting} onClick={() => void handleDelete()}>
+            </Button>
+            <Button className="async-action" variant="danger" loading={deleting} type="button" onClick={() => void handleDelete()}>
               {deleting ? strings.deletingAction : strings.confirmDeleteAction}
-            </button>
+            </Button>
           </div>
-        </dialog>
-      ) : null}
+          </>
+        ) : null}
+      </Dialog>
 
-      {importConflict ? (
-        <dialog
-          open
-          aria-modal="true"
-          aria-labelledby="overwrite-project-title"
-          onCancel={(event) => {
-            event.preventDefault();
-            if (!importing) setImportConflict(null);
-          }}
-        >
-          <h2 id="overwrite-project-title">{strings.overwriteDialogTitle}</h2>
+      <Dialog
+        open={Boolean(importConflict)}
+        title={strings.overwriteDialogTitle}
+        onClose={() => { if (!importing) setImportConflict(null); }}
+      >
+        {importConflict ? (
+          <>
           <p>
             {strings.overwriteDialogBody(
               projects.find((project) => project.id === importConflict.projectId)?.title ??
@@ -333,25 +344,25 @@ export function ProjectsPage() {
             )}
           </p>
           <div>
-            <button
+            <Button
               type="button"
-              autoFocus
               disabled={importing}
               onClick={() => setImportConflict(null)}
             >
               {strings.cancelAction}
-            </button>
-            <button
-              className="async-action"
+            </Button>
+            <Button
+              variant="danger"
               type="button"
-              disabled={importing}
+              loading={importing}
               onClick={() => void confirmOverwrite()}
             >
               {importing ? strings.overwritingAction : strings.confirmOverwriteAction}
-            </button>
+            </Button>
           </div>
-        </dialog>
-      ) : null}
+          </>
+        ) : null}
+      </Dialog>
     </section>
   );
 }

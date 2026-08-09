@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import re
 from collections.abc import Mapping
@@ -31,7 +32,7 @@ class AppSettings(BaseSettings):
     redis_prefix: str = "openmontage:"
     public_origin: str = "http://127.0.0.1:5173"
     session_cookie_name: str = "om_session"
-    session_cookie_secure: bool = True
+    session_cookie_secure: bool = False
     session_idle_seconds: int = Field(default=7 * 24 * 60 * 60, gt=0)
     session_absolute_seconds: int = Field(default=30 * 24 * 60 * 60, gt=0)
     auth_hmac_secret: str = Field(min_length=32)
@@ -50,16 +51,29 @@ class AppSettings(BaseSettings):
         validation_alias="NEWAPI_TEXT_TOKEN_KEYS_JSON",
     )
     newapi_text_current_token_alias: str | None = None
+    newapi_text_fixed_group: str = Field(
+        default="openmontage-text", min_length=1, max_length=200
+    )
+    newapi_planning_text_model: str = Field(
+        default="gpt-5.5", min_length=1, max_length=200
+    )
     newapi_image_token_keys: Annotated[dict[str, SecretStr], NoDecode] = Field(
         default_factory=dict,
         validation_alias="NEWAPI_IMAGE_TOKEN_KEYS_JSON",
     )
     newapi_image_current_token_alias: str | None = None
+    newapi_image_fixed_group: str = Field(
+        default="openmontage-image", min_length=1, max_length=200
+    )
     newapi_video_token_keys: Annotated[dict[str, SecretStr], NoDecode] = Field(
         default_factory=dict,
         validation_alias="NEWAPI_VIDEO_TOKEN_KEYS_JSON",
     )
     newapi_video_current_token_alias: str | None = None
+    newapi_video_fixed_group: str = Field(
+        default="openmontage-video", min_length=1, max_length=200
+    )
+    newapi_video_download_host: str | None = None
     billing_reference_recovery_seconds: int = Field(
         default=86_400, gt=0, strict=True
     )
@@ -72,6 +86,8 @@ class AppSettings(BaseSettings):
         default=536_870_912, gt=0, strict=True
     )
     billing_default_multiplier_bps: int | None = Field(default=None, gt=0, strict=True)
+    billing_worker_heartbeat_ttl_seconds: int = Field(default=15, gt=0, strict=True)
+    generation_units_v2: bool = False
 
     def __init__(self, **values):
         try:
@@ -91,6 +107,7 @@ class AppSettings(BaseSettings):
         "epay_pay_address",
         "epay_id",
         "epay_key",
+        "newapi_video_download_host",
         mode="before",
     )
     @classmethod
@@ -104,6 +121,7 @@ class AppSettings(BaseSettings):
         "billing_quote_stale_retries",
         "billing_max_video_bytes",
         "billing_default_multiplier_bps",
+        "billing_worker_heartbeat_ttl_seconds",
         mode="before",
     )
     @classmethod
@@ -178,6 +196,27 @@ class AppSettings(BaseSettings):
         ):
             raise ValueError("newapi_base_url must be a clean HTTP(S) origin")
         return f"{parsed.scheme}://{parsed.netloc}"
+
+    @field_validator("newapi_video_download_host")
+    @classmethod
+    def validate_newapi_video_download_host(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.lower()
+        try:
+            ipaddress.ip_address(normalized)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("newapi_video_download_host must be a DNS hostname")
+        hostname = re.fullmatch(
+            r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+            normalized,
+        )
+        if hostname is None:
+            raise ValueError("newapi_video_download_host must be a DNS hostname")
+        return normalized
 
     @model_validator(mode="after")
     def validate_newapi_keyrings(self):

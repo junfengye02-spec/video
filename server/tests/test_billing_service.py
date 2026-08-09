@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import httpx
-import json
 import os
 import time
 import uuid
@@ -253,7 +252,7 @@ def test_reservation_snapshots_quote_and_creates_exact_hold_and_deadlines(
     assert child.reference_deadline == NOW + timedelta(seconds=86_400)
     assert child.receipt_deadline == NOW + timedelta(seconds=86_400)
     assert hold is not None
-    assert hold.amount_units == 4_347_000
+    assert hold.amount_units == 4_350_000
     assert hold.expires_at.replace(tzinfo=timezone.utc) == NOW + timedelta(seconds=86_400)
 
 
@@ -307,6 +306,73 @@ def test_zero_or_incomplete_quote_is_rejected_before_job_or_hold(
 
     assert db_session.scalar(select(func.count(GenerationJob.id))) == jobs_before
     assert db_session.scalar(select(func.count(WalletHold.id))) == 0
+
+
+def test_configured_fixed_group_is_used_for_quote_validation(
+    db_session: Session,
+    artifact_store: ArtifactStore,
+) -> None:
+    settings = SimpleNamespace(
+        billing_reference_recovery_seconds=86_400,
+        billing_receipt_deadline_seconds=86_400,
+        billing_hold_timeout_seconds=86_400,
+        newapi_video_fixed_group="provider-video-group",
+    )
+    service = BillingService(
+        db_session,
+        settings,
+        artifact_inspector=artifact_store.inspect,
+        now=lambda: NOW,
+    )
+
+    child = service.reserve_provider_call(
+        user_id=USER_ID,
+        project_id=PROJECT_ID,
+        parent_job_id=None,
+        capability="video",
+        operation="shot:s1",
+        provider_method="POST",
+        provider_route="/v1/videos",
+        quote=usage_quote(fixed_group="provider-video-group"),
+    )
+
+    assert child.status == "reserved"
+
+
+def test_configured_text_fixed_group_is_used_for_storyboard_quote_validation(
+    db_session: Session,
+    artifact_store: ArtifactStore,
+) -> None:
+    settings = SimpleNamespace(
+        billing_reference_recovery_seconds=86_400,
+        billing_receipt_deadline_seconds=86_400,
+        billing_hold_timeout_seconds=86_400,
+        newapi_text_fixed_group="provider-text-group",
+    )
+    service = BillingService(
+        db_session,
+        settings,
+        artifact_inspector=artifact_store.inspect,
+        now=lambda: NOW,
+    )
+
+    child = service.reserve_provider_call(
+        user_id=USER_ID,
+        project_id=PROJECT_ID,
+        parent_job_id=None,
+        capability="text",
+        operation="storyboard_generation",
+        provider_method="POST",
+        provider_route="/v1/chat/completions",
+        quote=usage_quote(
+            token_alias="text-v1",
+            model="text-model",
+            fixed_group="provider-text-group",
+            relay_format="openai",
+        ),
+    )
+
+    assert child.status == "reserved"
 
 
 def test_nonfinite_or_nonpositive_quote_ratios_are_rejected_before_job(
@@ -434,7 +500,7 @@ def test_quote_replacement_uses_original_multiplier_and_canonical_snapshot(
     assert refreshed.quote_id == "uq_00000000000000000000000000000002"
     assert refreshed.quote_other_ratios_json == '{"seconds":12}'
     assert refreshed.status == "reserved"
-    assert hold is not None and hold.amount_units == 4_500_002
+    assert hold is not None and hold.amount_units == 4_510_000
 
 
 def test_quote_replacement_rejects_stale_expected_quote_without_mutation(
@@ -1493,6 +1559,7 @@ def test_sqlite_quote_failure_does_not_flush_bootstrap_or_commit_project():
                 db=db,
                 newapi=FailingNewApi(),
                 settings=SimpleNamespace(
+                    environment="test",
                     billing_default_multiplier_bps=15_000,
                     billing_reference_recovery_seconds=86_400,
                     billing_receipt_deadline_seconds=86_400,

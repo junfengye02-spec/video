@@ -3,13 +3,17 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from server.app.auth import models
-from server.app.billing import models as billing_models
+from server.app.assets import models as asset_models  # noqa: F401
+from server.app.auth import models as auth_models  # noqa: F401
+from server.app.billing import models as billing_models  # noqa: F401
 from server.app.core.config import get_settings
 from server.app.db.base import Base
-from server.app.payments import models as payment_models
-from server.app.projects import models as project_models
-from server.app.wallet import models as wallet_models
+from server.app.generation_units import models as generation_unit_models  # noqa: F401
+from server.app.payments import models as payment_models  # noqa: F401
+from server.app.projects import models as project_models  # noqa: F401
+from server.app.tasks import models as task_models  # noqa: F401
+from server.app.video_model_settings import models as video_model_setting_models  # noqa: F401
+from server.app.wallet import models as wallet_models  # noqa: F401
 
 
 config = context.config

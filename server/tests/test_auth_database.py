@@ -66,6 +66,14 @@ def test_short_auth_hmac_secret_is_rejected():
         AppSettings(_env_file=None, auth_hmac_secret="short")
 
 
+def test_development_defaults_to_a_loopback_compatible_cookie(monkeypatch):
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    settings = AppSettings(_env_file=None, auth_hmac_secret="x" * 32)
+
+    assert settings.environment == "development"
+    assert settings.session_cookie_secure is False
+
+
 def test_production_rejects_insecure_cookie():
     with pytest.raises(ValidationError, match="production cookies must be secure"):
         AppSettings(**_production_settings(session_cookie_secure=False))

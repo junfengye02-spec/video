@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ShortDramaProjectResponse } from "../../domain/types";
+import type {
+  ShortDramaProjectResponse,
+  TaskAcceptedResponse,
+  TaskBatch,
+} from "../../domain/types";
 import type { LocalProjectVersion } from "../../localdb/types";
 import { ApiError } from "../../platform/http/HttpClient";
 import type { BrowserProjectCache } from "../../platform/storage/BrowserProjectCache";
@@ -132,6 +136,7 @@ function fakeCache(initial: Record<string, ShortDramaProjectResponse | null> = {
 function repository(options: {
   cache?: BrowserProjectCache;
   responses?: unknown[];
+  planningPollIntervalMs?: number;
   prepareImport?: (file: File) => Promise<PreparedBackupImport>;
 } = {}) {
   const responses = [...(options.responses ?? [])];
@@ -148,8 +153,42 @@ function repository(options: {
     repo: new ServerProjectRepository({
       cache: options.cache ?? fakeCache().cache,
       http: http as NonNullable<ConstructorParameters<typeof ServerProjectRepository>[0]>["http"],
+      planningPollIntervalMs: options.planningPollIntervalMs,
       prepareImport: options.prepareImport,
     }),
+  };
+}
+
+function taskBatch(
+  id: string,
+  status: TaskBatch["status"],
+  overrides: Partial<TaskBatch> = {},
+): TaskBatch {
+  return {
+    id,
+    project_id: "p1",
+    task_type: "storyboard.plan",
+    status,
+    idempotency_key: `storyboard-plan:${id}`,
+    progress: status === "complete" ? 100 : 0,
+    total_items: 1,
+    completed_items: status === "complete" ? 1 : 0,
+    failed_items: ["failed", "cancelled", "partial_failure"].includes(status) ? 1 : 0,
+    error_code: null,
+    error_message: null,
+    created_at: "2026-07-12T00:00:00.000Z",
+    updated_at: "2026-07-12T00:00:00.000Z",
+    items: [],
+    ...overrides,
+  };
+}
+
+function acceptedTask(task: TaskBatch): TaskAcceptedResponse {
+  return {
+    task_id: task.id,
+    status: task.status,
+    deduplicated: false,
+    task,
   };
 }
 
@@ -223,6 +262,175 @@ describe("ProjectRepository", () => {
     )?.body;
     expect(createBody).not.toHaveProperty("shot_count");
     expect(cache.put).toHaveBeenCalledWith(created);
+  });
+
+  it("creates an empty draft without requiring storyboard planning", async () => {
+    const created = snapshot("server-id", "Draft");
+    created.storyboard.shots = [];
+    const { cache } = fakeCache();
+    const { repo, http } = repository({ cache, responses: [created] });
+
+    await expect(repo.createDraft({
+      title: "Draft",
+      project_type: "single_video",
+    })).resolves.toBe(created);
+
+    expect(http.json).toHaveBeenCalledWith("/api/projects", {
+      method: "POST",
+      body: {
+        title: "Draft",
+        project_type: "single_video",
+      },
+    });
+    expect(cache.put).toHaveBeenCalledWith(created);
+  });
+
+  it("plans a storyboard inside an existing draft and refreshes the cache", async () => {
+    const planned = snapshot("p1", "Draft");
+    const accepted = taskBatch("plan-task", "queued");
+    const complete = taskBatch("plan-task", "complete");
+    const { cache } = fakeCache();
+    const { repo, http } = repository({
+      cache,
+      planningPollIntervalMs: 0,
+      responses: [acceptedTask(accepted), complete, planned],
+    });
+
+    await expect(repo.planStoryboard("p1", { prompt: "Plan this story" }))
+      .resolves.toBe(planned);
+
+    expect(http.json).toHaveBeenNthCalledWith(1, "/api/projects/p1/storyboard/plan/tasks", {
+      method: "POST",
+      body: { prompt: "Plan this story" },
+    });
+    expect(http.json).toHaveBeenNthCalledWith(2, "/api/projects/p1/tasks/plan-task", {
+      method: "GET",
+    });
+    expect(http.json).toHaveBeenNthCalledWith(3, "/api/projects/p1", { method: "GET" });
+    expect(cache.put).toHaveBeenCalledWith(planned);
+  });
+
+  it("surfaces a failed storyboard planning task without refreshing stale project data", async () => {
+    const failed = taskBatch("failed-plan", "failed", {
+      error_code: "storyboard_generation_failed",
+      error_message: "Text model storyboard generation failed",
+    });
+    const { repo, http } = repository({
+      planningPollIntervalMs: 0,
+      responses: [acceptedTask(failed)],
+    });
+
+    await expect(repo.planStoryboard("p1", { prompt: "Plan this story" }))
+      .rejects.toMatchObject({
+        status: 500,
+        code: "storyboard_generation_failed",
+        details: { task_id: "failed-plan" },
+      });
+    expect(http.json).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces the billing job when storyboard planning is awaiting payment", async () => {
+    const awaiting = taskBatch("payment-plan", "awaiting_payment", {
+      items: [{ billing_job_id: "b".repeat(32), status: "awaiting_payment" }],
+    } as unknown as Partial<TaskBatch>);
+    const { repo } = repository({
+      planningPollIntervalMs: 0,
+      responses: [acceptedTask(awaiting)],
+    });
+
+    await expect(repo.planStoryboard("p1", { prompt: "Plan this story" }))
+      .rejects.toMatchObject({
+        status: 402,
+        code: "awaiting_payment",
+        details: { task_id: "payment-plan", billing_job_id: "b".repeat(32) },
+      });
+  });
+
+  it("refreshes when the server reports that planning was already published", async () => {
+    const refreshed = snapshot("p1", "Already planned");
+    const { repo, http } = repository({
+      responses: [
+        new ApiError(409, "Storyboard is already planned", "storyboard_already_planned"),
+        refreshed,
+      ],
+    });
+
+    await expect(repo.planStoryboard("p1", { prompt: "Plan this story" }))
+      .resolves.toBe(refreshed);
+    expect(http.json).toHaveBeenNthCalledWith(2, "/api/projects/p1", { method: "GET" });
+  });
+
+  it("persists the end-frame intent through the project API and cache", async () => {
+    const updated = snapshot("p1", "Draft");
+    updated.creative_workflow = {
+      phase: "inspiration",
+      messages: [],
+      brief: null,
+      ready_to_confirm: false,
+      control_end_frames: true,
+      planned_asset_ids: [],
+      approved_at: null,
+    };
+    const { cache } = fakeCache();
+    const { repo, http } = repository({ cache, responses: [updated] });
+
+    await expect(repo.updateInspirationIntent("p1", {
+      control_end_frames: true,
+    })).resolves.toBe(updated);
+
+    expect(http.json).toHaveBeenCalledWith("/api/projects/p1/inspiration/intent", {
+      method: "PATCH",
+      body: { control_end_frames: true },
+    });
+    expect(cache.put).toHaveBeenCalledWith(updated);
+  });
+
+  it("starts and cancels storyboard revision through server-backed transitions", async () => {
+    const started = snapshot("p1", "Revision started");
+    const canceled = snapshot("p1", "Revision canceled");
+    const { cache } = fakeCache();
+    const { repo, http } = repository({ cache, responses: [started, canceled] });
+
+    await expect(repo.beginStoryboardRevision("p1")).resolves.toBe(started);
+    await expect(repo.cancelStoryboardRevision("p1")).resolves.toBe(canceled);
+
+    expect(http.json).toHaveBeenNthCalledWith(
+      1,
+      "/api/projects/p1/creative-plan/storyboard-revision/start",
+      { method: "POST", body: {} },
+    );
+    expect(http.json).toHaveBeenNthCalledWith(
+      2,
+      "/api/projects/p1/creative-plan/storyboard-revision/cancel",
+      { method: "POST", body: {} },
+    );
+    expect(cache.put).toHaveBeenNthCalledWith(1, started);
+    expect(cache.put).toHaveBeenNthCalledWith(2, canceled);
+  });
+
+  it("updates a plan section with its optimistic revision and refreshes the cache", async () => {
+    const updated = snapshot("p1", "Draft");
+    const { cache } = fakeCache();
+    const { repo, http } = repository({ cache, responses: [updated] });
+
+    await expect(repo.updatePlanSection("p1", "worldview", {
+      status: "changes_requested",
+      feedback: "Clarify the world rule",
+      revision: 2,
+    })).resolves.toBe(updated);
+
+    expect(http.json).toHaveBeenCalledWith(
+      "/api/projects/p1/creative-plan/sections/worldview",
+      {
+        method: "PATCH",
+        body: {
+          status: "changes_requested",
+          feedback: "Clarify the world rule",
+          revision: 2,
+        },
+      },
+    );
+    expect(cache.put).toHaveBeenCalledWith(updated);
   });
 
   it("refreshes and saves snapshots through the browser cache boundary", async () => {

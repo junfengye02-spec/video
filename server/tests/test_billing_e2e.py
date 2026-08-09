@@ -23,7 +23,7 @@ from server.app.billing.execution import (
 )
 from server.app.billing.models import BillingReconciliation, BillingSetting, CostReceipt, GenerationJob
 from server.app.billing.reconciliation import reconcile_due_jobs
-from server.app.billing.service import BillingService
+from server.app.billing.service import BillingService, InvalidBillingState
 from server.app.db.base import Base
 from server.app.payments.epay import sign_epay
 from server.app.payments.models import PaymentOrder
@@ -457,6 +457,7 @@ def e2e(tmp_path) -> BillingE2E:
 
     Base.metadata.create_all(engine)
     settings = SimpleNamespace(
+        environment="test",
         billing_reference_recovery_seconds=86_400,
         billing_receipt_deadline_seconds=86_400,
         billing_hold_timeout_seconds=86_400,
@@ -509,7 +510,7 @@ def test_recharge_then_successful_video_charge(e2e: BillingE2E) -> None:
     after = e2e.wallet()
 
     assert order.status == "paid"
-    assert before.balance_units - after.balance_units == 4_347_000
+    assert before.balance_units - after.balance_units == 4_350_000
     assert after.held_units == 0
     assert e2e.count_entries(f"consume:{result.job_id}") == 1
     assert e2e.newapi.upstream_accept_count == 1
@@ -677,6 +678,221 @@ def test_image_request_receipt_bills_sync_result(e2e: BillingE2E) -> None:
     assert billed.result_visible is True
     assert e2e.newapi.request_receipt_calls == [("image", "image-v1", reference_id)]
     assert e2e.count_entries(f"consume:{context.job_id}") == 1
+
+
+def test_image_receipt_allows_pricing_version_drift_only_for_exact_quote_amounts(
+    e2e: BillingE2E,
+) -> None:
+    reference_id = request_id(2)
+    estimated_quota = 800_000
+    estimated_cost_micro = 1_200_000
+    e2e.newapi.queue_quote(
+        kind="image",
+        estimated_quota=estimated_quota,
+        estimated_cost_micro=estimated_cost_micro,
+    )
+    e2e.newapi.queue_execution(kind="image", reference_id=reference_id)
+    context = execute_billed_provider_call(
+        db=e2e.db,
+        newapi=e2e.newapi,
+        settings=e2e.settings,
+        artifact_inspector=e2e.store.inspect_staged_artifact,
+        user_id=USER_ID,
+        project_id=PROJECT_ID,
+        parent_job_id=None,
+        capability="image",
+        operation="image:pricing-version-drift",
+        request=e2e.image_request(),
+        now=NOW,
+    )
+    artifact = e2e.store.stage_sync_result(
+        project_id=PROJECT_ID,
+        job_id=context.job_id,
+        operation="image:pricing-version-drift",
+        capability="image",
+        source_reference=reference_id,
+        content=context.execution.response.content,
+    )
+    e2e.service.stage_result(context.job_id, artifact.locator, artifact.sha256)
+    exact_receipt = e2e.receipt(
+        reference_type="request",
+        reference_id=reference_id,
+        model="image-model",
+        quota=estimated_quota,
+        cost_micro=estimated_cost_micro,
+    ).model_copy(update={"pricing_version": "sha256:image-provider-receipt"})
+
+    e2e.service.settle_job(context.job_id, exact_receipt)
+
+    billed = e2e.db.get(GenerationJob, context.job_id)
+    assert billed is not None and billed.status == "billed"
+    assert billed.result_visible is True
+
+    mismatched_reference_id = request_id(3)
+    e2e.newapi.queue_quote(
+        kind="image",
+        estimated_quota=estimated_quota,
+        estimated_cost_micro=estimated_cost_micro,
+    )
+    e2e.newapi.queue_execution(kind="image", reference_id=mismatched_reference_id)
+    mismatched_context = execute_billed_provider_call(
+        db=e2e.db,
+        newapi=e2e.newapi,
+        settings=e2e.settings,
+        artifact_inspector=e2e.store.inspect_staged_artifact,
+        user_id=USER_ID,
+        project_id=PROJECT_ID,
+        parent_job_id=None,
+        capability="image",
+        operation="image:pricing-version-and-cost-drift",
+        request=e2e.image_request(),
+        now=NOW,
+    )
+    mismatched_receipt = e2e.receipt(
+        reference_type="request",
+        reference_id=mismatched_reference_id,
+        model="image-model",
+        quota=estimated_quota,
+        cost_micro=estimated_cost_micro + 1,
+    ).model_copy(update={"pricing_version": "sha256:image-provider-receipt"})
+
+    with pytest.raises(InvalidBillingState, match="receipt snapshot"):
+        e2e.service.settle_job(mismatched_context.job_id, mismatched_receipt)
+
+
+def test_video_receipt_allows_pricing_version_drift_for_exact_quote_amounts(
+    e2e: BillingE2E,
+) -> None:
+    reference_id = task_id()
+    estimated_quota = 1_449_000
+    estimated_cost_micro = 2_898_000
+    e2e.newapi.queue_quote(
+        kind="video",
+        estimated_quota=estimated_quota,
+        estimated_cost_micro=estimated_cost_micro,
+    )
+    e2e.newapi.queue_execution(kind="video", reference_id=reference_id)
+    context = execute_billed_provider_call(
+        db=e2e.db,
+        newapi=e2e.newapi,
+        settings=e2e.settings,
+        artifact_inspector=e2e.store.inspect_staged_artifact,
+        user_id=USER_ID,
+        project_id=PROJECT_ID,
+        parent_job_id=None,
+        capability="video",
+        operation="shot:pricing-version-drift",
+        request=e2e.video_request(),
+        now=NOW,
+    )
+    job = e2e.db.get(GenerationJob, context.job_id)
+    assert job is not None
+    e2e.stage_video(job, reference_id)
+    receipt = e2e.receipt(
+        reference_type="task",
+        reference_id=reference_id,
+        model=job.model,
+        quota=estimated_quota,
+        cost_micro=estimated_cost_micro,
+    ).model_copy(update={"pricing_version": "sha256:video-provider-receipt"})
+
+    e2e.service.settle_job(context.job_id, receipt)
+
+    billed = e2e.db.get(GenerationJob, context.job_id)
+    assert billed is not None and billed.status == "billed"
+    assert billed.result_visible is True
+
+
+def test_text_receipt_allows_consistent_variable_usage_with_pricing_version_drift(
+    e2e: BillingE2E,
+) -> None:
+    reference_id = request_id(4)
+    e2e.newapi.queue_quote(
+        kind="text",
+        estimated_quota=238,
+        estimated_cost_micro=476,
+    )
+    e2e.newapi.queue_execution(kind="text", reference_id=reference_id)
+    request = PreparedNewApiRequest.json(
+        "POST",
+        "/v1/chat/completions",
+        {"model": "text-model", "messages": [{"role": "user", "content": "plan"}]},
+    )
+    context = execute_billed_provider_call(
+        db=e2e.db,
+        newapi=e2e.newapi,
+        settings=e2e.settings,
+        artifact_inspector=e2e.store.inspect_staged_artifact,
+        user_id=USER_ID,
+        project_id=PROJECT_ID,
+        parent_job_id=None,
+        capability="text",
+        operation="storyboard:pricing-version-drift",
+        request=request,
+        now=NOW,
+    )
+    artifact = e2e.store.stage_sync_result(
+        project_id=PROJECT_ID,
+        job_id=context.job_id,
+        operation="storyboard:pricing-version-drift",
+        capability="text",
+        source_reference=reference_id,
+        content=context.execution.response.content,
+    )
+    e2e.service.stage_result(context.job_id, artifact.locator, artifact.sha256)
+    receipt = e2e.receipt(
+        reference_type="request",
+        reference_id=reference_id,
+        model="text-model",
+        quota=3_370,
+        cost_micro=6_740,
+    ).model_copy(update={"pricing_version": "sha256:text-provider-receipt"})
+
+    e2e.service.settle_job(context.job_id, receipt)
+
+    billed = e2e.db.get(GenerationJob, context.job_id)
+    assert billed is not None and billed.status == "billed"
+    assert billed.result_visible is True
+
+
+def test_text_receipt_rejects_inconsistent_cost_with_pricing_version_drift(
+    e2e: BillingE2E,
+) -> None:
+    reference_id = request_id(5)
+    e2e.newapi.queue_quote(
+        kind="text",
+        estimated_quota=238,
+        estimated_cost_micro=476,
+    )
+    e2e.newapi.queue_execution(kind="text", reference_id=reference_id)
+    request = PreparedNewApiRequest.json(
+        "POST",
+        "/v1/chat/completions",
+        {"model": "text-model", "messages": [{"role": "user", "content": "plan"}]},
+    )
+    context = execute_billed_provider_call(
+        db=e2e.db,
+        newapi=e2e.newapi,
+        settings=e2e.settings,
+        artifact_inspector=e2e.store.inspect_staged_artifact,
+        user_id=USER_ID,
+        project_id=PROJECT_ID,
+        parent_job_id=None,
+        capability="text",
+        operation="storyboard:inconsistent-pricing-version-drift",
+        request=request,
+        now=NOW,
+    )
+    receipt = e2e.receipt(
+        reference_type="request",
+        reference_id=reference_id,
+        model="text-model",
+        quota=3_370,
+        cost_micro=6_741,
+    ).model_copy(update={"pricing_version": "sha256:text-provider-receipt"})
+
+    with pytest.raises(InvalidBillingState, match="receipt snapshot"):
+        e2e.service.settle_job(context.job_id, receipt)
 
 
 def test_old_token_alias_is_used_for_recovery_after_rotation(e2e: BillingE2E) -> None:

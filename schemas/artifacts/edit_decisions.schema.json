@@ -17,6 +17,55 @@
           "source": { "type": "string", "description": "Source file path or asset-manifest ID" },
           "in_seconds": { "type": "number", "minimum": 0 },
           "out_seconds": { "type": "number", "minimum": 0 },
+          "source_in_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Explicit source media in point. Preferred over legacy in_seconds for new render plans."
+          },
+          "source_out_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Explicit source media out point. Preferred over legacy out_seconds for new render plans."
+          },
+          "timeline_start_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Start position in the final output timeline."
+          },
+          "timeline_duration_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Editorial duration occupied by this cut in the final output timeline."
+          },
+          "requested_duration_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Duration requested from the generation model."
+          },
+          "source_duration_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Actual duration measured from the downloaded media."
+          },
+          "duration_policy": {
+            "type": "string",
+            "enum": ["full_source", "explicit_trim", "explicit_retime"],
+            "description": "Full source is the default. Trimming or retiming must be an explicit editorial decision."
+          },
+          "requires_timeline_replan": { "type": "boolean" },
+          "timeline_replanned_from_legacy": { "type": "boolean" },
+          "source_audio": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "type": "string",
+                "enum": ["preserve", "mix", "replace", "mute"],
+                "default": "preserve"
+              },
+              "volume": { "type": "number", "minimum": 0, "maximum": 2, "default": 1 }
+            },
+            "additionalProperties": false
+          },
           "speed": { "type": "number", "minimum": 0.1, "default": 1.0 },
           "layer": {
             "type": "string",
@@ -57,10 +106,16 @@
             "minimum": 0,
             "description": "Duration of transition in seconds"
           },
-          "reason": { "type": "string" }
+          "reason": { "type": "string" },
+          "metadata": { "type": "object", "description": "Stable editorial source bindings, including generation-unit mappings." }
         },
         "additionalProperties": false
       }
+    },
+    "total_duration_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Exact duration of the authoritative output timeline. This is derived from timeline fields, not provider clip lengths."
     },
     "overlays": {
       "type": "array",
@@ -89,30 +144,51 @@
     },
     "audio": {
       "type": "object",
-      "description": "Audio configuration for narration, music, and SFX.",
+      "description": "Audio configuration for embedded source audio and independent dialogue, narration, music, SFX, and ambience stems.",
       "properties": {
+        "source": {
+          "type": "object",
+          "description": "Default handling for audio embedded in video clips. Character voice is preserved unless explicitly replaced or muted.",
+          "properties": {
+            "default_policy": {
+              "type": "string",
+              "enum": ["preserve", "mix", "replace", "mute"],
+              "default": "preserve"
+            },
+            "default_volume": { "type": "number", "minimum": 0, "maximum": 2, "default": 1 },
+            "transition_seconds": { "type": "number", "minimum": 0, "maximum": 2, "default": 0.08 }
+          },
+          "additionalProperties": false
+        },
+        "target_lufs": { "type": "number", "minimum": -70, "maximum": 0, "default": -14 },
+        "true_peak_db": { "type": "number", "minimum": -12, "maximum": 0, "default": -1.5 },
+        "loudness_range_lu": { "type": "number", "minimum": 1, "maximum": 50, "default": 11 },
+        "dialogue": {
+          "type": "object",
+          "properties": {
+            "segments": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/timed_audio_segment" }
+            }
+          },
+          "additionalProperties": false
+        },
         "narration": {
           "type": "object",
           "properties": {
             "segments": {
               "type": "array",
-              "items": {
-                "type": "object",
-                "required": ["asset_id", "start_seconds"],
-                "properties": {
-                  "asset_id": { "type": "string" },
-                  "start_seconds": { "type": "number", "minimum": 0 },
-                  "end_seconds": { "type": "number", "minimum": 0 }
-                },
-                "additionalProperties": false
-              }
+              "items": { "$ref": "#/$defs/timed_audio_segment" }
             }
-          }
+          },
+          "additionalProperties": false
         },
         "music": {
           "type": "object",
           "properties": {
             "asset_id": { "type": "string" },
+            "source_path": { "type": "string" },
+            "source_in_seconds": { "type": "number", "minimum": 0 },
             "volume": { "type": "number", "minimum": 0, "maximum": 1 },
             "fade_in_seconds": { "type": "number", "minimum": 0 },
             "fade_out_seconds": { "type": "number", "minimum": 0 },
@@ -125,6 +201,7 @@
                     "enabled": { "type": "boolean", "default": true },
                     "threshold_db": { "type": "number" },
                     "reduction_db": { "type": "number" },
+                    "ratio": { "type": "number", "minimum": 1, "maximum": 20 },
                     "attack_ms": { "type": "number", "minimum": 0 },
                     "release_ms": { "type": "number", "minimum": 0 }
                   },
@@ -132,19 +209,16 @@
                 }
               ]
             }
-          }
+          },
+          "additionalProperties": false
         },
         "sfx": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "asset_id": { "type": "string" },
-              "start_seconds": { "type": "number", "minimum": 0 },
-              "volume": { "type": "number", "minimum": 0, "maximum": 1, "default": 1.0 }
-            },
-            "additionalProperties": false
-          }
+          "items": { "$ref": "#/$defs/timed_audio_segment" }
+        },
+        "ambience": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/timed_audio_segment" }
         }
       },
       "additionalProperties": false
@@ -229,5 +303,26 @@
     },
     "metadata": { "type": "object" }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "timed_audio_segment": {
+      "type": "object",
+      "anyOf": [
+        { "required": ["asset_id"] },
+        { "required": ["source_path"] }
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "asset_id": { "type": "string" },
+        "source_path": { "type": "string" },
+        "start_seconds": { "type": "number", "minimum": 0 },
+        "timeline_start_seconds": { "type": "number", "minimum": 0 },
+        "end_seconds": { "type": "number", "minimum": 0 },
+        "timeline_end_seconds": { "type": "number", "minimum": 0 },
+        "source_in_seconds": { "type": "number", "minimum": 0 },
+        "volume": { "type": "number", "minimum": 0, "maximum": 2, "default": 1.0 }
+      },
+      "additionalProperties": false
+    }
+  }
 }

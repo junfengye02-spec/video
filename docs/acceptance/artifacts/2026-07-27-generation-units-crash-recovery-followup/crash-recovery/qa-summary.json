@@ -1,0 +1,16 @@
+{
+  "worker_exit_code": 91,
+  "generation_unit_id": "unit-57be5ac26be932a3b6689165",
+  "original_billing_job_id": "8b2ab35ee67756bf62829b2b59c5cc1b",
+  "original_provider_reference_id": "task_00000000000000000000000000000001",
+  "provider_interruption_outcome": "error",
+  "provider_quote_count": 2,
+  "provider_execute_count": 2,
+  "duplicate_provider_execute_attempt_count": 0,
+  "v1_wallet_consume_count": 1,
+  "v2_wallet_consume_count": 1,
+  "replacement_failure_preserved_v1": true,
+  "final_active_revision": 2,
+  "active_revision_count": 1,
+  "retained_v1_exists": true
+}

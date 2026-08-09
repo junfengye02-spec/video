@@ -19,6 +19,38 @@ def test_consistency_flags_missing_locked_character_reference():
     assert report["issues"][0]["code"] == "missing_visual_lock"
 
 
+def test_consistency_accepts_identity_with_a_distinctive_visual_lock_cue():
+    series_bible = {
+        "characters": [
+            {
+                "id": "c1",
+                "name": "Lin",
+                "visual_lock": "red coat, short hair",
+                "locked": True,
+            }
+        ],
+        "assets": [],
+    }
+    storyboard = {
+        "shots": [
+            {
+                "id": "s1",
+                "characters": ["c1"],
+                "prompt": "Lin turns toward camera in her red coat",
+                "location": "alley",
+                "shot_language": {
+                    "shot_size": "medium",
+                    "camera_movement": "static",
+                },
+            }
+        ]
+    }
+
+    report = evaluate_storyboard_consistency(series_bible, storyboard)
+
+    assert report == {"score": 100, "issues": []}
+
+
 def test_consistency_flags_missing_shot_language():
     series_bible = {"characters": [], "assets": []}
     storyboard = {

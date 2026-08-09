@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Literal
 
@@ -40,6 +40,7 @@ from server.app.provider.video_recovery import (
 )
 from server.app.settings import DEFAULT_PROJECTS_ROOT
 from server.app.storage import WorkbenchStore
+from server.app.tasks.service import TaskService
 from server.app.wallet.models import WalletHold
 
 
@@ -593,24 +594,58 @@ def resume_reconcile_publish_job(
     if outcome == "completed":
         reduce_video_parent_for_child(db, job_id, media_store)
         db.commit()
+    retry_delay = (
+        _retry_delay(claim.generation)
+        if pending_delay_seconds is None
+        else pending_delay_seconds
+    )
     updated = (
         resolve_claim(db, claim)
         if outcome == "completed"
-        else reschedule_claim(
-            db,
-            claim,
-            delay_seconds=(
-                _retry_delay(claim.generation)
-                if pending_delay_seconds is None
-                else pending_delay_seconds
-            ),
-        )
+        else reschedule_claim(db, claim, delay_seconds=retry_delay)
     )
     if not updated:
         raise ReconciliationClaimLost(
             "provider reconciliation ownership was lost"
         )
+    _sync_provider_waiting_tasks(db, claim, outcome)
     return outcome
+
+
+def _sync_provider_waiting_tasks(
+    db: Session,
+    claim: FencedReconciliationClaim,
+    outcome: Literal["pending", "completed"],
+) -> None:
+    """Reflect a fenced reconciliation result after its claim update commits."""
+    tasks = TaskService(db)
+    if outcome == "pending":
+        next_poll_at = db.scalar(
+            select(BillingReconciliation.next_retry_at).where(
+                BillingReconciliation.id == claim.row_id,
+                BillingReconciliation.job_id == claim.job_id,
+            )
+        )
+        db.commit()
+        tasks.record_provider_poll(claim.job_id, next_poll_at=next_poll_at)
+        return
+
+    state = db.execute(
+        select(GenerationJob.status, GenerationJob.result_visible).where(
+            GenerationJob.id == claim.job_id
+        )
+    ).first()
+    db.commit()
+    if state is None:
+        return
+    if state.status == "billed" and state.result_visible:
+        tasks.resume_provider_result(claim.job_id)
+    elif state.status.endswith("_no_charge"):
+        tasks.fail_provider_wait(
+            claim.job_id,
+            error_code=state.status,
+            error_message="Video provider generation ended without a charge",
+        )
 
 
 def reconcile_due_jobs(

@@ -1,0 +1,69 @@
+.root {
+  min-width: 0;
+}
+
+.workspace {
+  min-height: 0;
+}
+
+.directory {
+  align-self: start;
+}
+
+.document {
+  min-width: 0;
+  scroll-behavior: smooth;
+}
+
+.saveBar {
+  backdrop-filter: blur(18px) saturate(140%);
+}
+
+@media (max-width: 1024px) {
+  .workspace {
+    display: block;
+  }
+
+  .directory {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: none;
+  }
+
+  .directory::-webkit-scrollbar {
+    display: none;
+  }
+
+  .directory :global(nav) {
+    display: flex;
+    width: max-content;
+    min-width: 100%;
+  }
+
+  .directory :global(nav button) {
+    flex: 0 0 auto;
+  }
+
+  .directory :global(.settings-directory-summary) {
+    display: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .document {
+    padding-inline: 14px;
+  }
+
+  .saveBar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .document {
+    scroll-behavior: auto;
+  }
+}

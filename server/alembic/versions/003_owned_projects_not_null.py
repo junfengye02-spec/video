@@ -17,7 +17,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    result = op.get_bind().execute(
+    bind = op.get_bind()
+    result = bind.execute(
         sa.text("SELECT COUNT(*) FROM projects WHERE owner_user_id IS NULL")
     )
     if result is None:
@@ -31,18 +32,34 @@ def upgrade() -> None:
             f"Cannot require project owners: {unowned_count} unowned projects remain. "
             "Run assign-project for every reported project ID, then retry revision 003."
         )
-    op.alter_column(
-        "projects",
-        "owner_user_id",
-        existing_type=sa.String(length=32),
-        nullable=False,
-    )
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("projects") as batch_op:
+            batch_op.alter_column(
+                "owner_user_id",
+                existing_type=sa.String(length=32),
+                nullable=False,
+            )
+    else:
+        op.alter_column(
+            "projects",
+            "owner_user_id",
+            existing_type=sa.String(length=32),
+            nullable=False,
+        )
 
 
 def downgrade() -> None:
-    op.alter_column(
-        "projects",
-        "owner_user_id",
-        existing_type=sa.String(length=32),
-        nullable=True,
-    )
+    if op.get_bind().dialect.name == "sqlite":
+        with op.batch_alter_table("projects") as batch_op:
+            batch_op.alter_column(
+                "owner_user_id",
+                existing_type=sa.String(length=32),
+                nullable=True,
+            )
+    else:
+        op.alter_column(
+            "projects",
+            "owner_user_id",
+            existing_type=sa.String(length=32),
+            nullable=True,
+        )

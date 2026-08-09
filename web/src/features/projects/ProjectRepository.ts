@@ -1,8 +1,15 @@
 import type {
   ContinuityPlan,
+  PlanSectionId,
+  PlanSectionUpdateRequest,
+  DraftProjectRequest,
+  InspirationChatRequest,
+  InspirationIntentUpdateRequest,
   Project,
   ShortDramaProjectRequest,
   ShortDramaProjectResponse,
+  TaskAcceptedResponse,
+  TaskBatch,
 } from "../../domain/types";
 import {
   exportProjectBackup,
@@ -12,6 +19,7 @@ import {
   type PreparedProjectBackupImport,
 } from "../../localdb/exportProject";
 import type { LocalProjectSummary, LocalProjectVersion } from "../../localdb/types";
+import { selectProjectCover } from "./projectCover";
 import { ApiError, httpClient } from "../../platform/http/HttpClient";
 import {
   browserProjectCache,
@@ -30,10 +38,36 @@ export type CreateProjectInput = Pick<
   "title" | "prompt" | "project_type"
 >;
 
+export type PlanStoryboardInput = Pick<ShortDramaProjectRequest, "prompt" | "project_type"> & {
+  text_model?: string;
+  control_end_frames?: boolean;
+};
+
 export interface ProjectRepository {
   list(): Promise<LocalProjectSummary[]>;
   open(projectId: string): Promise<CachedProject | null>;
   create(input: CreateProjectInput): Promise<ShortDramaProjectResponse>;
+  createDraft(input: DraftProjectRequest): Promise<ShortDramaProjectResponse>;
+  developInspiration(
+    projectId: string,
+    input: InspirationChatRequest,
+  ): Promise<ShortDramaProjectResponse>;
+  updateInspirationIntent(
+    projectId: string,
+    input: InspirationIntentUpdateRequest,
+  ): Promise<ShortDramaProjectResponse>;
+  planStoryboard(
+    projectId: string,
+    input: PlanStoryboardInput,
+  ): Promise<ShortDramaProjectResponse>;
+  approveStoryboard(projectId: string): Promise<ShortDramaProjectResponse>;
+  beginStoryboardRevision(projectId: string): Promise<ShortDramaProjectResponse>;
+  cancelStoryboardRevision(projectId: string): Promise<ShortDramaProjectResponse>;
+  updatePlanSection(
+    projectId: string,
+    section: PlanSectionId,
+    input: PlanSectionUpdateRequest,
+  ): Promise<ShortDramaProjectResponse>;
   refresh(projectId: string): Promise<ShortDramaProjectResponse>;
   save(snapshot: ShortDramaProjectResponse): Promise<LocalProjectVersion | null>;
   saveIfVersion(
@@ -59,6 +93,7 @@ type ProjectRepositoryHttp = {
 interface ServerProjectRepositoryOptions {
   cache?: BrowserProjectCache;
   http?: ProjectRepositoryHttp;
+  planningPollIntervalMs?: number;
   prepareImport?: (file: File, options?: ImportProjectBackupOptions) => Promise<PreparedBackupImport>;
   prepareDirectoryImport?: (
     files: Iterable<File> | ArrayLike<File>,
@@ -77,10 +112,43 @@ interface ProjectImportRequest {
   series_bible: ShortDramaProjectResponse["series_bible"];
   storyboard: ShortDramaProjectResponse["storyboard"];
   continuity_plan: ContinuityPlan;
+  generation_execution?: ShortDramaProjectResponse["generation_execution"];
 }
 
 function projectPath(projectId: string): string {
   return `/api/projects/${encodeURIComponent(projectId)}`;
+}
+
+const STORYBOARD_PLANNING_POLL_INTERVAL_MS = 1_500;
+const STORYBOARD_PLANNING_TIMEOUT_MS = 15 * 60 * 1_000;
+const STORYBOARD_PLANNING_TERMINAL_STATUSES = new Set([
+  "complete",
+  "failed",
+  "cancelled",
+  "partial_failure",
+  "awaiting_payment",
+]);
+
+function storyboardPlanningTaskError(task: TaskBatch): ApiError {
+  const item = task.items?.find((candidate) => candidate.status === "awaiting_payment")
+    ?? task.items?.find((candidate) => candidate.error_code || candidate.error_message)
+    ?? task.items?.[0];
+  const billingJobId = item?.billing_job_id ?? task.billing_job_id ?? null;
+  const code = task.status === "awaiting_payment"
+    ? "awaiting_payment"
+    : task.error_code ?? item?.error_code ?? "storyboard_plan_failed";
+  const message = task.status === "awaiting_payment"
+    ? item?.error_message ?? "Storyboard planning requires payment before it can continue."
+    : task.error_message ?? item?.error_message ?? "Storyboard planning failed.";
+  return new ApiError(
+    task.status === "awaiting_payment" ? 402 : 500,
+    message,
+    code,
+    {
+      task_id: task.id,
+      ...(billingJobId ? { billing_job_id: billingJobId } : {}),
+    },
+  );
 }
 
 function defaultContinuityPlan(
@@ -94,6 +162,7 @@ function defaultContinuityPlan(
       main_arc: "",
       style_lock: "",
       visual_rules: "",
+      series_prompt: "",
       taboos: [],
       locations: [],
       props: [],
@@ -121,6 +190,9 @@ function toImportRequest(snapshot: ShortDramaProjectResponse): ProjectImportRequ
     series_bible: snapshot.series_bible,
     storyboard: snapshot.storyboard,
     continuity_plan: snapshot.continuity_plan ?? defaultContinuityPlan(projectType),
+    ...(snapshot.generation_execution
+      ? { generation_execution: snapshot.generation_execution }
+      : {}),
   };
 }
 
@@ -131,6 +203,7 @@ function cachedSummary(project: Project, cached: ShortDramaProjectResponse | nul
     updatedAt: project.updated_at ?? new Date().toISOString(),
     shotCount: cached?.storyboard.shots.length ?? 0,
     hasFinalRender: Boolean(cached?.final_path),
+    cover: selectProjectCover(cached),
   };
 }
 
@@ -144,6 +217,7 @@ function cacheVersion(record: LocalProjectVersion): LocalProjectVersion {
 export class ServerProjectRepository implements ProjectRepository {
   private readonly cache: BrowserProjectCache;
   private readonly http: ProjectRepositoryHttp;
+  private readonly planningPollIntervalMs: number;
   private readonly prepareImport: (
     file: File,
     options?: ImportProjectBackupOptions,
@@ -156,6 +230,10 @@ export class ServerProjectRepository implements ProjectRepository {
   constructor(options: ServerProjectRepositoryOptions = {}) {
     this.cache = options.cache ?? browserProjectCache;
     this.http = options.http ?? httpClient;
+    this.planningPollIntervalMs = Math.max(
+      0,
+      options.planningPollIntervalMs ?? STORYBOARD_PLANNING_POLL_INTERVAL_MS,
+    );
     this.prepareImport = options.prepareImport ?? prepareProjectBackupImport;
     this.prepareDirectoryImport = options.prepareDirectoryImport ?? prepareProjectBackupDirectoryImport;
   }
@@ -204,6 +282,123 @@ export class ServerProjectRepository implements ProjectRepository {
       method: "POST",
       body: input,
     });
+    await this.cache.put(snapshot);
+    return snapshot;
+  }
+
+  async createDraft(input: DraftProjectRequest): Promise<ShortDramaProjectResponse> {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>("/api/projects", {
+      method: "POST",
+      body: input,
+    });
+    await this.cache.put(snapshot);
+    return snapshot;
+  }
+
+  async planStoryboard(
+    projectId: string,
+    input: PlanStoryboardInput,
+  ): Promise<ShortDramaProjectResponse> {
+    let accepted: TaskAcceptedResponse;
+    try {
+      accepted = await this.http.json<TaskAcceptedResponse>(
+        `${projectPath(projectId)}/storyboard/plan/tasks`,
+        { method: "POST", body: input },
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "storyboard_already_planned") {
+        return this.refresh(projectId);
+      }
+      throw error;
+    }
+
+    const deadline = Date.now() + STORYBOARD_PLANNING_TIMEOUT_MS;
+    let task = accepted.task;
+    while (true) {
+      if (task.status === "complete") return this.refresh(projectId);
+      if (STORYBOARD_PLANNING_TERMINAL_STATUSES.has(task.status)) {
+        throw storyboardPlanningTaskError(task);
+      }
+      if (Date.now() >= deadline) {
+        throw new ApiError(
+          408,
+          "Storyboard planning is still running in the background.",
+          "storyboard_planning_timeout",
+          { task_id: accepted.task_id },
+        );
+      }
+      if (this.planningPollIntervalMs > 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, this.planningPollIntervalMs);
+        });
+      }
+      task = await this.http.json<TaskBatch>(
+        `${projectPath(projectId)}/tasks/${encodeURIComponent(accepted.task_id)}`,
+        { method: "GET" },
+      );
+    }
+  }
+
+  async developInspiration(
+    projectId: string,
+    input: InspirationChatRequest,
+  ): Promise<ShortDramaProjectResponse> {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>(
+      `${projectPath(projectId)}/inspiration/chat`,
+      { method: "POST", body: input },
+    );
+    await this.cache.put(snapshot);
+    return snapshot;
+  }
+
+  async updateInspirationIntent(
+    projectId: string,
+    input: InspirationIntentUpdateRequest,
+  ): Promise<ShortDramaProjectResponse> {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>(
+      `${projectPath(projectId)}/inspiration/intent`,
+      { method: "PATCH", body: input },
+    );
+    await this.cache.put(snapshot);
+    return snapshot;
+  }
+
+  async approveStoryboard(projectId: string): Promise<ShortDramaProjectResponse> {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>(
+      `${projectPath(projectId)}/storyboard/approve`,
+      { method: "POST", body: {} },
+    );
+    await this.cache.put(snapshot);
+    return snapshot;
+  }
+
+  async beginStoryboardRevision(projectId: string): Promise<ShortDramaProjectResponse> {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>(
+      `${projectPath(projectId)}/creative-plan/storyboard-revision/start`,
+      { method: "POST", body: {} },
+    );
+    await this.cache.put(snapshot);
+    return snapshot;
+  }
+
+  async cancelStoryboardRevision(projectId: string): Promise<ShortDramaProjectResponse> {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>(
+      `${projectPath(projectId)}/creative-plan/storyboard-revision/cancel`,
+      { method: "POST", body: {} },
+    );
+    await this.cache.put(snapshot);
+    return snapshot;
+  }
+
+  async updatePlanSection(
+    projectId: string,
+    section: PlanSectionId,
+    input: PlanSectionUpdateRequest,
+  ): Promise<ShortDramaProjectResponse> {
+    const snapshot = await this.http.json<ShortDramaProjectResponse>(
+      `${projectPath(projectId)}/creative-plan/sections/${encodeURIComponent(section)}`,
+      { method: "PATCH", body: input },
+    );
     await this.cache.put(snapshot);
     return snapshot;
   }

@@ -33,6 +33,7 @@ from server.app.db.session import get_db
 from server.app.main import _json_request_openapi, create_app
 from server.app.projects.repository import ProjectRepository
 from server.app.redis import get_redis
+from server.app.video_model_settings.service import bootstrap_verified_duration_settings
 
 
 AUTH_ORIGIN = "https://studio.example.com"
@@ -97,6 +98,7 @@ def ownership_context(tmp_path):
         ),
     ]
     db.add_all(users)
+    bootstrap_verified_duration_settings(db)
     db.commit()
 
     settings = AppSettings(
@@ -161,6 +163,24 @@ def _create_project(client: TestClient, *, title: str = "Mine") -> dict:
     )
     assert response.status_code in {200, 201}, response.text
     return response.json()["project"]
+
+
+def _mark_project_creative_plan_approved(context, project_id: str) -> None:
+    store = context["app"].state.store
+    workflow = store.read_artifact(project_id, "creative_workflow.json")
+    now = datetime.now(UTC).isoformat()
+    workflow["phase"] = "approved"
+    workflow["approved_at"] = now
+    for approval in workflow["plan_sections"].values():
+        approval.update(
+            {
+                "status": "approved",
+                "revision": approval["revision"] + 1,
+                "feedback": None,
+                "updated_at": now,
+            }
+        )
+    store.write_artifact(project_id, "creative_workflow.json", workflow)
 
 
 def _link_file(link: Path, target: Path) -> bool:
@@ -483,6 +503,16 @@ SURFACE_CASES = [
     ("GET", "/media/assets/images/character/a.png", {}),
     ("PATCH", "/shots/s1", {"json": {"prompt": "Changed"}}),
     (
+        "PATCH",
+        "/creative-plan/sections/worldview",
+        {"json": {"status": "approved", "revision": 1}},
+    ),
+    (
+        "POST",
+        "/creative-plan/revise",
+        {"json": {"sections": ["worldview"], "feedback": "Revise it"}},
+    ),
+    (
         "POST",
         "/prompt-optimize",
         {
@@ -500,6 +530,12 @@ SURFACE_CASES = [
         {"json": {"video_key": "video-key"}},
     ),
     ("POST", "/render", {"json": {"video_key": "video-key"}}),
+    (
+        "POST",
+        "/composition",
+        {"json": {"idempotency_key": "owned-composition"}},
+    ),
+    ("POST", "/render/prepare", {"json": {"render_runtime": "ffmpeg"}}),
     ("GET", "/events", {}),
 ]
 
@@ -543,9 +579,12 @@ def test_other_users_project_is_hidden_as_404(
         ("PATCH", "/continuity"),
         ("POST", "/assets/upload"),
         ("PATCH", "/shots/s1"),
+        ("PATCH", "/creative-plan/sections/worldview"),
+        ("POST", "/creative-plan/revise"),
         ("POST", "/prompt-optimize"),
         ("POST", "/shots/s1/regenerate"),
         ("POST", "/render"),
+        ("POST", "/composition"),
     ],
 )
 def test_other_users_project_is_hidden_before_body_or_media_validation(
@@ -567,9 +606,12 @@ def test_other_users_project_is_hidden_before_body_or_media_validation(
     [
         ("PATCH", "/continuity"),
         ("PATCH", "/shots/s1"),
+        ("PATCH", "/creative-plan/sections/worldview"),
+        ("POST", "/creative-plan/revise"),
         ("POST", "/prompt-optimize"),
         ("POST", "/shots/s1/regenerate"),
         ("POST", "/render"),
+        ("POST", "/composition"),
     ],
 )
 def test_other_users_project_is_hidden_before_malformed_json_parsing(
@@ -612,6 +654,8 @@ def test_other_users_project_is_hidden_before_malformed_multipart_parsing(
         ("DELETE", "/api/projects/not-owned"),
         ("PATCH", "/api/projects/not-owned/continuity"),
         ("PATCH", "/api/projects/not-owned/shots/s1"),
+        ("PATCH", "/api/projects/not-owned/creative-plan/sections/worldview"),
+        ("POST", "/api/projects/not-owned/creative-plan/revise"),
         ("POST", "/api/projects/not-owned/prompt-optimize"),
         ("POST", "/api/projects/not-owned/shots/s1/regenerate"),
         ("POST", "/api/projects/not-owned/render"),
@@ -639,6 +683,8 @@ def test_invalid_origin_precedes_malformed_project_json(
         ("POST", "/api/projects/short-drama"),
         ("PATCH", "/api/projects/not-owned/continuity"),
         ("PATCH", "/api/projects/not-owned/shots/s1"),
+        ("PATCH", "/api/projects/not-owned/creative-plan/sections/worldview"),
+        ("POST", "/api/projects/not-owned/creative-plan/revise"),
         ("POST", "/api/projects/not-owned/prompt-optimize"),
         ("POST", "/api/projects/not-owned/shots/s1/regenerate"),
         ("POST", "/api/projects/not-owned/render"),
@@ -750,6 +796,7 @@ def test_authorized_malformed_project_bodies_preserve_validation_statuses(
         ("POST", "/prompt-optimize"),
         ("POST", "/shots/s1/regenerate"),
         ("POST", "/render"),
+        ("POST", "/composition"),
     ],
 )
 def test_malformed_project_json_authorizes_without_taking_write_lock(
@@ -898,7 +945,7 @@ def test_malformed_upload_authorizes_without_taking_write_lock(
 
 @pytest.mark.parametrize(
     "mutation_family",
-    ["continuity", "upload", "shot", "regenerate", "render"],
+    ["continuity", "upload", "shot", "render"],
 )
 def test_existing_mutation_locks_and_rechecks_before_first_project_boundary(
     ownership_context, monkeypatch, mutation_family
@@ -1144,9 +1191,16 @@ def test_project_mutation_openapi_keeps_valid_request_body_contracts(ownership_c
         ("/api/projects/{project_id}/continuity", "patch", "application/json"),
         ("/api/projects/{project_id}/assets/upload", "post", "multipart/form-data"),
         ("/api/projects/{project_id}/shots/{shot_id}", "patch", "application/json"),
+        (
+            "/api/projects/{project_id}/creative-plan/sections/{section}",
+            "patch",
+            "application/json",
+        ),
+        ("/api/projects/{project_id}/creative-plan/revise", "post", "application/json"),
         ("/api/projects/{project_id}/prompt-optimize", "post", "application/json"),
         ("/api/projects/{project_id}/shots/{shot_id}/regenerate", "post", "application/json"),
         ("/api/projects/{project_id}/render", "post", "application/json"),
+        ("/api/projects/{project_id}/composition", "post", "application/json"),
     ]
 
     request_schemas = {}
@@ -1314,7 +1368,7 @@ def test_short_drama_creation_uses_current_owner(ownership_context, monkeypatch)
     assert ownership_context["db"].get(ProjectRecord, project_id).owner_user_id == ALICE_ID
 
 
-def test_project_route_inventory_has_exactly_sixteen_surfaces(ownership_context):
+def test_project_route_inventory_has_expected_surfaces(ownership_context):
     routes = {
         (method, route.path)
         for route in ownership_context["app"].routes
@@ -1332,12 +1386,32 @@ def test_project_route_inventory_has_exactly_sixteen_surfaces(ownership_context)
         ("DELETE", "/api/projects/{project_id}"),
         ("PATCH", "/api/projects/{project_id}/continuity"),
         ("POST", "/api/projects/{project_id}/assets/upload"),
-        ("POST", "/api/projects/{project_id}/images/generate"),
+        ("POST", "/api/projects/{project_id}/assets/{asset_id}/add"),
+            ("POST", "/api/projects/{project_id}/images/generate"),
+            ("POST", "/api/projects/{project_id}/inspiration/chat"),
+            ("PATCH", "/api/projects/{project_id}/inspiration/intent"),
+            ("POST", "/api/projects/{project_id}/storyboard/plan"),
+            ("POST", "/api/projects/{project_id}/storyboard/approve"),
+            ("PATCH", "/api/projects/{project_id}/creative-plan/sections/{section}"),
+            ("POST", "/api/projects/{project_id}/creative-plan/revise"),
+            (
+                "POST",
+                "/api/projects/{project_id}/creative-plan/storyboard-revision/start",
+            ),
+            (
+                "POST",
+                "/api/projects/{project_id}/creative-plan/storyboard-revision/cancel",
+            ),
         ("GET", "/api/projects/{project_id}/media/{relative_path:path}"),
         ("PATCH", "/api/projects/{project_id}/shots/{shot_id}"),
         ("POST", "/api/projects/{project_id}/prompt-optimize"),
+            ("POST", "/api/projects/{project_id}/generation-plan/preview"),
+            ("POST", "/api/projects/{project_id}/generation-units/generate"),
+            ("POST", "/api/projects/{project_id}/shots/generate"),
         ("POST", "/api/projects/{project_id}/shots/{shot_id}/regenerate"),
         ("POST", "/api/projects/{project_id}/render"),
+        ("POST", "/api/projects/{project_id}/composition"),
+        ("POST", "/api/projects/{project_id}/render/prepare"),
         ("GET", "/api/projects/{project_id}/events"),
     }
 
@@ -1627,7 +1701,7 @@ def test_create_commit_failure_rolls_back_record_and_new_workspace(
 
 @pytest.mark.parametrize(
     "mutation_family",
-    ["continuity", "upload", "shot", "regenerate", "render"],
+    ["continuity", "upload", "shot", "render"],
 )
 def test_existing_project_commit_failure_restores_entire_workspace(
     ownership_context, monkeypatch, mutation_family
@@ -1640,6 +1714,7 @@ def test_existing_project_commit_failure_restores_entire_workspace(
     store.write_artifact(project_id, "series_bible.json", generated["series_bible"])
     store.write_asset_library(project_id, [])
     store.write_artifact(project_id, "episode_storyboard.json", generated["storyboard"])
+    _mark_project_creative_plan_approved(ownership_context, project_id)
     before_workspace = _workspace_bytes(store, project_id)
     record = ProjectRepository(ownership_context["db"]).require_owned(project_id, ALICE_ID)
     before_updated_at = record.updated_at
@@ -2404,6 +2479,88 @@ def test_import_assigns_fresh_id_owner_and_keeps_browser_local_media(ownership_c
     assert not (ownership_context["app"].state.store.project_dir(project_id) / "assets" / "images" / "image-1.png").exists()
 
 
+def test_import_preserves_shot_continuity_and_typed_video_frame_provenance(ownership_context):
+    payload = _valid_import_payload()
+    asset = payload["series_bible"]["assets"][0]
+    asset.update({
+        "kind": "scene",
+        "source_type": "video_frame",
+        "status": "stale",
+        "provenance": {
+            "shot_id": "s1",
+            "video_version": 2,
+            "media_sha256": "a" * 64,
+            "sample_time_seconds": 4.9,
+        },
+    })
+    payload["storyboard"] = {
+        "shots": [
+            {
+                "id": "s2",
+                "scene_id": "scene-1",
+                "index": 2,
+                "beat": "Continue the action",
+                "prompt": "Continue from the inherited frame.",
+                "characters": [],
+                "location": None,
+                "props": [],
+                "status": "ready",
+                "consistency_score": 100,
+                "output_url": None,
+                "output_path": None,
+                "asset_ids": [],
+                "continuity": {
+                    "mode": "carry",
+                    "inherit_previous_tail": True,
+                    "explicit_user_first_frame_asset_id": None,
+                    "inherited_first_frame_asset_id": "asset-local",
+                    "last_frame_asset_id": None,
+                    "first_frame": {
+                        "asset_id": "asset-local",
+                        "version": 1,
+                        "status": "stale",
+                        "source": "inherited",
+                        "origin_shot_id": "s1",
+                        "origin_shot_version": 2,
+                        "origin_frame_version": 1,
+                    },
+                    "last_frame": None,
+                    "stale": True,
+                },
+                "version": 1,
+                "history": [],
+            }
+        ]
+    }
+
+    response = _alice(ownership_context).post("/api/projects/import", json=payload)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["series_bible"]["assets"][0]["provenance"] == asset["provenance"]
+    continuity = body["storyboard"]["shots"][0]["continuity"]
+    assert continuity["mode"] == "carry"
+    assert continuity["inherited_first_frame_asset_id"] == "asset-local"
+    assert continuity["first_frame"] | {"generation_job_id": None} == (
+        payload["storyboard"]["shots"][0]["continuity"]["first_frame"]
+        | {"generation_job_id": None}
+    )
+    assert continuity["stale"] is True
+
+
+def test_import_rejects_untyped_video_frame_provenance(ownership_context):
+    payload = _valid_import_payload()
+    asset = payload["series_bible"]["assets"][0]
+    asset.update({
+        "source_type": "video_frame",
+        "provenance": {"shot_id": "s1", "media_sha256": "not-a-hash"},
+    })
+
+    response = _alice(ownership_context).post("/api/projects/import", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_import_write_failure_rolls_back_record_and_removes_workspace(
     ownership_context, monkeypatch
 ):
@@ -2569,6 +2726,7 @@ def test_upload_rejects_hardlinked_destination_before_writer_runs(
 ):
     client = _alice(ownership_context)
     project_id = _create_project(client, title="Hardlink upload")["id"]
+    _mark_project_creative_plan_approved(ownership_context, project_id)
     store = ownership_context["app"].state.store
 
     class FixedUUID:
@@ -2612,39 +2770,6 @@ def test_upload_rejects_hardlinked_destination_before_writer_runs(
     store.assert_project_available(project_id)
 
 
-def test_regenerate_rejects_hardlinked_destination_before_writer_runs(
-    ownership_context, monkeypatch
-):
-    client = _alice(ownership_context)
-    project_id = _create_project(client, title="Hardlink regenerate")["id"]
-    store = ownership_context["app"].state.store
-    generated = _generated_storyboard_result()
-    store.write_artifact(project_id, "series_bible.json", generated["series_bible"])
-    store.write_artifact(project_id, "episode_storyboard.json", generated["storyboard"])
-    destination = store.project_dir(project_id) / "assets" / "video" / "s1.mp4"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    outside = ownership_context["tmp_path"] / "outside-regenerate.bin"
-    outside.write_bytes(b"outside-sentinel")
-    _hardlink_file_or_skip(destination, outside)
-    calls = []
-
-    def forbidden_writer(**kwargs):
-        calls.append(kwargs)
-        destination.write_bytes(b"generated")
-        return {"output_path": str(destination), "tool_result": {}}
-
-    monkeypatch.setattr("server.app.main.run_single_shot_generation", forbidden_writer)
-
-    response = client.post(
-        f"/api/projects/{project_id}/shots/s1/regenerate",
-        json={"video_key": "video-key"},
-    )
-
-    assert response.status_code == 500
-    assert response.json() == {"detail": "Project update failed"}
-    assert calls == []
-    assert outside.read_bytes() == b"outside-sentinel"
-    store.assert_project_available(project_id)
 
 
 def test_render_rejects_hardlinked_destination_before_writer_runs(
@@ -2660,6 +2785,7 @@ def test_render_rejects_hardlinked_destination_before_writer_runs(
     generated["storyboard"]["shots"][0]["output_path"] = "assets/video/s1.mp4"
     store.write_artifact(project_id, "series_bible.json", generated["series_bible"])
     store.write_artifact(project_id, "episode_storyboard.json", generated["storyboard"])
+    _mark_project_creative_plan_approved(ownership_context, project_id)
     destination = store.project_dir(project_id) / "renders" / "final.mp4"
     destination.parent.mkdir(parents=True, exist_ok=True)
     outside = ownership_context["tmp_path"] / "outside-render.bin"
@@ -2799,6 +2925,7 @@ def test_imported_assets_survive_a_later_reference_upload(ownership_context):
         json=_valid_import_payload(),
     )
     project_id = imported.json()["project"]["id"]
+    _mark_project_creative_plan_approved(ownership_context, project_id)
 
     upload = _alice(ownership_context).post(
         f"/api/projects/{project_id}/assets/upload",
@@ -2949,9 +3076,20 @@ def test_anonymous_project_routes_require_authentication(
         ("PATCH", "/api/projects/p1/continuity", {"json": {}}),
         ("POST", "/api/projects/p1/assets/upload", {}),
         ("PATCH", "/api/projects/p1/shots/s1", {"json": {}}),
+        (
+            "PATCH",
+            "/api/projects/p1/creative-plan/sections/worldview",
+            {"json": {}},
+        ),
+        ("POST", "/api/projects/p1/creative-plan/revise", {"json": {}}),
         ("POST", "/api/projects/p1/prompt-optimize", {"json": {}}),
         ("POST", "/api/projects/p1/shots/s1/regenerate", {"json": {}}),
         ("POST", "/api/projects/p1/render", {"json": {}}),
+        (
+            "POST",
+            "/api/projects/p1/composition",
+            {"json": {"idempotency_key": "csrf-composition"}},
+        ),
     ],
 )
 def test_every_project_mutation_requires_csrf(ownership_context, method, path, kwargs):

@@ -1,0 +1,108 @@
+.root {
+  min-width: 0;
+  min-height: 0;
+  padding: 9px var(--space-3) 11px;
+  border-top: 1px solid var(--color-line);
+  background: rgb(251 251 250 / 92%);
+}
+
+.list {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+  list-style: none;
+}
+
+.list li {
+  flex: 0 0 auto;
+}
+
+.list button {
+  position: relative;
+  display: block;
+  width: 112px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-1);
+  background: #202123;
+  box-shadow: 0 1px 0 rgb(255 255 255 / 35%);
+  cursor: pointer;
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    opacity var(--duration-fast) var(--ease-standard);
+}
+
+.list button:hover {
+  opacity: .92;
+}
+
+.list button:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
+}
+
+.list button[aria-pressed="true"] {
+  border-color: rgb(255 255 255 / 82%);
+  box-shadow: 0 0 0 2px var(--color-accent), inset 0 1px 0 rgb(255 255 255 / 55%);
+}
+
+.list video,
+.placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.placeholder {
+  background: linear-gradient(145deg, #2d2e31, #191a1c);
+}
+
+.unitLabel,
+.shotLabel {
+  position: absolute;
+  bottom: 4px;
+  max-width: calc(100% - 10px);
+  overflow: hidden;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgb(10 10 11 / 76%);
+  color: #fff;
+  font-size: .5625rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unitLabel {
+  left: 5px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.shotLabel {
+  right: 5px;
+  max-width: 72px;
+}
+
+@media (max-width: 520px) {
+  .list button {
+    width: 96px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .list button {
+    transition-duration: .01ms;
+  }
+}

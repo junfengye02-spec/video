@@ -260,6 +260,28 @@ def test_syapi_video_default_base_url_is_current_gateway(monkeypatch):
     assert SyapiVideo()._base_url() == "https://api.0000238.xyz"
 
 
+def test_syapi_video_rejects_unverified_native_frame_operations(monkeypatch, tmp_path):
+    monkeypatch.setenv("SYAPI_API_KEY", "test-key")
+
+    def should_not_submit(*_args, **_kwargs):
+        raise AssertionError("native frame operation must be rejected before HTTP")
+
+    monkeypatch.setattr("requests.post", should_not_submit)
+    result = SyapiVideo().execute(
+        {
+            "prompt": "continue the action",
+            "model_variant": "omni_flash-10s",
+            "operation": "first_last_frame_to_video",
+            "first_frame_path": str(tmp_path / "first.png"),
+            "last_frame_path": str(tmp_path / "last.png"),
+            "output_path": str(tmp_path / "clip.mp4"),
+        }
+    )
+
+    assert result.success is False
+    assert "native first-frame and first/last-frame generation is unsupported" in result.error
+
+
 def test_syapi_video_http_error_reports_endpoint_model_and_status(monkeypatch, tmp_path):
     monkeypatch.setenv("SYAPI_API_KEY", "test-key")
     monkeypatch.setenv("SYAPI_BASE_URL", "https://api.0000238.xyz")

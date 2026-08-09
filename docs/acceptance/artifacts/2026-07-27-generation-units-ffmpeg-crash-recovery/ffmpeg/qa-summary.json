@@ -1,0 +1,18 @@
+{
+  "ffmpeg_version": "ffmpeg version n7.1 Copyright (c) 2000-2024 the FFmpeg developers",
+  "ffprobe_version": "ffprobe version n7.1 Copyright (c) 2007-2024 the FFmpeg developers",
+  "storyboard_shot_count": 6,
+  "generation_unit_count": 3,
+  "timeline_clip_count": 3,
+  "source_durations_seconds": [
+    0.8,
+    1.0,
+    1.2
+  ],
+  "timeline_duration_seconds": 3.0,
+  "final_duration_seconds": 3.0,
+  "target_duration_seconds": 4.0,
+  "duration_difference_seconds": -1.0,
+  "full_source": true,
+  "playback_rate": 1
+}
