@@ -1,8 +1,10 @@
 # miseStudio production deployment
 
-The production installation lives under `/opt/miseStudio` and uses the stable
-Docker Compose project name `mise-studio`. PostgreSQL, Redis, and project media
-use dedicated named volumes and do not share New API state.
+The production installation lives under `/opt/miseStudio` and follows the same
+image-based CI/CD pattern as New API. GitHub Actions builds Linux AMD64 images,
+uploads one archive through the shared `deploy` account, and invokes the
+root-owned `/usr/local/sbin/mise-studio-deploy` program. PostgreSQL, Redis, and
+project media use dedicated named volumes and do not share New API state.
 
 Runtime services:
 
@@ -16,36 +18,33 @@ The API joins `new-api-prod_new-api-prod-network` and reaches the existing New
 API service at `http://new-api:3000`. Caddy reaches the web service through the
 stable `mise-studio-web` network alias.
 
-Server layout:
+Stable server layout:
 
 ```text
 /opt/miseStudio/
-  current -> releases/<release-id>
-  releases/<release-id>/
+  docker-compose.yml
+  .release.env
   shared/.env
-  shared/backups/
-  shared/bootstrap/openmontage.dump
-  shared/bootstrap/projects.tar.gz
-  incoming/
+  backups/deploy/
+  deploy-history.tsv
+/home/deploy/uploads/
+/usr/local/sbin/mise-studio-deploy
 ```
 
-On the first deployment only, `deploy.sh` restores the optional custom-format
-PostgreSQL dump and project archive from `shared/bootstrap/`, then writes the
-`shared/bootstrap-complete` marker. Redis is intentionally not migrated so all
-browser sessions are revoked during the server move.
+The first migration was bootstrapped with `deploy.sh`. Normal releases now use
+`deploy/cicd/mise-studio-deploy.sh`: it locks deployment, backs up PostgreSQL,
+loads the two prebuilt images, applies Alembic migrations, replaces only the
+four application services, verifies FastAPI/Web/New API connectivity, and
+rolls back both images when activation or health checks fail.
 
-Each deployment builds both images, starts isolated infrastructure, writes a
-compressed PostgreSQL backup, applies Alembic migrations, replaces the app
-services, verifies FastAPI, the web frontend, and the internal New API route,
-then updates the `current` symlink.
-
-GitHub Actions repository secrets required by `.github/workflows/deploy.yml`:
+GitHub Actions repository secrets required by
+`.github/workflows/deploy-production.yml`:
 
 - `DEPLOY_HOST`
 - `DEPLOY_USER`
 - `DEPLOY_SSH_KEY`
 - `DEPLOY_KNOWN_HOSTS`
 
-The public route is `video.0000238.xyz`; merge
-`deploy/Caddyfile.miseStudio` into `/opt/new-api/Caddyfile` and reload the
-existing Caddy container after the DNS record points at the server.
+The public route is `video.0000238.xyz`. Caddy routing is a one-time server
+configuration and is not replaced during application deployments. See
+`deploy/cicd/README.zh_CN.md` for the operational handoff.
