@@ -1,0 +1,143 @@
+x-app-base: &app-base
+  image: mise-studio-app:${MISE_STUDIO_IMAGE_TAG:-local}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    target: app
+  env_file:
+    - ${MISE_STUDIO_ENV_FILE:-/opt/miseStudio/shared/.env}
+  volumes:
+    - projects_data:/app/projects
+  networks:
+    - internal
+    - newapi
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-misestudio}
+      POSTGRES_USER: ${POSTGRES_USER:-misestudio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    <<: *app-base
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["ops"]
+
+  api:
+    <<: *app-base
+    command:
+      - python
+      - -m
+      - uvicorn
+      - server.app.main:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8787"
+      - --proxy-headers
+      - --forwarded-allow-ips=*
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/openapi.json', timeout=4)
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
+
+  billing-worker:
+    <<: *app-base
+    command: ["python", "-m", "server.billing_worker"]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  media-cleanup:
+    <<: *app-base
+    command: ["python", "-m", "server.media_cleanup_worker"]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    image: mise-studio-web:${MISE_STUDIO_IMAGE_TAG:-local}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: web
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      internal:
+      newapi:
+        aliases:
+          - mise-studio-web
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+networks:
+  internal:
+    driver: bridge
+  newapi:
+    external: true
+    name: new-api-prod_new-api-prod-network
+
+volumes:
+  postgres_data:
+    name: mise-studio-postgres
+  redis_data:
+    name: mise-studio-redis
+  projects_data:
+    name: mise-studio-projects

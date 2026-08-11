@@ -1,0 +1,12 @@
+video.0000238.xyz {
+    encode zstd gzip
+
+    reverse_proxy mise-studio-web:8080 {
+        flush_interval -1
+    }
+
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+    }
+}

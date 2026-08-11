@@ -12,7 +12,7 @@ from server.app.media_retention import cleanup_expired_media
 NOW = datetime(2026, 7, 8, tzinfo=UTC)
 OLD_TIME = datetime(2026, 7, 1, tzinfo=UTC).timestamp()
 FRESH_TIME = datetime(2026, 7, 8, tzinfo=UTC).timestamp()
-RETENTION = timedelta(days=3)
+RETENTION = timedelta(days=1)
 
 
 def _write_file(path: Path, data: bytes = b"media") -> Path:
@@ -44,7 +44,7 @@ def _link_directory(link: Path, target: Path) -> None:
         pytest.skip(f"directory links are not available: {result.stderr or result.stdout}")
 
 
-def test_cleanup_preserves_old_durable_media_and_deletes_only_hidden_results(tmp_path):
+def test_cleanup_deletes_expired_project_videos_and_preserves_non_video_assets(tmp_path):
     projects_root = tmp_path / "projects"
     project = projects_root / "p1"
     old_image = _write_file(project / "assets" / "images" / "character" / "lin.png")
@@ -64,6 +64,7 @@ def test_cleanup_preserves_old_durable_media_and_deletes_only_hidden_results(tmp
     fresh_video = _write_file(project / "assets" / "video" / "fresh.mp4")
     artifact = _write_file(project / "artifacts" / "episode_storyboard.json", b"{}")
     outside_media_dir = _write_file(project / "assets" / "documents" / "notes.mp4")
+    video_metadata = _write_file(project / "assets" / "video" / "manifest.json", b"{}")
 
     for path in [
         old_image,
@@ -75,41 +76,67 @@ def test_cleanup_preserves_old_durable_media_and_deletes_only_hidden_results(tmp
         video_intent,
         artifact,
         outside_media_dir,
+        video_metadata,
     ]:
         _set_mtime(path, OLD_TIME)
     _set_mtime(fresh_video, FRESH_TIME)
 
     deleted = cleanup_expired_media(projects_root, now=NOW, retention=RETENTION)
 
-    assert set(deleted) == {hidden_video, hidden_provider_result}
+    assert set(deleted) == {
+        old_video,
+        old_render,
+        hidden_video,
+        hidden_provider_result,
+    }
     for path in [
         old_image,
-        old_video,
         old_audio,
-        old_render,
         fresh_video,
         artifact,
         outside_media_dir,
         video_intent,
+        video_metadata,
     ]:
         assert path.exists()
 
 
-def test_repeated_cleanup_never_deletes_durable_media_older_than_retention(tmp_path):
+def test_repeated_cleanup_is_idempotent_and_keeps_non_video_media(tmp_path):
     projects_root = tmp_path / "projects"
     project = projects_root / "p1"
     durable_files = [
         _write_file(project / "assets" / "images" / "generated" / "old.png"),
-        _write_file(project / "assets" / "video" / "shot.mp4"),
         _write_file(project / "assets" / "audio" / "voice.wav"),
+    ]
+    expired_videos = [
+        _write_file(project / "assets" / "video" / "shot.mp4"),
         _write_file(project / "renders" / "final.mp4"),
     ]
-    for path in durable_files:
+    for path in [*durable_files, *expired_videos]:
         _set_mtime(path, OLD_TIME)
 
-    assert cleanup_expired_media(projects_root, now=NOW, retention=RETENTION) == []
+    assert set(cleanup_expired_media(projects_root, now=NOW, retention=RETENTION)) == set(
+        expired_videos
+    )
     assert cleanup_expired_media(projects_root, now=NOW, retention=RETENTION) == []
     assert all(path.exists() for path in durable_files)
+    assert all(not path.exists() for path in expired_videos)
+
+
+def test_default_retention_is_twenty_four_hours(tmp_path, monkeypatch):
+    projects_root = tmp_path / "projects"
+    project = projects_root / "p1"
+    expired = _write_file(project / "assets" / "video" / "expired.mp4")
+    fresh = _write_file(project / "renders" / "fresh.mp4")
+    monkeypatch.setattr(
+        "server.app.media_retention.MEDIA_RETENTION_HOURS",
+        24,
+    )
+    _set_mtime(expired, (NOW - timedelta(hours=25)).timestamp())
+    _set_mtime(fresh, (NOW - timedelta(hours=23)).timestamp())
+
+    assert cleanup_expired_media(projects_root, now=NOW) == [expired]
+    assert fresh.exists()
 
 
 def test_cleanup_does_not_follow_project_symlink_outside_projects_root(tmp_path):
