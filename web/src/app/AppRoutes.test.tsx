@@ -1186,6 +1186,7 @@ describe("App routes", () => {
     expect(await screen.findByRole("heading", { name: "创作蓝图" })).toBeInTheDocument();
     expect(apiMocks.createDraftProject).toHaveBeenCalledWith({
       title: "\u96e8\u591c\u6765\u4fe1",
+      title_source: "user",
       prompt: initialProjectIdea,
       project_type: "single_video",
     });
