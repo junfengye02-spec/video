@@ -68,6 +68,7 @@ describe("NewProjectPage", () => {
     );
     await waitFor(() => expect(onCreateDraft).toHaveBeenCalledWith({
       title: "\u660e\u65e5\u6765\u4fe1",
+      title_source: "user",
       project_type: "mini_series",
       prompt: initialMessage,
     }));
@@ -76,6 +77,21 @@ describe("NewProjectPage", () => {
       initialMessage,
       "text-model-v2",
     );
+  });
+
+  it("marks the fallback title so inspiration may replace it", async () => {
+    const draft = createProjectResponse({ shotCount: 0 });
+    const onCreateDraft = vi.fn().mockResolvedValue(draft);
+    renderPage({ onCreateDraft });
+    fireEvent.change(screen.getByLabelText(ideaLabel), {
+      target: { value: "\u8ffd\u9010\u5f02\u5e38\u5929\u5149\u7684\u65c5\u884c\u8005" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: startAction }));
+
+    await waitFor(() => expect(onCreateDraft).toHaveBeenCalledWith(expect.objectContaining({
+      title: getStrings("zh").newProjectPage.projectTitlePlaceholder,
+      title_source: "placeholder",
+    })));
   });
 
   it("keeps duration in the creative brief instead of limiting it to presets", () => {

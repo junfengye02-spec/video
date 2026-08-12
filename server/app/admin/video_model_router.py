@@ -42,6 +42,21 @@ class UpdateVideoModelDurationRequest(BaseModel):
         return value
 
 
+class DeleteVideoModelDurationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("reason is required")
+        return value
+
+
 class VideoModelDurationSettingResponse(BaseModel):
     provider: str
     model_id: str
@@ -176,6 +191,76 @@ def update_video_model_duration_setting(
             provider=setting.provider,
             model_id=setting.model_id,
         )
+    except VideoModelDurationConflict as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "video_model_duration_version_conflict",
+                "expected_version": body.expected_version,
+                "current_version": exc.current_version,
+            },
+        ) from None
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "video_model_duration_invalid", "message": str(exc)},
+        ) from None
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "video_model_duration_settings_unavailable"},
+        ) from exc
+
+
+@router.delete(
+    "/video-model-duration-settings/{model_id:path}",
+    status_code=204,
+)
+def delete_video_model_duration_setting(
+    model_id: str,
+    body: DeleteVideoModelDurationRequest,
+    current: CurrentUser = Depends(_require_admin_csrf),
+    db: Session = Depends(get_db),
+    newapi: NewApiClient = Depends(get_newapi_client),
+) -> None:
+    service = VideoModelDurationService(db)
+    existing = service.get(provider="newapi", model_id=model_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail={"code": "video_model_not_found"})
+    if existing.version != body.expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "video_model_duration_version_conflict",
+                "expected_version": body.expected_version,
+                "current_version": existing.version,
+            },
+        )
+    try:
+        catalog_ids = set(newapi.list_models("video"))
+    except (InvalidNewApiResponse, NewApiCallError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "provider_model_catalog_unavailable"},
+        ) from exc
+    if model_id in catalog_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "video_model_still_in_catalog"},
+        )
+
+    try:
+        service.delete(
+            provider="newapi",
+            model_id=model_id,
+            expected_version=body.expected_version,
+            updated_by=current.id,
+            reason=body.reason,
+        )
+        db.commit()
     except VideoModelDurationConflict as exc:
         db.rollback()
         raise HTTPException(

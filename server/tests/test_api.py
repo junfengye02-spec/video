@@ -993,6 +993,70 @@ def test_inspiration_promotes_single_video_draft_when_brief_explicitly_becomes_s
     assert stored["project"]["project_type"] == "mini_series"
 
 
+def test_inspiration_title_replaces_only_an_untitled_draft(tmp_path, monkeypatch):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+
+    def fake_develop_inspiration_billed(**_kwargs):
+        return {
+            "reply": "The creative brief is ready.",
+            "ready_to_confirm": True,
+            "brief": {
+                "title": "\u98ce\u666f\u70ab\u6280\uff1a\u8ffd\u5149\u8005",
+                "logline": "A traveler follows impossible light.",
+                "audience": "Travel viewers",
+                "format": "single_video",
+                "duration_seconds": 60,
+                "aspect_ratio": "16:9",
+                "genre": "Adventure",
+                "tone": "Epic",
+                "visual_style": "Cinematic landscapes",
+                "story_outline": "A complete journey.",
+                "must_have": [],
+                "open_questions": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "server.app.main.develop_inspiration_billed",
+        fake_develop_inspiration_billed,
+    )
+    untitled = client.post(
+        "/api/projects",
+        json={
+            "title": "\u672a\u547d\u540d\u9879\u76ee",
+            "title_source": "placeholder",
+            "project_type": "single_video",
+        },
+    ).json()
+    named = client.post(
+        "/api/projects",
+        json={
+            "title": "\u6211\u624b\u52a8\u8d77\u7684\u6807\u9898",
+            "title_source": "user",
+            "project_type": "single_video",
+        },
+    ).json()
+
+    updated_untitled = client.post(
+        f"/api/projects/{untitled['project']['id']}/inspiration/chat",
+        json={"messages": [{"role": "user", "content": "A landscape adventure."}]},
+    )
+    updated_named = client.post(
+        f"/api/projects/{named['project']['id']}/inspiration/chat",
+        json={"messages": [{"role": "user", "content": "A landscape adventure."}]},
+    )
+
+    assert updated_untitled.status_code == 200, updated_untitled.text
+    assert updated_untitled.json()["project"]["title"] == "\u98ce\u666f\u70ab\u6280\uff1a\u8ffd\u5149\u8005"
+    assert updated_untitled.json()["series_bible"]["title"] == "\u98ce\u666f\u70ab\u6280\uff1a\u8ffd\u5149\u8005"
+    assert app.state.store.read_artifact(
+        untitled["project"]["id"], "project_title_source.json"
+    ) == {"source": "inspiration"}
+    assert updated_named.status_code == 200, updated_named.text
+    assert updated_named.json()["project"]["title"] == "\u6211\u624b\u52a8\u8d77\u7684\u6807\u9898"
+
+
 def test_planning_requests_use_the_server_configured_model_when_omitted(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     app.dependency_overrides[get_settings] = lambda: AppSettings(

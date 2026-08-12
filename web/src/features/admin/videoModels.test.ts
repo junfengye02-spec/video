@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listAdminVideoModels, updateAdminVideoModelDuration } from "./videoModels";
+import {
+  deleteAdminVideoModelDuration,
+  listAdminVideoModels,
+  updateAdminVideoModelDuration,
+} from "./videoModels";
 
 const authMocks = vi.hoisted(() => ({ authRequest: vi.fn() }));
 
@@ -90,5 +94,25 @@ describe("video model administration service", () => {
       expected_version: 0,
       reason: "test",
     })).rejects.toThrow("Invalid call_duration_seconds");
+  });
+
+  it("deletes an encoded missing model setting with its expected version", async () => {
+    authMocks.authRequest.mockResolvedValue(undefined);
+
+    await deleteAdminVideoModelDuration("vendor/model-v2", {
+      expected_version: 4,
+      reason: "removed from provider catalog",
+    });
+
+    expect(authMocks.authRequest).toHaveBeenCalledWith(
+      "/api/admin/video-model-duration-settings/vendor%2Fmodel-v2",
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expected_version: 4,
+          reason: "removed from provider catalog",
+        }),
+      },
+    );
   });
 });

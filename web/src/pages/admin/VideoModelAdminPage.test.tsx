@@ -4,6 +4,7 @@ import { AuthRequestError } from "../../auth/api";
 import { VideoModelAdminPage } from "./VideoModelAdminPage";
 
 const serviceMocks = vi.hoisted(() => ({
+  deleteAdminVideoModelDuration: vi.fn(),
   listAdminVideoModels: vi.fn(),
   updateAdminVideoModelDuration: vi.fn(),
 }));
@@ -48,6 +49,7 @@ const catalog = {
 };
 
 beforeEach(() => {
+  serviceMocks.deleteAdminVideoModelDuration.mockReset().mockResolvedValue(undefined);
   serviceMocks.listAdminVideoModels.mockReset();
   serviceMocks.updateAdminVideoModelDuration.mockReset();
   Object.defineProperty(window.navigator, "language", {
@@ -155,5 +157,26 @@ describe("VideoModelAdminPage", () => {
     expect(await screen.findByText("removed/model-v1")).toBeInTheDocument();
     expect(screen.getByText(/NewAPI 目录刷新失败/)).toBeInTheDocument();
     expect(screen.getByText("provider_model_catalog_unavailable")).toBeInTheDocument();
+  });
+
+  it("deletes a catalog-missing setting after confirmation", async () => {
+    render(<VideoModelAdminPage />);
+
+    await screen.findByText("removed/model-v1");
+    fireEvent.click(screen.getByRole("button", { name: "\u5220\u9664\u914d\u7f6e" }));
+    const dialog = screen.getByRole("dialog", { name: "\u5220\u9664 removed/model-v1" });
+    const confirm = within(dialog).getByRole("button", { name: "\u786e\u8ba4\u5220\u9664" });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(within(dialog).getByLabelText("\u5220\u9664\u539f\u56e0"), {
+      target: { value: "NewAPI \u76ee\u5f55\u5df2\u5220\u9664" },
+    });
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(serviceMocks.deleteAdminVideoModelDuration).toHaveBeenCalledWith(
+      "removed/model-v1",
+      { expected_version: 2, reason: "NewAPI \u76ee\u5f55\u5df2\u5220\u9664" },
+    ));
+    expect(screen.queryByText("removed/model-v1")).not.toBeInTheDocument();
+    expect(screen.getByText("removed/model-v1 \u5df2\u5220\u9664\u3002")).toBeInTheDocument();
   });
 });

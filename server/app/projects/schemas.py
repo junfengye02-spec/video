@@ -38,6 +38,7 @@ OpaqueArtifactId = Annotated[
 
 class ProjectCreateRequest(CredentialFreeRequest):
     title: str = Field(min_length=1, max_length=255)
+    title_source: Literal["user", "placeholder"] | None = None
     project_type: ProjectType = "single_video"
     prompt: str = Field(default="", max_length=10000)
 

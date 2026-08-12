@@ -110,6 +110,7 @@ describe("ProjectsPage", () => {
     const initialMessage = "一只旧表见证两代人的和解\n\n创作偏好：品牌叙事，9:16 画幅。";
     await waitFor(() => expect(onCreateDraft).toHaveBeenCalledWith({
       title: "雨夜品牌片",
+      title_source: "user",
       project_type: "mini_series",
       prompt: initialMessage,
     }));

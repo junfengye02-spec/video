@@ -33,6 +33,11 @@ export interface UpdateAdminVideoModelDurationRequest {
   reason: string;
 }
 
+export interface DeleteAdminVideoModelDurationRequest {
+  expected_version: number;
+  reason: string;
+}
+
 type ObjectRecord = Record<string, unknown>;
 
 function asObject(value: unknown): ObjectRecord {
@@ -145,4 +150,14 @@ export async function updateAdminVideoModelDuration(
     `/api/admin/video-model-duration-settings/${encodeURIComponent(modelId)}`,
     { method: "PUT", body: JSON.stringify(payload) },
   ));
+}
+
+export async function deleteAdminVideoModelDuration(
+  modelId: string,
+  payload: DeleteAdminVideoModelDurationRequest,
+): Promise<void> {
+  await authRequest(
+    `/api/admin/video-model-duration-settings/${encodeURIComponent(modelId)}`,
+    { method: "DELETE", body: JSON.stringify(payload) },
+  );
 }

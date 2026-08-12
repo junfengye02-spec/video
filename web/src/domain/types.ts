@@ -799,6 +799,7 @@ export interface ShortDramaProjectResponse {
 
 export interface DraftProjectRequest {
   title: string;
+  title_source?: "user" | "placeholder";
   project_type: ProjectType;
   prompt?: string;
 }

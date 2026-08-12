@@ -267,6 +267,11 @@
   min-height: 40px;
 }
 
+.deleteButton {
+  grid-column: 1 / -1;
+  justify-self: end;
+}
+
 .validation {
   grid-column: 1 / -1;
   color: var(--mise-danger);

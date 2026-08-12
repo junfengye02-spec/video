@@ -6,7 +6,7 @@ import math
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -35,7 +35,11 @@ BOOTSTRAP_VIDEO_MODEL_DURATIONS: tuple[tuple[str, str, float], ...] = (
 )
 
 
-def bootstrap_verified_duration_settings(db: Session) -> None:
+def bootstrap_verified_duration_settings(
+    db: Session,
+    *,
+    catalog_ids: set[str] | None = None,
+) -> None:
     existing = {
         (provider, model_id)
         for provider, model_id in db.execute(
@@ -47,6 +51,8 @@ def bootstrap_verified_duration_settings(db: Session) -> None:
     }
     now = datetime.now(timezone.utc)
     for provider, model_id, duration in BOOTSTRAP_VIDEO_MODEL_DURATIONS:
+        if catalog_ids is not None and model_id not in catalog_ids:
+            continue
         if (provider, model_id) in existing:
             continue
         setting_id = hashlib.sha256(
@@ -276,6 +282,65 @@ class VideoModelDurationService:
         )
         self.db.flush()
         return setting
+
+    def delete(
+        self,
+        *,
+        provider: str,
+        model_id: str,
+        expected_version: int,
+        updated_by: str | None,
+        reason: str,
+    ) -> VideoModelDurationSetting:
+        provider = provider.strip()
+        model_id = model_id.strip()
+        reason = reason.strip()
+        if not provider or len(provider) > 64:
+            raise ValueError("provider is invalid")
+        if (
+            not model_id
+            or len(model_id) > 200
+            or any(ord(char) < 32 for char in model_id)
+        ):
+            raise ValueError("model_id is invalid")
+        if not reason or len(reason) > 500:
+            raise ValueError("reason is invalid")
+        if expected_version < 1:
+            raise ValueError("expected_version must be positive")
+
+        existing = self.get(provider=provider, model_id=model_id)
+        if existing is None:
+            raise VideoModelDurationConflict(None)
+        if existing.version != expected_version:
+            raise VideoModelDurationConflict(existing.version)
+        before = _setting_snapshot(existing)
+        result = self.db.execute(
+            delete(VideoModelDurationSetting).where(
+                VideoModelDurationSetting.id == existing.id,
+                VideoModelDurationSetting.version == expected_version,
+            )
+        )
+        if result.rowcount != 1:
+            self.db.expire_all()
+            current = self.get(provider=provider, model_id=model_id)
+            raise VideoModelDurationConflict(
+                None if current is None else current.version
+            )
+        self.db.expunge(existing)
+        self.db.add(
+            AdminAuditLog(
+                id=uuid.uuid4().hex,
+                admin_user_id=updated_by or "system",
+                action="video_model_duration.delete",
+                object_type="video_model_duration_setting",
+                object_id=_audit_object_id(provider, model_id),
+                before_json=_compact_json(before),
+                after_json=_compact_json({"reason": reason}),
+                ip_address=None,
+            )
+        )
+        self.db.flush()
+        return existing
 
 
 __all__ = [

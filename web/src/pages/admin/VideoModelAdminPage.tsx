@@ -5,11 +5,13 @@ import {
   RefreshCw,
   Save,
   Search,
+  Trash2,
   Video,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { AuthRequestError } from "../../auth/api";
 import {
+  deleteAdminVideoModelDuration,
   listAdminVideoModels,
   updateAdminVideoModelDuration,
   type AdminVideoModelCatalog,
@@ -22,6 +24,11 @@ import styles from "./VideoModelAdminPage.module.css";
 interface PendingChange {
   item: AdminVideoModelDurationItem;
   duration: number;
+  reason: string;
+}
+
+interface PendingDelete {
+  item: AdminVideoModelDurationItem;
   reason: string;
 }
 
@@ -44,9 +51,11 @@ export function VideoModelAdminPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [savingModelId, setSavingModelId] = useState<string | null>(null);
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<PendingChange | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<PendingDelete | null>(null);
   const [confirmationError, setConfirmationError] = useState<string | null>(null);
   const openerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -142,6 +151,57 @@ export function VideoModelAdminPage() {
     }
   }
 
+  function requestDelete(item: AdminVideoModelDurationItem, opener: HTMLButtonElement) {
+    if (item.catalog_status !== "missing_from_catalog" || item.version === null) return;
+    openerRef.current = opener;
+    setError(null);
+    setNotice(null);
+    setConfirmationError(null);
+    setDeleteConfirmation({ item, reason: "" });
+  }
+
+  async function confirmDelete(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!deleteConfirmation || deletingModelId || !deleteConfirmation.reason.trim()) return;
+    const pending = deleteConfirmation;
+    if (pending.item.version === null) return;
+    setDeletingModelId(pending.item.model_id);
+    setConfirmationError(null);
+    try {
+      await deleteAdminVideoModelDuration(pending.item.model_id, {
+        expected_version: pending.item.version,
+        reason: pending.reason.trim(),
+      });
+      setCatalog((current) => current ? {
+        ...current,
+        models: current.models.filter((item) => item.model_id !== pending.item.model_id),
+      } : current);
+      setDrafts((current) => {
+        const next = { ...current };
+        delete next[pending.item.model_id];
+        return next;
+      });
+      setDeleteConfirmation(null);
+      setNotice(copy.deleteSuccess(pending.item.model_id));
+    } catch (caught) {
+      if (caught instanceof AuthRequestError && caught.code === "conflict") {
+        setDeleteConfirmation(null);
+        await loadCatalog("refresh");
+        setError(copy.deleteConflict);
+      } else if (caught instanceof AuthRequestError && caught.code === "csrf_invalid") {
+        setConfirmationError(copy.csrfError);
+      } else if (caught instanceof AuthRequestError && caught.code === "forbidden") {
+        setConfirmationError(copy.forbidden);
+      } else if (caught instanceof AuthRequestError && caught.code === "server") {
+        setConfirmationError(copy.deleteCatalogError);
+      } else {
+        setConfirmationError(copy.deleteError);
+      }
+    } finally {
+      setDeletingModelId(null);
+    }
+  }
+
   return (
     <section className={`billing-admin-page billing-workspace ${styles.root}`} aria-labelledby="video-model-admin-title">
       <div className="page-heading billing-page-heading">
@@ -154,7 +214,7 @@ export function VideoModelAdminPage() {
           variant="secondary"
           icon={<RefreshCw size={16} />}
           loading={refreshing}
-          disabled={loading || savingModelId !== null}
+          disabled={loading || savingModelId !== null || deletingModelId !== null}
           onClick={() => void loadCatalog("refresh")}
         >
           {refreshing ? copy.refreshingAction : copy.refreshAction}
@@ -208,6 +268,7 @@ export function VideoModelAdminPage() {
                 const invalid = duration === null;
                 const unchanged = duration !== null && duration === item.call_duration_seconds;
                 const saving = savingModelId === item.model_id;
+                const deleting = deletingModelId === item.model_id;
                 const validationId = `duration-error-${item.model_id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
                 return (
                   <li key={item.model_id}>
@@ -283,6 +344,20 @@ export function VideoModelAdminPage() {
                       >
                         {saving ? copy.savingAction : copy.saveAction}
                       </Button>
+                      {catalog.catalog_refresh_status === "ok"
+                        && item.catalog_status === "missing_from_catalog"
+                        && item.version !== null ? (
+                        <Button
+                          className={styles.deleteButton}
+                          variant="danger"
+                          icon={<Trash2 size={15} />}
+                          loading={deleting}
+                          disabled={savingModelId !== null || deletingModelId !== null}
+                          onClick={(event) => requestDelete(item, event.currentTarget)}
+                        >
+                          {deleting ? copy.deletingAction : copy.deleteAction}
+                        </Button>
+                      ) : null}
                     </div>
                   </li>
                 );
@@ -345,6 +420,53 @@ export function VideoModelAdminPage() {
                 disabled={!confirmation.reason.trim()}
               >
                 {savingModelId ? copy.savingAction : copy.confirmAction}
+              </Button>
+            </footer>
+          </form>
+        ) : null}
+      </Dialog>
+
+      <Dialog
+        open={deleteConfirmation !== null}
+        closeDisabled={deletingModelId !== null}
+        openerRef={openerRef}
+        title={deleteConfirmation ? copy.deleteTitle(deleteConfirmation.item.model_id) : ""}
+        onClose={() => {
+          if (!deletingModelId) setDeleteConfirmation(null);
+        }}
+      >
+        {deleteConfirmation ? (
+          <form className={styles.confirmation} onSubmit={(event) => void confirmDelete(event)}>
+            <p>{copy.deleteDescription(deleteConfirmation.item.model_id)}</p>
+            <label htmlFor="video-model-delete-reason">
+              {copy.deleteReasonLabel}
+              <textarea
+                id="video-model-delete-reason"
+                autoFocus
+                maxLength={500}
+                rows={4}
+                value={deleteConfirmation.reason}
+                disabled={deletingModelId !== null}
+                placeholder={copy.deleteReasonPlaceholder}
+                onChange={(event) => setDeleteConfirmation((current) => current
+                  ? { ...current, reason: event.target.value }
+                  : current)}
+              />
+            </label>
+            <p className={styles.auditNotice}>{copy.auditNotice}</p>
+            {confirmationError ? <p className={styles.dialogError} role="alert">{confirmationError}</p> : null}
+            <footer>
+              <Button variant="secondary" disabled={deletingModelId !== null} onClick={() => setDeleteConfirmation(null)}>
+                {copy.cancelAction}
+              </Button>
+              <Button
+                type="submit"
+                variant="danger"
+                icon={<Trash2 size={15} />}
+                loading={deletingModelId !== null}
+                disabled={!deleteConfirmation.reason.trim()}
+              >
+                {deletingModelId ? copy.deletingAction : copy.confirmDeleteAction}
               </Button>
             </footer>
           </form>

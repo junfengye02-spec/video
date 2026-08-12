@@ -99,6 +99,7 @@ export function ProjectComposer({
     try {
       const result = await onCreateDraft({
         title: title.trim() || strings.projectTitlePlaceholder,
+        title_source: title.trim() ? "user" : "placeholder",
         project_type: projectType,
         prompt: initialMessage,
       });

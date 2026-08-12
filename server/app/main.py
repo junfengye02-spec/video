@@ -804,6 +804,13 @@ def _project_type_from_brief(brief: Any) -> ProjectType | None:
     return None
 
 
+def _brief_project_title(brief: Any) -> str | None:
+    if not isinstance(brief, dict):
+        return None
+    title = str(brief.get("title") or "").strip()
+    return title[:255] if title else None
+
+
 def _default_creative_workflow(storyboard: dict[str, Any]) -> dict[str, Any]:
     has_storyboard = bool(storyboard.get("shots"))
     section_status = "approved" if has_storyboard else "pending"
@@ -5054,6 +5061,11 @@ def create_app(
             storyboard = {"shots": []}
             continuity_plan = _default_continuity_plan(payload.project_type)
             creative_workflow = _default_creative_workflow(storyboard)
+            title_source = payload.title_source or (
+                "placeholder"
+                if payload.title in {"\u672a\u547d\u540d\u9879\u76ee", "Untitled project"}
+                else "user"
+            )
             consistency_report = {"score": 100, "issues": []}
             _persist_storyboard_state(
                 workbench=workbench,
@@ -5064,6 +5076,9 @@ def create_app(
             )
             workbench.write_artifact(project.id, "continuity_plan.json", continuity_plan)
             workbench.write_artifact(project.id, "creative_workflow.json", creative_workflow)
+            workbench.write_artifact(
+                project.id, "project_title_source.json", {"source": title_source}
+            )
             rewrite_workflow_artifacts(
                 workbench=workbench,
                 project_id=project.id,
@@ -5089,6 +5104,9 @@ def create_app(
         newapi: NewApiClient = Depends(get_newapi_client),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, InspirationChatRequest)
+        raw_title_source = workbench.read_artifact(
+            project_id, "project_title_source.json"
+        )
         existing_workflow = _require_inspiration_editable_workflow(
             workbench, project_id
         )
@@ -5146,6 +5164,19 @@ def create_app(
             if authorized_project.project_type == "single_video"
             else None
         )
+        generated_title = _brief_project_title(result.get("brief"))
+        should_adopt_generated_title = generated_title is not None and (
+            (
+                isinstance(raw_title_source, dict)
+                and raw_title_source.get("source")
+                in {"placeholder", "inspiration"}
+            )
+            or (
+                not isinstance(raw_title_source, dict)
+                and authorized_project.title
+                in {"\u672a\u547d\u540d\u9879\u76ee", "Untitled project"}
+            )
+        )
         continuity_plan = workbench.read_artifact(
             project_id, "continuity_plan.json"
         ) or _default_continuity_plan(authorized_project.project_type)
@@ -5158,6 +5189,9 @@ def create_app(
         changed_paths = ["artifacts/creative_workflow.json"]
         if promoted_project_type is not None:
             changed_paths.append("artifacts/continuity_plan.json")
+        if should_adopt_generated_title:
+            changed_paths.append("artifacts/series_bible.json")
+            changed_paths.append("artifacts/project_title_source.json")
         with _project_mutation(
             db=db,
             workbench=workbench,
@@ -5166,12 +5200,26 @@ def create_app(
             changed_paths=changed_paths,
             failure_detail="Inspiration conversation could not be saved",
         ):
-            workbench.write_artifact(project_id, "creative_workflow.json", workflow)
             if promoted_project_type is not None:
                 authorized_project.project_type = promoted_project_type
                 workbench.write_artifact(
                     project_id, "continuity_plan.json", continuity_plan
                 )
+            if should_adopt_generated_title:
+                authorized_project.title = generated_title
+                series_bible = workbench.read_artifact(
+                    project_id, "series_bible.json"
+                ) or {}
+                series_bible["title"] = generated_title
+                workbench.write_artifact(
+                    project_id, "series_bible.json", series_bible
+                )
+                workbench.write_artifact(
+                    project_id,
+                    "project_title_source.json",
+                    {"source": "inspiration"},
+                )
+            workbench.write_artifact(project_id, "creative_workflow.json", workflow)
             authorized_project.updated_at = datetime.now(timezone.utc)
         return _project_snapshot(workbench, authorized_project)
 

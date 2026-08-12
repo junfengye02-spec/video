@@ -368,6 +368,83 @@ def test_catalog_failure_returns_persisted_settings_without_deleting_them(
     assert len(VideoModelDurationService(duration_db).list(provider="newapi")) == before
 
 
+def test_admin_can_delete_only_a_catalog_missing_setting(tmp_path, duration_db):
+    catalog = FakeVideoCatalog()
+    with _client(tmp_path, duration_db, catalog, ADMIN) as client:
+        missing = VideoModelDurationService(duration_db).get(
+            provider="newapi", model_id="sora_v2"
+        )
+        assert missing is not None
+        deleted = client.request(
+            "DELETE",
+            "/api/admin/video-model-duration-settings/sora_v2",
+            json={
+                "expected_version": missing.version,
+                "reason": "provider removed the model directory",
+            },
+        )
+
+        available = VideoModelDurationService(duration_db).get(
+            provider="newapi", model_id="omni_flash-10s"
+        )
+        assert available is not None
+        rejected = client.request(
+            "DELETE",
+            "/api/admin/video-model-duration-settings/omni_flash-10s",
+            json={
+                "expected_version": available.version,
+                "reason": "must not delete a live model",
+            },
+        )
+
+    assert deleted.status_code == 204, deleted.text
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "video_model_still_in_catalog"
+    assert VideoModelDurationService(duration_db).get(
+        provider="newapi", model_id="sora_v2"
+    ) is None
+    audit = duration_db.scalar(
+        select(AdminAuditLog).where(
+            AdminAuditLog.action == "video_model_duration.delete"
+        )
+    )
+    assert audit is not None
+    assert json.loads(audit.after_json)["reason"] == (
+        "provider removed the model directory"
+    )
+
+
+def test_delete_requires_catalog_verification_and_matching_version(
+    tmp_path, duration_db
+):
+    catalog = FakeVideoCatalog()
+    missing = VideoModelDurationService(duration_db).get(
+        provider="newapi", model_id="sora_v2"
+    )
+    assert missing is not None
+    with _client(tmp_path, duration_db, catalog, ADMIN) as client:
+        conflict = client.request(
+            "DELETE",
+            "/api/admin/video-model-duration-settings/sora_v2",
+            json={"expected_version": missing.version + 1, "reason": "stale tab"},
+        )
+        catalog.fail = True
+        unavailable = client.request(
+            "DELETE",
+            "/api/admin/video-model-duration-settings/sora_v2",
+            json={"expected_version": missing.version, "reason": "catalog down"},
+        )
+
+    assert conflict.status_code == 409
+    assert unavailable.status_code == 503
+    assert unavailable.json()["detail"]["code"] == (
+        "provider_model_catalog_unavailable"
+    )
+    assert VideoModelDurationService(duration_db).get(
+        provider="newapi", model_id="sora_v2"
+    ) is not None
+
+
 POSTGRES_URL_ENV = "GENERATION_UNITS_ACCEPTANCE_DATABASE_URL"
 
 

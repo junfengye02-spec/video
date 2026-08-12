@@ -79,6 +79,17 @@ export interface UIStrings {
     forbidden: string;
     csrfError: string;
     saveError: string;
+    deleteAction: string;
+    deletingAction: string;
+    deleteTitle: (modelId: string) => string;
+    deleteDescription: (modelId: string) => string;
+    deleteReasonLabel: string;
+    deleteReasonPlaceholder: string;
+    confirmDeleteAction: string;
+    deleteSuccess: (modelId: string) => string;
+    deleteConflict: string;
+    deleteCatalogError: string;
+    deleteError: string;
   };
   appShell: {
     workbenchTitle: string;
@@ -803,6 +814,17 @@ const STRINGS: Record<Locale, UIStrings> = {
       forbidden: "Administrator access is required for this operation.",
       csrfError: "The session security token is stale. Sign in again before saving.",
       saveError: "Unable to save the model duration.",
+      deleteAction: "Delete setting",
+      deletingAction: "Deleting",
+      deleteTitle: (modelId) => `Delete ${modelId}`,
+      deleteDescription: (modelId) => `${modelId} is missing from the NewAPI catalog. Delete its persisted duration setting?`,
+      deleteReasonLabel: "Deletion reason",
+      deleteReasonPlaceholder: "Record why this missing model setting is being removed",
+      confirmDeleteAction: "Delete setting",
+      deleteSuccess: (modelId) => `${modelId} was removed.`,
+      deleteConflict: "This model changed or returned to the catalog. The latest catalog has been loaded.",
+      deleteCatalogError: "The NewAPI catalog could not be verified, so the setting was not deleted.",
+      deleteError: "Unable to delete the missing model setting.",
     },
     appShell: {
       workbenchTitle: "mise studio",
@@ -1688,6 +1710,17 @@ const STRINGS: Record<Locale, UIStrings> = {
       forbidden: "\u6b64\u64cd\u4f5c\u9700\u8981\u7ba1\u7406\u5458\u6743\u9650\u3002",
       csrfError: "\u4f1a\u8bdd\u5b89\u5168\u4ee4\u724c\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55\u540e\u4fdd\u5b58\u3002",
       saveError: "\u65e0\u6cd5\u4fdd\u5b58\u6a21\u578b\u65f6\u957f\u3002",
+      deleteAction: "\u5220\u9664\u914d\u7f6e",
+      deletingAction: "\u5220\u9664\u4e2d",
+      deleteTitle: (modelId) => `\u5220\u9664 ${modelId}`,
+      deleteDescription: (modelId) => `${modelId} \u5df2\u4e0d\u5728 NewAPI \u76ee\u5f55\u4e2d\uff0c\u662f\u5426\u5220\u9664\u5b83\u5df2\u6301\u4e45\u5316\u7684\u65f6\u957f\u914d\u7f6e\uff1f`,
+      deleteReasonLabel: "\u5220\u9664\u539f\u56e0",
+      deleteReasonPlaceholder: "\u8bb0\u5f55\u5220\u9664\u8be5\u7f3a\u5931\u6a21\u578b\u914d\u7f6e\u7684\u539f\u56e0",
+      confirmDeleteAction: "\u786e\u8ba4\u5220\u9664",
+      deleteSuccess: (modelId) => `${modelId} \u5df2\u5220\u9664\u3002`,
+      deleteConflict: "\u8be5\u6a21\u578b\u5df2\u53d8\u66f4\u6216\u91cd\u65b0\u51fa\u73b0\u5728\u76ee\u5f55\u4e2d\uff0c\u5df2\u52a0\u8f7d\u6700\u65b0\u76ee\u5f55\u3002",
+      deleteCatalogError: "\u65e0\u6cd5\u6821\u9a8c NewAPI \u76ee\u5f55\uff0c\u672a\u5220\u9664\u8be5\u914d\u7f6e\u3002",
+      deleteError: "\u65e0\u6cd5\u5220\u9664\u7f3a\u5931\u7684\u6a21\u578b\u914d\u7f6e\u3002",
     },
     appShell: {
       workbenchTitle: "mise studio",
