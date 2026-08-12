@@ -189,6 +189,7 @@ def execute_billed_provider_call(
     reservation_validator: Callable[[str], None] | None = None,
     discard_reservation: Callable[[str], None] | None = None,
     now: datetime | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> ProviderCallContext:
     if capability == "video":
         require_billing_worker_healthy(db, settings)
@@ -275,9 +276,31 @@ def execute_billed_provider_call(
     while True:
         _heartbeat_or_pending(db, claim)
         try:
-            result = newapi.execute_quoted(
-                capability, child.token_alias, request, child.quote_id
-            )
+            if stream_callback is None:
+                result = newapi.execute_quoted(
+                    capability,
+                    child.token_alias,
+                    request,
+                    child.quote_id,
+                )
+            else:
+                try:
+                    result = newapi.execute_quoted(
+                        capability,
+                        child.token_alias,
+                        request,
+                        child.quote_id,
+                        stream_callback=stream_callback,
+                    )
+                except TypeError as exc:
+                    if "stream_callback" not in str(exc):
+                        raise
+                    result = newapi.execute_quoted(
+                        capability,
+                        child.token_alias,
+                        request,
+                        child.quote_id,
+                    )
             _heartbeat_or_pending(db, claim)
             billing.bind_provider_reference(
                 child.id,
@@ -354,6 +377,7 @@ def retry_payment_required_quote(
     reservation_validator: Callable[[str], None] | None = None,
     discard_reservation: Callable[[str], None] | None = None,
     now: datetime | None = None,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> ProviderCallContext:
     return execute_billed_provider_call(
         db=db, newapi=newapi, settings=settings,
@@ -364,6 +388,7 @@ def retry_payment_required_quote(
         reservation_validator=reservation_validator,
         discard_reservation=discard_reservation,
         now=now,
+        stream_callback=stream_callback,
     )
 
 

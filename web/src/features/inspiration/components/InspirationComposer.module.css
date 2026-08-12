@@ -62,19 +62,91 @@
 }
 
 .composerSurface {
+  position: relative;
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(0, 1fr) 42px;
+  grid-template-columns: minmax(0, 1fr) 34px;
   align-items: end;
   gap: var(--space-2);
   padding: 9px;
   border: 1px solid var(--color-line-strong);
   border-radius: var(--radius-3);
   background: var(--color-surface-raised);
+  grid-template-rows: auto minmax(54px, auto);
   transition:
     border-color var(--duration-fast) var(--ease-standard),
     box-shadow var(--duration-fast) var(--ease-standard);
 }
+
+.attachments {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 1px 1px 5px;
+}
+
+.attachmentCard,
+.uploadingCard {
+  display: inline-flex;
+  max-width: 210px;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 7px 4px 5px;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-ink-secondary);
+  font-size: .6875rem;
+}
+
+.attachmentPreview {
+  width: 27px;
+  height: 27px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.attachmentIcon {
+  display: inline-grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
+.attachmentName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.removeAttachment,
+.attachButton {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink-muted);
+  cursor: pointer;
+}
+
+.removeAttachment { flex: 0 0 auto; padding: 2px; }
+.removeAttachment:hover:not(:disabled), .attachButton:hover:not(:disabled) { color: var(--color-ink); }
+.attachButton {
+  position: absolute;
+  left: 13px;
+  bottom: 12px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+}
+.attachButton:disabled { cursor: not-allowed; opacity: .45; }
+.uploadingCard { color: var(--color-ink-muted); }
 
 .composerSurface:focus-within {
   border-color: var(--color-accent);
@@ -85,7 +157,7 @@
   width: 100%;
   min-height: 54px;
   max-height: 150px;
-  padding: 4px 3px;
+  padding: 4px 42px 34px 3px;
   resize: none;
   border: 0;
   border-radius: 0;
@@ -101,20 +173,53 @@
 .composerSurface textarea::placeholder { color: var(--color-ink-faint); }
 
 .sendCommand {
-  width: 42px;
-  min-width: 42px;
-  height: 42px;
-  min-height: 42px;
+  display: grid;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
   padding: 0;
+  place-items: center;
+  align-self: end;
+  border: 0;
   border-radius: 50%;
+  background: var(--color-ink);
+  box-shadow: var(--shadow-control);
+  color: var(--color-surface-raised);
+  cursor: pointer;
+  line-height: 0;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard),
+    opacity var(--duration-fast) var(--ease-standard);
 }
 
-.sendLabel {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
+.sendCommand:hover:not(:disabled) {
+  background: var(--color-ink-secondary);
+  box-shadow: var(--shadow-panel);
+}
+
+.sendCommand:active:not(:disabled) {
+  transform: scale(.94);
+}
+
+.sendCommand:focus-visible {
+  outline: 3px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.sendCommand:disabled {
+  cursor: not-allowed;
+  opacity: .38;
+}
+
+.sendSpinner {
+  animation: composer-spin 800ms linear infinite;
+}
+
+@keyframes composer-spin {
+  to { transform: rotate(360deg); }
 }
 
 @media (max-width: 720px) {

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import math
+import base64
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from server.app.billing.execution import (
@@ -66,9 +69,13 @@ def prepare_inspiration_request(
     project_type: str,
     messages: list[InspirationMessage],
     model: str,
+    attachment_files: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> PreparedNewApiRequest:
     conversation = [
-        {"role": message.role, "content": message.content.strip()}
+        {
+            "role": message.role,
+            "content": _provider_message_content(message, attachment_files or {}),
+        }
         for message in messages
     ]
     constraints = {
@@ -82,6 +89,7 @@ def prepare_inspiration_request(
         {
             "model": model,
             "temperature": 0.6,
+            "stream": True,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -110,12 +118,15 @@ def develop_inspiration_billed(
     messages: list[InspirationMessage],
     model: str,
     billing_job_id: str | None = None,
+    attachment_files: Mapping[str, Mapping[str, Any]] | None = None,
+    on_reply_delta: Any | None = None,
 ) -> dict[str, Any]:
     request = prepare_inspiration_request(
         title=title,
         project_type=project_type,
         messages=messages,
         model=model,
+        attachment_files=attachment_files,
     )
     call = {
         "db": db,
@@ -128,10 +139,20 @@ def develop_inspiration_billed(
         "operation": "inspiration_chat",
         "request": request,
     }
+    reply_parser = _ReplyFieldStreamParser(on_reply_delta) if on_reply_delta else None
+    stream_callback = reply_parser.feed if reply_parser is not None else None
     context = (
-        execute_billed_provider_call(parent_job_id=None, **call)
+        execute_billed_provider_call(
+            parent_job_id=None,
+            stream_callback=stream_callback,
+            **call,
+        )
         if billing_job_id is None
-        else retry_payment_required_quote(job_id=billing_job_id, **call)
+        else retry_payment_required_quote(
+            job_id=billing_job_id,
+            stream_callback=stream_callback,
+            **call,
+        )
     )
 
     def persist_hidden(job_id, response):
@@ -158,6 +179,121 @@ def develop_inspiration_billed(
         context=context,
         persist_hidden=persist_hidden,
     ).value
+
+
+class _ReplyFieldStreamParser:
+    def __init__(self, callback) -> None:
+        self._callback = callback
+        self._search = ""
+        self._started = False
+        self._escaped = False
+        self._unicode_digits: str | None = None
+        self._pending_high_surrogate: int | None = None
+        self._finished = False
+
+    def feed(self, fragment: str) -> None:
+        if self._finished or not fragment:
+            return
+        if not self._started:
+            self._search += fragment
+            match = __import__("re").search(r'"reply"\s*:\s*"', self._search)
+            if match is None:
+                self._search = self._search[-64:]
+                return
+            fragment = self._search[match.end():]
+            self._search = ""
+            self._started = True
+
+        output: list[str] = []
+        for character in fragment:
+            if self._unicode_digits is not None:
+                self._unicode_digits += character
+                if len(self._unicode_digits) == 4:
+                    try:
+                        codepoint = int(self._unicode_digits, 16)
+                        if 0xD800 <= codepoint <= 0xDBFF:
+                            self._pending_high_surrogate = codepoint
+                        elif (
+                            0xDC00 <= codepoint <= 0xDFFF
+                            and self._pending_high_surrogate is not None
+                        ):
+                            output.append(chr(
+                                0x10000
+                                + ((self._pending_high_surrogate - 0xD800) << 10)
+                                + (codepoint - 0xDC00)
+                            ))
+                            self._pending_high_surrogate = None
+                        else:
+                            if self._pending_high_surrogate is not None:
+                                output.append("\ufffd")
+                                self._pending_high_surrogate = None
+                            output.append(chr(codepoint))
+                    except ValueError:
+                        pass
+                    self._unicode_digits = None
+                continue
+            if self._escaped:
+                self._escaped = False
+                if character == "u":
+                    self._unicode_digits = ""
+                else:
+                    output.append({
+                        '"': '"', '\\': '\\', '/': '/',
+                        'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t',
+                    }.get(character, character))
+                continue
+            if character == "\\":
+                self._escaped = True
+                continue
+            if character == '"':
+                self._finished = True
+                break
+            output.append(character)
+        if output:
+            self._callback("".join(output))
+
+
+def _provider_message_content(
+    message: InspirationMessage,
+    attachment_files: Mapping[str, Mapping[str, Any]],
+) -> str | list[dict[str, Any]]:
+    content = message.content.strip()
+    parts: list[dict[str, Any]] = (
+        [{"type": "text", "text": content}] if content else []
+    )
+    for attachment in message.attachments:
+        metadata = attachment_files.get(attachment.id)
+        if not metadata:
+            continue
+        path = Path(str(metadata.get("path", "")))
+        content_type = str(metadata.get("content_type") or attachment.content_type)
+        filename = str(metadata.get("filename") or attachment.filename)
+        if content_type.startswith("image/") and path.is_file():
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{content_type};base64,{encoded}"},
+            })
+            continue
+        if content_type.startswith("text/") or path.suffix.lower() in {
+            ".txt", ".md", ".markdown", ".json", ".csv", ".yaml", ".yml", ".srt"
+        }:
+            try:
+                excerpt = path.read_text(encoding="utf-8", errors="replace")[:16_000]
+            except OSError:
+                excerpt = ""
+            parts.append({
+                "type": "text",
+                "text": f"\n[Attachment: {filename}]\n{excerpt}",
+            })
+            continue
+        parts.append({
+            "type": "text",
+            "text": f"\n[Attachment: {filename} ({content_type}, {attachment.size} bytes)]",
+        })
+    if len(parts) == 1 and parts[0].get("type") == "text":
+        return str(parts[0]["text"])
+    return parts
 
 
 def normalize_inspiration_result(content: Any) -> dict[str, Any]:

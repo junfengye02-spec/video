@@ -368,6 +368,15 @@ export interface SoundPlan {
 export interface InspirationMessage {
   role: "user" | "assistant";
   content: string;
+  attachments?: InspirationAttachment[];
+}
+
+export interface InspirationAttachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  size: number;
+  url: string;
 }
 
 export interface NarrativeBeat {

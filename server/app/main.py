@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import queue
 import re
 import threading
 import uuid
@@ -20,7 +22,7 @@ from pydantic import BaseModel, Field
 from python_multipart.exceptions import MultipartParseError
 from redis import Redis
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.datastructures import FormData, UploadFile
 
 from server.app.admin.billing_router import router as admin_billing_router
@@ -103,6 +105,7 @@ from server.app.models import (
     CredentialFreeRequest,
     ImageGenerationRequest,
     InspirationChatRequest,
+    InspirationAttachment,
     InspirationIntentUpdateRequest,
     PLAN_SECTION_IDS,
     PlanSectionApproval,
@@ -231,6 +234,12 @@ MAX_MULTIPART_FIELD_BYTES = 64 * 1024
 MAX_MULTIPART_FIELDS = 4
 MAX_MULTIPART_FILES = 1
 MAX_MULTIPART_REQUEST_BYTES = MAX_IMAGE_BYTES + MAX_MULTIPART_FIELD_BYTES
+MAX_INSPIRATION_ATTACHMENT_BYTES = 20 * 1024 * 1024
+INSPIRATION_ATTACHMENT_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".webp",
+    ".txt", ".md", ".markdown", ".json", ".csv", ".yaml", ".yml", ".srt",
+    ".pdf", ".doc", ".docx",
+}
 WORKFLOW_ARTIFACT_PATHS = [
     "artifacts/proposal_packet.json",
     "artifacts/scene_plan.json",
@@ -239,6 +248,7 @@ WORKFLOW_ARTIFACT_PATHS = [
     "artifacts/continuity_plan.json",
     "artifacts/generation_plan.json",
     "artifacts/generation_execution.json",
+    "artifacts/inspiration_attachments.json",
 ]
 STORYBOARD_ARTIFACT_PATHS = [
     "artifacts/episode_storyboard.json",
@@ -1782,6 +1792,192 @@ def _project_snapshot(workbench: WorkbenchStore, project: ProjectRecord) -> dict
         ),
         "final_path": final_path,
     }
+
+
+def _inspiration_attachment_url(project_id: str, attachment_id: str) -> str:
+    return (
+        f"/api/projects/{project_id}/inspiration/attachments/{attachment_id}"
+    )
+
+
+def _inspiration_attachment_records(
+    workbench: WorkbenchStore,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    artifact = workbench.read_artifact(project_id, "inspiration_attachments.json")
+    if not isinstance(artifact, dict) or not isinstance(artifact.get("attachments"), list):
+        return []
+    return [item for item in artifact["attachments"] if isinstance(item, dict)]
+
+
+def _inspiration_attachment_files(
+    *,
+    workbench: WorkbenchStore,
+    project_id: str,
+    messages: list[Any],
+) -> dict[str, dict[str, Any]]:
+    records = {
+        str(item.get("id")): item
+        for item in _inspiration_attachment_records(workbench, project_id)
+        if isinstance(item.get("id"), str)
+    }
+    resolved: dict[str, dict[str, Any]] = {}
+    project_dir = workbench.project_dir(project_id)
+    for message in messages:
+        for attachment in message.attachments:
+            record = records.get(attachment.id)
+            if record is None:
+                raise HTTPException(status_code=422, detail="Attachment is unavailable")
+            expected = {
+                "filename": attachment.filename,
+                "content_type": attachment.content_type,
+                "size": attachment.size,
+                "url": attachment.url,
+            }
+            if any(record.get(key) != value for key, value in expected.items()):
+                raise HTTPException(status_code=422, detail="Attachment metadata is invalid")
+            storage_path = sanitize_project_path(project_dir, record.get("storage_path"))
+            if (
+                storage_path is None
+                or not storage_path.startswith("assets/inspiration/attachments/")
+                or not (project_dir / storage_path).is_file()
+            ):
+                raise HTTPException(status_code=422, detail="Attachment is unavailable")
+            resolved[attachment.id] = {
+                **record,
+                "path": project_dir / storage_path,
+            }
+    return resolved
+
+
+def _persist_inspiration_result(
+    *,
+    db: Session,
+    workbench: WorkbenchStore,
+    project: ProjectRecord,
+    payload: InspirationChatRequest,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    project_id = project.id
+    raw_title_source = workbench.read_artifact(
+        project_id, "project_title_source.json"
+    )
+    existing_workflow = _require_inspiration_editable_workflow(
+        workbench, project_id
+    )
+    workflow = {
+        "phase": "inspiration",
+        "messages": [
+            *[message.model_dump() for message in payload.messages],
+            {"role": "assistant", "content": result["reply"], "attachments": []},
+        ],
+        "brief": result["brief"],
+        "ready_to_confirm": result["ready_to_confirm"],
+        "control_end_frames": existing_workflow.get("control_end_frames") is True,
+        "text_model": payload.text_model.strip(),
+        "planned_asset_ids": list(existing_workflow.get("planned_asset_ids", [])),
+        "approved_at": None,
+        "brief_confirmed_at": None,
+        "plan_generated_at": None,
+        "plan_sections": {
+            section: {
+                **approval,
+                "status": "pending",
+                "feedback": None,
+                "updated_at": None,
+            }
+            for section, approval in existing_workflow["plan_sections"].items()
+        },
+    }
+    promoted_project_type = (
+        _project_type_from_brief(result.get("brief"))
+        if project.project_type == "single_video"
+        else None
+    )
+    generated_title = _brief_project_title(result.get("brief"))
+    should_adopt_generated_title = generated_title is not None and (
+        (
+            isinstance(raw_title_source, dict)
+            and raw_title_source.get("source") in {"placeholder", "inspiration"}
+        )
+        or (
+            not isinstance(raw_title_source, dict)
+            and project.title in {"未命名项目", "Untitled project"}
+        )
+    )
+    continuity_plan = workbench.read_artifact(
+        project_id, "continuity_plan.json"
+    ) or _default_continuity_plan(project.project_type)
+    if promoted_project_type is not None:
+        continuity_plan = {
+            **continuity_plan,
+            "project_type": promoted_project_type,
+            "active_episode_number": 1,
+        }
+    changed_paths = ["artifacts/creative_workflow.json"]
+    if promoted_project_type is not None:
+        changed_paths.append("artifacts/continuity_plan.json")
+    if should_adopt_generated_title:
+        changed_paths.extend(
+            ["artifacts/series_bible.json", "artifacts/project_title_source.json"]
+        )
+    with _project_mutation(
+        db=db,
+        workbench=workbench,
+        project_id=project_id,
+        operation="develop_inspiration",
+        changed_paths=changed_paths,
+        failure_detail="Inspiration conversation could not be saved",
+    ):
+        if promoted_project_type is not None:
+            project.project_type = promoted_project_type
+            workbench.write_artifact(project_id, "continuity_plan.json", continuity_plan)
+        if should_adopt_generated_title:
+            project.title = generated_title
+            series_bible = workbench.read_artifact(project_id, "series_bible.json") or {}
+            series_bible["title"] = generated_title
+            workbench.write_artifact(project_id, "series_bible.json", series_bible)
+            workbench.write_artifact(
+                project_id, "project_title_source.json", {"source": "inspiration"}
+            )
+        workbench.write_artifact(project_id, "creative_workflow.json", workflow)
+        project.updated_at = datetime.now(timezone.utc)
+    return _project_snapshot(workbench, project)
+
+
+def _sse_event(name: str, payload: Mapping[str, Any]) -> bytes:
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {name}\ndata: {data}\n\n".encode("utf-8")
+
+
+def _inspiration_stream_error(exc: BaseException) -> dict[str, Any]:
+    if isinstance(exc, PaymentRequiredQuote):
+        return {
+            "status": 402,
+            "code": "payment_required_quote",
+            "message": "Payment confirmation is required",
+            "billing_job_id": exc.job_id,
+        }
+    if isinstance(exc, InsufficientBalance):
+        return {"status": 402, "code": "payment_required", "message": "Insufficient balance"}
+    if isinstance(exc, ProviderResultPending):
+        return {
+            "status": 409,
+            "code": "provider_result_pending",
+            "message": "Provider result is still pending",
+            "billing_job_id": exc.job_id,
+        }
+    if isinstance(exc, ProviderPricingUnavailable):
+        return {"status": 503, "code": "provider_pricing_unavailable", "message": "Provider pricing is unavailable"}
+    if isinstance(exc, ProviderPricingUnstable):
+        return {"status": 503, "code": "provider_pricing_unstable", "message": "Provider pricing is unstable"}
+    if isinstance(exc, NewApiRateLimited):
+        return {"status": 429, "code": "provider_quote_rate_limited", "message": "Provider is rate limited"}
+    if isinstance(exc, (NewApiCallError, ProviderResultUnavailable)):
+        return {"status": 502, "code": "provider_call_failed", "message": INSPIRATION_DEVELOPMENT_FAILED}
+    if isinstance(exc, HTTPException):
+        return {"status": exc.status_code, "code": "request_failed", "message": str(exc.detail)}
+    return {"status": 502, "code": "inspiration_failed", "message": INSPIRATION_DEVELOPMENT_FAILED}
 
 
 def _backfill_legacy_generation_units(
@@ -3809,7 +4005,6 @@ def _preview_generation_adaptation_planner(
         workbench=workbench,
         project_id=project_id,
     )
-
     def save(cache_key: str, result: dict[str, Any]) -> None:
         workbench.write_artifact(
             project_id,
@@ -5091,6 +5286,101 @@ def create_app(
         return _project_snapshot(workbench, project)
 
     @app.post(
+        "/api/projects/{project_id}/inspiration/attachments",
+    )
+    async def upload_inspiration_attachment(
+        request: Request,
+        project_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
+        workbench: WorkbenchStore = Depends(get_store),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        async with _bounded_upload_form(request) as form:
+            upload = form.get("file")
+            if not isinstance(upload, UploadFile):
+                raise HTTPException(status_code=422, detail="file is required")
+            filename = Path(upload.filename or "attachment").name.strip() or "attachment"
+            suffix = validate_upload_extension(filename, INSPIRATION_ATTACHMENT_EXTENSIONS)
+            attachment_id = uuid.uuid4().hex
+            project_dir = workbench.project_dir(project_id)
+            relative_path = (
+                Path("assets") / "inspiration" / "attachments"
+                / f"attachment-{attachment_id}{suffix}"
+            ).as_posix()
+            output_path = safe_project_media_destination(
+                project_dir,
+                Path("assets") / "inspiration" / "attachments",
+                f"attachment-{attachment_id}{suffix}",
+            )
+            content_type = (upload.content_type or media_content_type(output_path)).strip()
+            if not content_type or len(content_type) > 255:
+                content_type = media_content_type(output_path)
+            with _project_mutation(
+                db=db,
+                workbench=workbench,
+                project_id=project_id,
+                operation="inspiration_attachment_upload",
+                changed_paths=["artifacts/inspiration_attachments.json", relative_path],
+                failure_detail="Inspiration attachment could not be saved",
+            ):
+                await save_upload_file(upload, output_path, MAX_INSPIRATION_ATTACHMENT_BYTES)
+                size = output_path.stat().st_size
+                record = InspirationAttachment(
+                    id=attachment_id,
+                    filename=filename[:255],
+                    content_type=content_type,
+                    size=size,
+                    url=_inspiration_attachment_url(project_id, attachment_id),
+                ).model_dump()
+                records = [
+                    item for item in _inspiration_attachment_records(workbench, project_id)
+                    if str(item.get("id")) != attachment_id
+                ]
+                records.append({**record, "storage_path": relative_path})
+                workbench.write_artifact(
+                    project_id, "inspiration_attachments.json", {"attachments": records}
+                )
+                project.updated_at = datetime.now(timezone.utc)
+            return {"attachment": record}
+
+    @app.get(
+        "/api/projects/{project_id}/inspiration/attachments/{attachment_id}"
+    )
+    def download_inspiration_attachment(
+        project_id: str,
+        attachment_id: str,
+        _project: Annotated[ProjectRecord, Depends(_require_owned_reader)],
+        workbench: WorkbenchStore = Depends(get_store),
+    ) -> FileResponse:
+        if not re.fullmatch(r"[0-9a-f]{32}", attachment_id):
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        record = next(
+            (
+                item for item in _inspiration_attachment_records(workbench, project_id)
+                if str(item.get("id")) == attachment_id
+            ),
+            None,
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        project_dir = workbench.project_dir(project_id)
+        relative_path = sanitize_project_path(project_dir, record.get("storage_path"))
+        if (
+            relative_path is None
+            or not relative_path.startswith("assets/inspiration/attachments/")
+        ):
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        path = project_dir / relative_path
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        return FileResponse(
+            path,
+            media_type=str(record.get("content_type") or media_content_type(path)),
+            filename=str(record.get("filename") or path.name),
+            content_disposition_type="inline",
+        )
+
+    @app.post(
         "/api/projects/{project_id}/inspiration/chat",
         openapi_extra=_json_request_openapi(InspirationChatRequest),
     )
@@ -5104,11 +5394,90 @@ def create_app(
         newapi: NewApiClient = Depends(get_newapi_client),
     ) -> dict[str, Any]:
         payload = await parse_json_request(request, InspirationChatRequest)
-        raw_title_source = workbench.read_artifact(
-            project_id, "project_title_source.json"
+        attachment_files = _inspiration_attachment_files(
+            workbench=workbench,
+            project_id=project_id,
+            messages=payload.messages,
         )
         existing_workflow = _require_inspiration_editable_workflow(
             workbench, project_id
+        )
+        if "text/event-stream" in request.headers.get("accept", "").lower():
+            event_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+            stream_session_factory = sessionmaker(
+                bind=db.get_bind(), expire_on_commit=False
+            )
+
+            def run_stream() -> None:
+                worker_db = stream_session_factory()
+                streamed_reply = False
+                try:
+                    worker_project = ProjectRepository(worker_db).require_owned_for_update(
+                        project_id, authorized_project.owner_user_id
+                    )
+                    with task_newapi(settings) as worker_newapi:
+                        def emit_delta(value: str) -> None:
+                            nonlocal streamed_reply
+                            streamed_reply = True
+                            event_queue.put(("delta", value))
+
+                        result = develop_inspiration_billed(
+                            db=worker_db,
+                            newapi=worker_newapi,
+                            settings=settings,
+                            media_store=workbench,
+                            user_id=worker_project.owner_user_id,
+                            project_id=project_id,
+                            title=worker_project.title,
+                            project_type=worker_project.project_type,
+                            messages=payload.messages,
+                            model=payload.text_model,
+                            billing_job_id=payload.billing_job_id,
+                            attachment_files=attachment_files,
+                            on_reply_delta=emit_delta,
+                        )
+                    if not streamed_reply:
+                        event_queue.put(("delta", result["reply"]))
+                    snapshot = _persist_inspiration_result(
+                        db=worker_db,
+                        workbench=workbench,
+                        project=worker_project,
+                        payload=payload,
+                        result=result,
+                    )
+                    event_queue.put(("done", snapshot))
+                except BaseException as exc:
+                    worker_db.rollback()
+                    event_queue.put(("error", _inspiration_stream_error(exc)))
+                finally:
+                    worker_db.close()
+                    event_queue.put(("close", None))
+
+            threading.Thread(
+                target=run_stream,
+                name=f"inspiration-stream-{project_id[:8]}",
+                daemon=True,
+            ).start()
+
+            async def stream_events() -> AsyncIterator[bytes]:
+                while True:
+                    event, value = await asyncio.to_thread(event_queue.get)
+                    if event == "delta":
+                        yield _sse_event("delta", {"text": str(value)})
+                    elif event == "done":
+                        yield _sse_event("done", {"snapshot": value})
+                    elif event == "error":
+                        yield _sse_event("error", value)
+                    elif event == "close":
+                        break
+
+            return StreamingResponse(
+                stream_events(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        raw_title_source = workbench.read_artifact(
+            project_id, "project_title_source.json"
         )
         try:
             result = develop_inspiration_billed(
@@ -5123,6 +5492,7 @@ def create_app(
                 messages=payload.messages,
                 model=payload.text_model,
                 billing_job_id=payload.billing_job_id,
+                attachment_files=attachment_files,
             )
         except _BILLING_CONTROL_ERRORS:
             raise

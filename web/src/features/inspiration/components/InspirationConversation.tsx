@@ -11,6 +11,7 @@ import styles from "./Conversation.module.css";
 export function InspirationConversation({
   active,
   developing,
+  streamingReply,
   disabled,
   error,
   message,
@@ -20,9 +21,14 @@ export function InspirationConversation({
   onSubmit,
   suggestions,
   textModel,
+  attachments,
+  uploadingAttachments,
+  onUploadAttachment,
+  onRemoveAttachment,
 }: {
   active: boolean;
   developing: boolean;
+  streamingReply: string;
   disabled: boolean;
   error: CommandError | null;
   message: string;
@@ -32,6 +38,10 @@ export function InspirationConversation({
   onSubmit: (event?: FormEvent<HTMLFormElement>) => void;
   suggestions: InspirationSuggestion[];
   textModel: string;
+  attachments: import("../../../domain/types").InspirationAttachment[];
+  uploadingAttachments: boolean;
+  onUploadAttachment?: (file: File) => void;
+  onRemoveAttachment: (id: string) => void;
 }) {
   const conversationRef = useRef<HTMLDivElement | null>(null);
 
@@ -60,9 +70,13 @@ export function InspirationConversation({
         {messages.length === 0 ? (
           <InspirationMessageRow role="assistant" content={copy.assistantIntro} />
         ) : messages.map((item, index) => (
-          <InspirationMessageRow key={`${item.role}-${index}-${item.content.slice(0, 24)}`} {...item} />
+          <InspirationMessageRow
+            key={`${item.role}-${index}-${item.content.slice(0, 24)}`}
+            {...item}
+            streaming={Boolean(streamingReply) && index === messages.length - 1 && item.role === "assistant"}
+          />
         ))}
-        {developing ? (
+        {developing && !streamingReply ? (
           <div className={styles.thinking} role="status">
             <span className={styles.thinkingDots} aria-hidden="true"><i /><i /><i /></span>
             <span>{copy.sending}</span>
@@ -83,6 +97,10 @@ export function InspirationConversation({
           onSubmit={onSubmit}
           suggestions={suggestions}
           textModel={textModel}
+          attachments={attachments}
+          uploadingAttachments={uploadingAttachments}
+          onUploadAttachment={onUploadAttachment}
+          onRemoveAttachment={onRemoveAttachment}
         />
       </div>
     </section>

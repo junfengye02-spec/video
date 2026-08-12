@@ -510,6 +510,55 @@ def _normalize_text_stream(content: bytes) -> bytes:
     ).encode("utf-8")
 
 
+class _TextStreamDeltaReader:
+    def __init__(self, callback: Callable[[str], None]) -> None:
+        self._callback = callback
+        self._buffer = bytearray()
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer.extend(chunk)
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline < 0:
+                return
+            line = bytes(self._buffer[:newline]).rstrip(b"\r")
+            del self._buffer[: newline + 1]
+            self._emit_line(line)
+
+    def finish(self) -> None:
+        if self._buffer:
+            self._emit_line(bytes(self._buffer).rstrip(b"\r"))
+            self._buffer.clear()
+
+    def _emit_line(self, raw_line: bytes) -> None:
+        line = raw_line.strip()
+        if not line.startswith(b"data:"):
+            return
+        payload = line[5:].strip()
+        if not payload or payload == b"[DONE]":
+            return
+        try:
+            event = _load_unique_json(payload)
+        except Exception:
+            return
+        if not isinstance(event, dict):
+            return
+        choices = event.get("choices")
+        if not isinstance(choices, list):
+            return
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            value = delta.get("content") if isinstance(delta, dict) else None
+            if isinstance(value, str) and value:
+                self._callback(value)
+            elif isinstance(value, list):
+                for part in value:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        self._callback(part["text"])
+
+
 def _is_text_event_stream(headers: Mapping[str, str]) -> bool:
     content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
     return content_type == _SSE_CONTENT_TYPE
@@ -622,6 +671,7 @@ class NewApiClient:
         token_alias: str,
         request: PreparedNewApiRequest,
         quote_id: str,
+        stream_callback: Callable[[str], None] | None = None,
     ) -> QuotedExecutionResult:
         _validate_capability_path(kind, request.path)
         response = self._send_raw(
@@ -631,6 +681,7 @@ class NewApiClient:
             {"X-OneAPI-Usage-Quote": _validate_quote_id(quote_id)},
             max_bytes=_MAX_EXECUTION_RESPONSE_BYTES,
             ambiguous_on_invalid_success=True,
+            stream_callback=stream_callback,
         )
         try:
             if kind == "video":
@@ -1042,6 +1093,7 @@ class NewApiClient:
         *,
         max_bytes: int,
         ambiguous_on_invalid_success: bool,
+        stream_callback: Callable[[str], None] | None = None,
     ) -> httpx.Response:
         if token_alias is None:
             raise NewApiCallError("NewAPI capability is not configured")
@@ -1087,6 +1139,13 @@ class NewApiClient:
                 raise NewApiCallError("NewAPI request failed")
 
             content = bytearray()
+            stream_reader = (
+                _TextStreamDeltaReader(stream_callback)
+                if kind == "text"
+                and stream_callback is not None
+                and _is_text_event_stream(response.headers)
+                else None
+            )
             response_max_bytes = (
                 max_bytes
                 if response.status_code == 200
@@ -1103,6 +1162,10 @@ class NewApiClient:
                             )
                         raise InvalidNewApiResponse("invalid NewAPI response")
                     content.extend(chunk)
+                    if stream_reader is not None:
+                        stream_reader.feed(chunk)
+                if stream_reader is not None:
+                    stream_reader.finish()
             except NewApiError:
                 raise
             except httpx.TransportError:

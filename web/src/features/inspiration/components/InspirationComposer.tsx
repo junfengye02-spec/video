@@ -1,8 +1,8 @@
-import { Send } from "lucide-react";
+import { ArrowUp, FileText, LoaderCircle, Paperclip, X } from "lucide-react";
 import { useRef, type FormEvent, type KeyboardEvent } from "react";
-import { Button } from "../../../shared/ui";
 import { inspirationCopy as copy } from "../copy";
 import type { InspirationSuggestion } from "../model";
+import type { InspirationAttachment } from "../../../domain/types";
 import { GenerationModelPicker } from "../../generation/GenerationModelPicker";
 import { getStrings } from "../../../i18n";
 import styles from "./InspirationComposer.module.css";
@@ -16,6 +16,10 @@ export function InspirationComposer({
   onSubmit,
   suggestions,
   textModel,
+  attachments,
+  uploadingAttachments,
+  onUploadAttachment,
+  onRemoveAttachment,
 }: {
   disabled: boolean;
   loading: boolean;
@@ -25,8 +29,15 @@ export function InspirationComposer({
   onSubmit: (event?: FormEvent<HTMLFormElement>) => void;
   suggestions: InspirationSuggestion[];
   textModel: string;
+  attachments?: InspirationAttachment[];
+  uploadingAttachments?: boolean;
+  onUploadAttachment?: (file: File) => void;
+  onRemoveAttachment?: (id: string) => void;
 }) {
+  const selectedAttachments = attachments ?? [];
+  const isUploadingAttachments = uploadingAttachments ?? false;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   function chooseSuggestion(value: string) {
     onChange(value);
@@ -72,6 +83,25 @@ export function InspirationComposer({
       </div>
       <label className={styles.srLabel} htmlFor="inspiration-message">{copy.composerLabel}</label>
       <div className={styles.composerSurface}>
+        {selectedAttachments.length || isUploadingAttachments ? (
+          <div className={styles.attachments} aria-label="已添加附件">
+            {selectedAttachments.map((attachment) => {
+              const image = attachment.content_type.startsWith("image/");
+              return (
+                <div className={styles.attachmentCard} key={attachment.id}>
+                  {image ? (
+                    <img src={attachment.url} alt="" className={styles.attachmentPreview} />
+                  ) : <span className={styles.attachmentIcon}><FileText size={16} /></span>}
+                  <span className={styles.attachmentName} title={attachment.filename}>{attachment.filename}</span>
+                  <button type="button" className={styles.removeAttachment} onClick={() => onRemoveAttachment?.(attachment.id)} aria-label={`移除 ${attachment.filename}`}>
+                    <X size={13} />
+                  </button>
+                </div>
+              );
+            })}
+            {isUploadingAttachments ? <div className={styles.uploadingCard}>正在上传…</div> : null}
+          </div>
+        ) : null}
         <textarea
           ref={textareaRef}
           id="inspiration-message"
@@ -82,17 +112,39 @@ export function InspirationComposer({
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={handleKeyDown}
         />
-        <Button
+        <input
+          ref={fileInputRef}
+          type="file"
+          hidden
+          multiple
+          accept="image/png,image/jpeg,image/webp,.txt,.md,.markdown,.json,.csv,.yaml,.yml,.srt,.pdf,.doc,.docx"
+          onChange={(event) => {
+            for (const file of Array.from(event.target.files ?? [])) onUploadAttachment?.(file);
+            event.currentTarget.value = "";
+          }}
+        />
+        <button
+          type="button"
+          className={styles.attachButton}
+          aria-label="上传附件"
+          disabled={disabled || loading || isUploadingAttachments || !onUploadAttachment}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <Paperclip size={17} />
+        </button>
+        <button
           type="submit"
-          variant="primary"
           className={styles.sendCommand}
           aria-label={copy.send}
-          icon={<Send size={16} />}
-          loading={loading}
-          disabled={!message.trim() || disabled}
+          aria-busy={loading || undefined}
+          disabled={loading || (!message.trim() && !selectedAttachments.length) || disabled}
         >
-          <span className={styles.sendLabel}>{copy.send}</span>
-        </Button>
+          {loading ? (
+            <LoaderCircle aria-hidden="true" className={styles.sendSpinner} size={17} />
+          ) : (
+            <ArrowUp aria-hidden="true" size={18} strokeWidth={2.4} />
+          )}
+        </button>
       </div>
     </form>
   );

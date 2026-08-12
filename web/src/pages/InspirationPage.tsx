@@ -9,6 +9,7 @@ import type {
   CreativeBrief,
   CreativeWorkflow,
   InspirationMessage,
+  InspirationAttachment,
   ProjectType,
 } from "../domain/types";
 import { Tabs } from "../shared/ui";
@@ -26,7 +27,8 @@ export interface InspirationPageProps {
   sessionKey?: string;
   developing: boolean;
   planning: boolean;
-  onDevelop: (messages: InspirationMessage[], textModel: string) => Promise<void>;
+  onDevelop: (messages: InspirationMessage[], textModel: string, onDelta?: (text: string) => void) => Promise<void>;
+  onUploadAttachment?: (file: File) => Promise<InspirationAttachment>;
   onInitialMessageConsumed?: () => void;
   onPlan: (brief: CreativeBrief, controlEndFrames: boolean, textModel: string) => Promise<void>;
   onUpdateEndFrameIntent?: (enabled: boolean) => Promise<void>;
@@ -43,6 +45,7 @@ export function InspirationPage({
   developing,
   planning,
   onDevelop,
+  onUploadAttachment,
   onInitialMessageConsumed,
   onPlan,
   onUpdateEndFrameIntent = async () => undefined,
@@ -63,6 +66,7 @@ export function InspirationPage({
     onUpdateEndFrameIntent,
     onSessionExpired,
     walletAvailableUnits,
+    onUploadAttachment,
   });
   const suggestions = useMemo(
     () => suggestionsFor(workflow.brief, projectType),
@@ -89,6 +93,7 @@ export function InspirationPage({
         <InspirationConversation
           active={activeMobileView === "conversation"}
           developing={controller.developingLocked}
+          streamingReply={controller.streamingReply}
           disabled={controller.planningLocked}
           error={controller.errorOrigin === "develop" ? controller.error : null}
           message={controller.message}
@@ -98,6 +103,10 @@ export function InspirationPage({
           onSubmit={(event) => void controller.submitMessage(event)}
           suggestions={suggestions}
           textModel={controller.textModel}
+          attachments={controller.composerAttachments}
+          uploadingAttachments={controller.uploadingAttachments}
+          onUploadAttachment={(file) => void controller.uploadAttachment(file)}
+          onRemoveAttachment={controller.removeAttachment}
         />
         <CreativeBriefCanvas
           active={activeMobileView === "brief"}

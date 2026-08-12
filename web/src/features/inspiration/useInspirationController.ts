@@ -6,6 +6,7 @@ import {
 import type {
   CreativeBrief,
   CreativeWorkflow,
+  InspirationAttachment,
   InspirationMessage,
 } from "../../domain/types";
 
@@ -55,7 +56,12 @@ export interface InspirationControllerOptions {
   sessionKey: string;
   developing: boolean;
   planning: boolean;
-  onDevelop: (messages: InspirationMessage[], textModel: string) => Promise<void>;
+  onDevelop: (
+    messages: InspirationMessage[],
+    textModel: string,
+    onDelta?: (text: string) => void,
+  ) => Promise<void>;
+  onUploadAttachment?: (file: File) => Promise<InspirationAttachment>;
   onInitialMessageConsumed?: () => void;
   onPlan: (brief: CreativeBrief, controlEndFrames: boolean, textModel: string) => Promise<void>;
   onUpdateEndFrameIntent: (enabled: boolean) => Promise<void>;
@@ -71,6 +77,7 @@ export function useInspirationController({
   developing,
   planning,
   onDevelop,
+  onUploadAttachment,
   onInitialMessageConsumed,
   onPlan,
   onUpdateEndFrameIntent,
@@ -86,6 +93,9 @@ export function useInspirationController({
   const planRequestRef = useRef<Promise<void> | null>(null);
   const intentRequestRef = useRef<Promise<void> | null>(null);
   const [message, setMessage] = useState(() => readSessionDraft(sessionKey));
+  const [attachments, setAttachments] = useState<InspirationAttachment[]>([]);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
+  const [streamingReply, setStreamingReply] = useState("");
   const [textModel, setTextModel] = useState(() => (
     readSessionModel(sessionKey, normalizedInitialTextModel)
   ));
@@ -93,6 +103,7 @@ export function useInspirationController({
     normalizedInitial && workflow.messages.length === 0 ? normalizedInitial : "",
   );
   const [optimisticMessage, setOptimisticMessage] = useState("");
+  const [optimisticAttachments, setOptimisticAttachments] = useState<InspirationAttachment[]>([]);
   const [developingLocally, setDevelopingLocally] = useState(false);
   const [planningLocally, setPlanningLocally] = useState(false);
   const [intentSaving, setIntentSaving] = useState(false);
@@ -112,9 +123,13 @@ export function useInspirationController({
     planRequestRef.current = null;
     intentRequestRef.current = null;
     setMessage(readSessionDraft(sessionKey));
+    setAttachments([]);
+    setUploadingAttachments(false);
+    setStreamingReply("");
     setTextModel(readSessionModel(sessionKey, normalizedInitialTextModel));
     setOptimisticInitial(normalizedInitial && workflow.messages.length === 0 ? normalizedInitial : "");
     setOptimisticMessage("");
+    setOptimisticAttachments([]);
     setDevelopingLocally(false);
     setPlanningLocally(false);
     setIntentSaving(false);
@@ -142,6 +157,15 @@ export function useInspirationController({
     });
   }
 
+  function developWithStream(messages: InspirationMessage[], onDelta: (text: string) => void) {
+    const normalized = messages.map((item) => (
+      item.attachments?.length ? item : { role: item.role, content: item.content }
+    ));
+    return onDevelop.length >= 3
+      ? onDevelop(normalized, textModel, onDelta)
+      : onDevelop(normalized, textModel);
+  }
+
   useEffect(() => {
     if (workflow.messages.length) setOptimisticInitial("");
     if (
@@ -149,6 +173,7 @@ export function useInspirationController({
       && workflow.messages.some((item) => item.role === "user" && item.content === optimisticMessage)
     ) {
       setOptimisticMessage("");
+      setOptimisticAttachments([]);
     }
   }, [optimisticMessage, workflow.messages]);
 
@@ -161,11 +186,15 @@ export function useInspirationController({
     writeSessionDraft(sessionKey, content);
     onInitialMessageConsumed?.();
     setDevelopingLocally(true);
-    const request = onDevelop([{ role: "user", content }], textModel);
+    const request = developWithStream([
+      { role: "user", content, ...(attachments.length ? { attachments } : {}) },
+    ], (delta) => setStreamingReply((current) => current + delta));
     developRequestRef.current = request;
     void request
       .then(() => {
         writeSessionDraft(sessionKey, "");
+        setAttachments([]);
+        setStreamingReply("");
         if (sessionGenerationRef.current === generation) setOptimisticInitial("");
       })
       .catch((requestError) => {
@@ -186,6 +215,7 @@ export function useInspirationController({
         }
       });
   }, [
+    attachments,
     normalizedInitial,
     onDevelop,
     onInitialMessageConsumed,
@@ -203,13 +233,25 @@ export function useInspirationController({
         ? [{ role: "user" as const, content: optimisticInitial }]
         : [];
     if (
-      optimisticMessage
-      && !messages.some((item) => item.role === "user" && item.content === optimisticMessage)
+      (optimisticMessage || optimisticAttachments.length)
+      && !messages.some((item) => (
+        item.role === "user"
+        && item.content === optimisticMessage
+        && (item.attachments?.map((attachment) => attachment.id).join(",") ?? "")
+          === optimisticAttachments.map((attachment) => attachment.id).join(",")
+      ))
     ) {
-      messages.push({ role: "user", content: optimisticMessage });
+      messages.push({
+        role: "user",
+        content: optimisticMessage,
+        ...(optimisticAttachments.length ? { attachments: optimisticAttachments } : {}),
+      });
+    }
+    if (streamingReply) {
+      messages.push({ role: "assistant", content: streamingReply });
     }
     return messages;
-  }, [optimisticInitial, optimisticMessage, workflow.messages]);
+  }, [optimisticAttachments, optimisticInitial, optimisticMessage, streamingReply, workflow.messages]);
 
   const developingLocked = developing || developingLocally;
   const planningLocked = planning || planningLocally || planSubmitted;
@@ -218,10 +260,11 @@ export function useInspirationController({
     event?.preventDefault();
     const content = message.trim();
     if (
-      !content
+      (!content && !attachments.length)
       || developingLocked
       || planningLocked
       || intentSaving
+      || uploadingAttachments
       || developRequestRef.current
     ) return;
     const generation = sessionGenerationRef.current;
@@ -229,16 +272,24 @@ export function useInspirationController({
     setErrorOrigin(null);
     setDevelopingLocally(true);
     setOptimisticMessage(content);
+    setOptimisticAttachments(attachments);
     writeSessionDraft(sessionKey, content);
     setMessage("");
-    const request = onDevelop([...workflow.messages, { role: "user", content }], textModel);
+    const request = developWithStream([
+      ...workflow.messages,
+      { role: "user", content, ...(attachments.length ? { attachments } : {}) },
+    ], (delta) => setStreamingReply((current) => current + delta));
     developRequestRef.current = request;
     try {
       await request;
       writeSessionDraft(sessionKey, "");
+      setAttachments([]);
+      setOptimisticAttachments([]);
+      setStreamingReply("");
     } catch (requestError) {
       if (sessionGenerationRef.current !== generation) return;
       setOptimisticMessage("");
+      setOptimisticAttachments([]);
       updateMessage((current) => current || content);
       setErrorOrigin("develop");
       setError(commandErrorFrom(requestError, {
@@ -252,6 +303,29 @@ export function useInspirationController({
         setDevelopingLocally(false);
       }
     }
+  }
+
+  async function uploadAttachment(file: File) {
+    if (!onUploadAttachment || developingLocked || planningLocked || attachments.length >= 8) return;
+    setError(null);
+    setUploadingAttachments(true);
+    try {
+      const uploaded = await onUploadAttachment(file);
+      setAttachments((current) => current.length >= 8 ? current : [...current, uploaded]);
+    } catch (requestError) {
+      setErrorOrigin("develop");
+      setError(commandErrorFrom(requestError, {
+        fallback: "附件上传失败，请重试。",
+        onSessionExpired,
+        walletAvailableUnits,
+      }));
+    } finally {
+      setUploadingAttachments(false);
+    }
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((current) => current.filter((item) => item.id !== id));
   }
 
   async function submitPlan() {
@@ -318,11 +392,14 @@ export function useInspirationController({
 
   return {
     controlEndFrames,
+    attachments,
+    composerAttachments: developingLocked ? [] : attachments,
     developingLocked,
     error,
     errorOrigin,
     message,
     intentSaving,
+    uploadingAttachments,
     planningLocked,
     planSubmitted,
     setMessage: updateMessage,
@@ -332,5 +409,8 @@ export function useInspirationController({
     textModel,
     visibleMessages,
     setTextModel,
+    uploadAttachment,
+    removeAttachment,
+    streamingReply,
   };
 }

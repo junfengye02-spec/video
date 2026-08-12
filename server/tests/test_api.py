@@ -824,6 +824,66 @@ def test_inspiration_to_plan_to_approval_persists_each_gate(tmp_path):
     assert approved.json()["creative_workflow"]["approved_at"]
 
 
+def test_inspiration_attachment_upload_download_and_message_persistence(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    client = TestClient(app)
+    project_id = client.post(
+        "/api/projects",
+        json={"title": "Attachment draft", "project_type": "single_video"},
+    ).json()["project"]["id"]
+
+    uploaded = client.post(
+        f"/api/projects/{project_id}/inspiration/attachments",
+        files={"file": ("notes.txt", b"Keep the red umbrella in every scene.", "text/plain")},
+    )
+
+    assert uploaded.status_code == 200, uploaded.text
+    attachment = uploaded.json()["attachment"]
+    assert attachment["filename"] == "notes.txt"
+    assert attachment["content_type"] == "text/plain"
+    downloaded = client.get(attachment["url"])
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"Keep the red umbrella in every scene."
+
+    conversation = client.post(
+        f"/api/projects/{project_id}/inspiration/chat",
+        json={
+            "messages": [{
+                "role": "user",
+                "content": "Use my notes.",
+                "attachments": [attachment],
+            }],
+        },
+    )
+    assert conversation.status_code == 200, conversation.text
+    stored = conversation.json()["creative_workflow"]["messages"][0]
+    assert stored["attachments"] == [attachment]
+
+
+def test_inspiration_chat_stream_returns_delta_then_completed_snapshot(tmp_path):
+    app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
+    with TestClient(app) as client:
+        project_id = client.post(
+            "/api/projects",
+            json={"title": "Streaming draft", "project_type": "single_video"},
+        ).json()["project"]["id"]
+        with client.stream(
+            "POST",
+            f"/api/projects/{project_id}/inspiration/chat",
+            headers={"Accept": "text/event-stream"},
+            json={"messages": [{"role": "user", "content": "A letter from tomorrow."}]},
+        ) as response:
+            body = "\n".join(response.iter_lines())
+
+    assert response.status_code == 200
+    assert "event: delta" in body
+    assert "The direction is clear" in body
+    assert "event: done" in body
+    assert '"snapshot":{"project"' in body
+    persisted = app.state.store.read_artifact(project_id, "creative_workflow.json")
+    assert persisted["messages"][-1]["role"] == "assistant"
+
+
 def test_async_storyboard_plan_returns_202_and_publishes_after_worker_completion(tmp_path):
     app = create_app(db_path=tmp_path / "workbench.db", projects_root=tmp_path / "projects")
     with TestClient(app) as client:

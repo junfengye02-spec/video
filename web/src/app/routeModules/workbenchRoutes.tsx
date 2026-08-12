@@ -121,6 +121,7 @@ function InspirationRoute() {
   const {
     busy,
     developInspiration,
+    uploadInspirationAttachment,
     planStoryboard,
     snapshot,
     updateInspirationIntent,
@@ -145,8 +146,9 @@ function InspirationRoute() {
   const handleDevelop = (
     messages: Parameters<typeof developInspiration>[0]["messages"],
     textModel: string,
+    onDelta?: (text: string) => void,
   ) =>
-    developInspiration({ messages, text_model: textModel })
+    developInspiration({ messages, text_model: textModel }, onDelta)
       .then(() => undefined)
       .catch((error: unknown) => {
         claimCommandError();
@@ -191,6 +193,7 @@ function InspirationRoute() {
       developing={busy.developingIdea}
       planning={busy.creating}
       onDevelop={handleDevelop}
+      onUploadAttachment={uploadInspirationAttachment}
       onInitialMessageConsumed={handleInitialMessageConsumed}
       onPlan={handlePlan}
       onUpdateEndFrameIntent={(enabled) => updateInspirationIntent({

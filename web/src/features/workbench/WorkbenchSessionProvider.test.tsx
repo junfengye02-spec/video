@@ -64,6 +64,7 @@ function mocks() {
     create: vi.fn(async () => projectP1),
     createDraft: vi.fn(async () => ({ ...projectP1, storyboard: { shots: [] } })),
     developInspiration: vi.fn(async () => projectP1),
+    uploadInspirationAttachment: vi.fn(),
     updateInspirationIntent: vi.fn(async () => projectP1),
     planStoryboard: vi.fn(async () => projectP1),
     approveStoryboard: vi.fn(async () => projectP1),

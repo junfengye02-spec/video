@@ -9,6 +9,7 @@ import type {
   GenerationUnitsGenerateRequest,
   GenerationUnitsGenerateResponse,
   InspirationChatRequest,
+  InspirationAttachment,
   InspirationIntentUpdateRequest,
   JobEvent,
   ListAssetsRequest,
@@ -73,7 +74,9 @@ export interface WorkbenchContextValue {
   createDraft: (input: DraftProjectRequest) => Promise<ShortDramaProjectResponse>;
   developInspiration: (
     input: InspirationChatRequest,
+    onDelta?: (text: string) => void,
   ) => Promise<ShortDramaProjectResponse>;
+  uploadInspirationAttachment: (file: File) => Promise<InspirationAttachment>;
   updateInspirationIntent: (
     input: InspirationIntentUpdateRequest,
   ) => Promise<ShortDramaProjectResponse>;

@@ -23,6 +23,7 @@ import type {
   GenerationUnitsGenerateRequest,
   GenerationUnitsGenerateResponse,
   InspirationChatRequest,
+  InspirationAttachment,
   InspirationIntentUpdateRequest,
   JobEvent,
   ListAssetsRequest,
@@ -1042,6 +1043,7 @@ export function WorkbenchSessionProvider({
 
   const developInspiration = useCallback(async (
     input: InspirationChatRequest,
+    onDelta?: (text: string) => void,
   ): Promise<ShortDramaProjectResponse> => {
     const current = stateRef.current.snapshot;
     if (!current) throw new Error(strings.errors.createProjectFallback);
@@ -1053,7 +1055,7 @@ export function WorkbenchSessionProvider({
     const token = beginToken(current.project.id, "inspiration");
     send({ type: "operationStarted", token });
     try {
-      const result = await projects.developInspiration(current.project.id, input);
+      const result = await projects.developInspiration(current.project.id, input, onDelta);
       if (isCurrent(token)) {
         const snapshot = { ...result, final_path: result.final_path ?? null };
         send({ type: "operationSucceeded", token, snapshot });
@@ -1075,6 +1077,13 @@ export function WorkbenchSessionProvider({
     projects,
     strings.errors,
   ]);
+
+  const uploadInspirationAttachment = useCallback(async (file: File): Promise<InspirationAttachment> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.errors.createProjectFallback);
+    ensureWritable();
+    return projects.uploadInspirationAttachment(current.project.id, file);
+  }, [ensureWritable, projects, strings.errors.createProjectFallback]);
 
   const updateInspirationIntent = useCallback(async (
     input: InspirationIntentUpdateRequest,
@@ -1753,6 +1762,7 @@ export function WorkbenchSessionProvider({
     createProject,
     createDraft,
     developInspiration,
+    uploadInspirationAttachment,
     updateInspirationIntent,
     planStoryboard,
     approveStoryboard,

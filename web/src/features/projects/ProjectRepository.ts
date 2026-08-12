@@ -4,6 +4,7 @@ import type {
   PlanSectionUpdateRequest,
   DraftProjectRequest,
   InspirationChatRequest,
+  InspirationAttachment,
   InspirationIntentUpdateRequest,
   Project,
   ShortDramaProjectRequest,
@@ -20,7 +21,12 @@ import {
 } from "../../localdb/exportProject";
 import type { LocalProjectSummary, LocalProjectVersion } from "../../localdb/types";
 import { selectProjectCover } from "./projectCover";
-import { ApiError, httpClient } from "../../platform/http/HttpClient";
+import {
+  ApiError,
+  getCsrfToken,
+  httpClient,
+  notifyUnauthorized,
+} from "../../platform/http/HttpClient";
 import {
   browserProjectCache,
   type BrowserProjectCache,
@@ -51,7 +57,9 @@ export interface ProjectRepository {
   developInspiration(
     projectId: string,
     input: InspirationChatRequest,
+    onDelta?: (text: string) => void,
   ): Promise<ShortDramaProjectResponse>;
+  uploadInspirationAttachment(projectId: string, file: File): Promise<InspirationAttachment>;
   updateInspirationIntent(
     projectId: string,
     input: InspirationIntentUpdateRequest,
@@ -342,13 +350,74 @@ export class ServerProjectRepository implements ProjectRepository {
   async developInspiration(
     projectId: string,
     input: InspirationChatRequest,
+    onDelta?: (text: string) => void,
   ): Promise<ShortDramaProjectResponse> {
-    const snapshot = await this.http.json<ShortDramaProjectResponse>(
-      `${projectPath(projectId)}/inspiration/chat`,
-      { method: "POST", body: input },
-    );
-    await this.cache.put(snapshot);
-    return snapshot;
+    if (!onDelta) {
+      const snapshot = await this.http.json<ShortDramaProjectResponse>(
+        `${projectPath(projectId)}/inspiration/chat`,
+        { method: "POST", body: input },
+      );
+      await this.cache.put(snapshot);
+      return snapshot;
+    }
+    const response = await fetch(`${projectPath(projectId)}/inspiration/chat`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "text/event-stream",
+        "Content-Type": "application/json",
+        ...(getCsrfToken() ? { "X-CSRF-Token": getCsrfToken() as string } : {}),
+      },
+      body: JSON.stringify(input),
+    });
+    if (response.status === 401) notifyUnauthorized();
+    if (!response.ok) {
+      let body: Record<string, unknown> = {};
+      try { body = await response.json(); } catch { /* handled below */ }
+      const detail = typeof body.detail === "string" ? body.detail : undefined;
+      throw new ApiError(response.status, detail ?? `Request failed with status ${response.status}`, typeof body.code === "string" ? body.code : undefined, body);
+    }
+    if (!response.body) throw new ApiError(response.status, "The service returned an empty stream.", "invalid_response");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let snapshot: ShortDramaProjectResponse | null = null;
+    const consume = (block: string) => {
+      let event = "message";
+      const data: string[] = [];
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+      }
+      if (!data.length) return;
+      let payload: any;
+      try { payload = JSON.parse(data.join("\n")); } catch { return; }
+      if (event === "delta" && typeof payload.text === "string") onDelta(payload.text);
+      if (event === "done" && payload.snapshot) snapshot = payload.snapshot as ShortDramaProjectResponse;
+      if (event === "error") throw new ApiError(Number(payload.status) || 502, String(payload.message || "Inspiration development failed"), typeof payload.code === "string" ? payload.code : undefined, payload);
+    };
+    while (true) {
+      const part = await reader.read();
+      buffer += decoder.decode(part.value ?? new Uint8Array(), { stream: !part.done });
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() ?? "";
+      for (const block of blocks) consume(block);
+      if (part.done) break;
+    }
+    if (buffer.trim()) consume(buffer);
+    if (!snapshot) throw new ApiError(response.status, "The service returned no completed snapshot.", "invalid_response");
+    const completed = snapshot;
+    await this.cache.put(completed);
+    return completed;
+  }
+
+  async uploadInspirationAttachment(projectId: string, file: File): Promise<InspirationAttachment> {
+    const form = new FormData();
+    form.append("file", file);
+    return httpClient.form<{ attachment: InspirationAttachment }>(
+      `${projectPath(projectId)}/inspiration/attachments`,
+      { body: form },
+    ).then((value) => value.attachment);
   }
 
   async updateInspirationIntent(

@@ -40,11 +40,28 @@ class CredentialFreeRequest(BaseModel):
         }
 
 
+class InspirationAttachment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=1, max_length=255)
+    size: int = Field(ge=0, le=20 * 1024 * 1024)
+    url: str = Field(min_length=1, max_length=4000)
+
+
 class InspirationMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=6000)
+    content: str = Field(default="", max_length=6000)
+    attachments: list[InspirationAttachment] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> "InspirationMessage":
+        if not self.content.strip() and not self.attachments:
+            raise ValueError("message content or attachment is required")
+        return self
 
 
 class NarrativeBeat(BaseModel):
