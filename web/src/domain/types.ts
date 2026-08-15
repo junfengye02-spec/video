@@ -925,10 +925,15 @@ export interface ReferenceImageUploadRequest {
   description: string;
   prompt: string;
   file: File;
+  resource_id?: string;
 }
 
 export interface ReferenceImageUploadResponse {
   media: MediaFile;
   asset: AssetRecord;
-  library_asset: MediaAsset;
+  library_asset?: MediaAsset;
+}
+
+export interface PlannedAssetPromptUpdateRequest {
+  prompt: string;
 }

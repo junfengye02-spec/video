@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from server.app.billing.execution import (
     PaymentRequiredQuote,
+    ProviderGenerationFailed,
     ProviderPricingUnstable,
     ProviderResultPending,
     ProviderResultUnavailable,
@@ -135,6 +136,12 @@ def execute_generation_unit_video(
             "Video provider pricing is temporarily unavailable",
             retry_delay_seconds=0.25,
         ) from exc
+    except ProviderGenerationFailed as exc:
+        raise PermanentTaskError(
+            exc.status,
+            "Video provider generation failed without a charge",
+            billing_job_id=exc.job_id,
+        ) from None
     except (ProviderResultUnavailable, NewApiCallError) as exc:
         raise RetryableTaskError(
             "provider_call_failed",

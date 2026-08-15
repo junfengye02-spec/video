@@ -145,30 +145,73 @@ describe("ShotList", () => {
     expect(onRetryItem).not.toHaveBeenCalled();
   });
 
+  it("keeps a manual retry action for failed generation units after automatic retry is disabled", () => {
+    const shot = createShot({ id: "shot-1" });
+    const task = createAcceptedImageTask("batch-1").task;
+    const failed = task.items![0];
+    failed.task_type = "generation_unit_video.generate";
+    failed.status = "failed";
+    failed.target_entity_type = "generation_unit";
+    failed.target_entity_id = "unit-1";
+    failed.attempt_count = 1;
+    failed.max_attempts = 9;
+    failed.retryable = false;
+    failed.error_code = "failed_no_charge";
+    const onRetryItem = vi.fn();
+    const view = render(
+      <ShotList
+        shots={[shot]}
+        selectedShotId={shot.id}
+        resolveShotMedia={() => null}
+        onSelect={vi.fn()}
+        generationUnitItems={new Map([["unit-1", { batchId: task.id, item: failed }]])}
+        generationPlan={generationPlan(shot.id)}
+        onRetryItem={onRetryItem}
+      />,
+    );
+
+    view.getByRole("button", {
+      name: getStrings("zh").storyboardPage.retryUnitAction,
+    }).click();
+    expect(onRetryItem).toHaveBeenCalledWith(task.id, failed.id);
+  });
+
+  it("shows a backend-approved fresh retry after a generation unit reaches 10 attempts", () => {
+    const shot = createShot({ id: "shot-1" });
+    const task = createAcceptedImageTask("batch-1").task;
+    const failed = task.items![0];
+    failed.task_type = "generation_unit_video.generate";
+    failed.status = "failed";
+    failed.target_entity_type = "generation_unit";
+    failed.target_entity_id = "unit-1";
+    failed.attempt_count = 10;
+    failed.max_attempts = 10;
+    failed.retryable = true;
+
+    const view = render(
+      <ShotList
+        shots={[shot]}
+        selectedShotId={shot.id}
+        resolveShotMedia={() => null}
+        onSelect={vi.fn()}
+        generationUnitItems={new Map([["unit-1", { batchId: task.id, item: failed }]])}
+        generationPlan={generationPlan(shot.id)}
+        onRetryItem={vi.fn()}
+      />,
+    );
+
+    expect(view.getByRole("button", {
+      name: getStrings("zh").storyboardPage.retryUnitAction,
+    })).toBeEnabled();
+  });
+
   it("blocks submission until an incompatible native duration is accepted", () => {
     const shot = createShot({ id: "shot-1" });
     const onAccept = vi.fn();
-    const plan = {
-      version: "1.0",
-      id: "a".repeat(64),
-      storyboard_revision: "sha256:storyboard",
-      provider: "newapi",
-      model_id: "omni_flash-10s",
-      shot_ids: [shot.id],
-      storyboard_shot_count: 1,
-      generation_unit_count: 1,
-      protected_generation_unit_ids: [],
-      pending_shot_ids: [shot.id],
-      covered_shot_ids: [shot.id],
-      covered_segment_ids: [],
+    const plan = generationPlan(shot.id, {
       can_generate: false,
       requires_confirmation: true,
       compatible_with_target: false,
-      native_total_duration_seconds: 10,
-      target_duration_seconds: 5,
-      timeline_total_duration_seconds: 10,
-      duration_difference_seconds: 5,
-      confirmed_strategy: null,
       adaptation_options: ["accept_longer_duration"],
       issues: [{
         code: "target_duration_incompatible",
@@ -176,48 +219,7 @@ describe("ShotList", () => {
         shot_id: null,
         unit_id: null,
       }],
-      generation_segments: [],
-      generation_units: [{
-        id: "unit-1",
-        revision: 1,
-        status: "planned",
-        shot_ids: [shot.id],
-        source_shot_ids: [shot.id],
-        source_beat_ids: [shot.id],
-        source_segment_ids: [],
-        prompt_segments: [],
-        provider: "newapi",
-        model_id: "omni_flash-10s",
-        operation: "text_to_video",
-        requested_duration_seconds: 10,
-        source_duration_seconds: null,
-        timeline_duration_seconds: 10,
-        output_asset_id: null,
-        output_path: null,
-        billing_job_id: null,
-        task_item_id: null,
-        replaces_unit_id: null,
-        profile: {
-          provider: "newapi",
-          model_id: "omni_flash-10s",
-          operation: "text_to_video",
-          duration_mode: "fixed",
-          fixed_duration_seconds: 10,
-          supported_duration_seconds: [],
-          min_duration_seconds: null,
-          max_duration_seconds: null,
-          supports_start_frame: false,
-          supports_end_frame: false,
-          supports_extend: false,
-          supports_sequential_beats: true,
-          supports_multi_shot_prompt: true,
-          max_narrative_beats_per_unit: 2,
-          contract_source: "verified_override",
-          profile_revision: "test",
-          duration_configuration_status: "configured",
-        },
-      }],
-    } satisfies GenerationPlan;
+    });
     const onGenerate = vi.fn();
     const view = render(
       <ShotList
@@ -240,3 +242,75 @@ describe("ShotList", () => {
     expect(onAccept).toHaveBeenCalledTimes(1);
   });
 });
+
+function generationPlan(
+  shotId: string,
+  overrides: Partial<GenerationPlan> = {},
+): GenerationPlan {
+  return {
+    version: "1.0",
+    id: "a".repeat(64),
+    storyboard_revision: "sha256:storyboard",
+    provider: "newapi",
+    model_id: "omni_flash-10s",
+    shot_ids: [shotId],
+    storyboard_shot_count: 1,
+    generation_unit_count: 1,
+    protected_generation_unit_ids: [],
+    pending_shot_ids: [shotId],
+    covered_shot_ids: [shotId],
+    covered_segment_ids: [],
+    can_generate: true,
+    requires_confirmation: false,
+    compatible_with_target: true,
+    native_total_duration_seconds: 10,
+    target_duration_seconds: 5,
+    timeline_total_duration_seconds: 10,
+    duration_difference_seconds: 5,
+    confirmed_strategy: null,
+    adaptation_options: [],
+    issues: [],
+    generation_segments: [],
+    generation_units: [{
+      id: "unit-1",
+      revision: 1,
+      status: "planned",
+      shot_ids: [shotId],
+      source_shot_ids: [shotId],
+      source_beat_ids: [shotId],
+      source_segment_ids: [],
+      prompt_segments: [],
+      provider: "newapi",
+      model_id: "omni_flash-10s",
+      operation: "text_to_video",
+      requested_duration_seconds: 10,
+      source_duration_seconds: null,
+      timeline_duration_seconds: 10,
+      output_asset_id: null,
+      output_path: null,
+      billing_job_id: null,
+      task_item_id: null,
+      replaces_unit_id: null,
+      profile: {
+        provider: "newapi",
+        model_id: "omni_flash-10s",
+        operation: "text_to_video",
+        duration_mode: "fixed",
+        fixed_duration_seconds: 10,
+        supported_duration_seconds: [],
+        min_duration_seconds: null,
+        max_duration_seconds: null,
+        supports_start_frame: false,
+        supports_end_frame: false,
+        supports_extend: false,
+        supports_sequential_beats: true,
+        supports_multi_shot_prompt: true,
+        max_narrative_beats_per_unit: 2,
+        contract_source: "verified_override",
+        profile_revision: "test",
+        duration_configuration_status: "configured",
+      },
+    }],
+    ...overrides,
+  };
+}

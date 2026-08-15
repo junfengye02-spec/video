@@ -18,6 +18,7 @@ from server.app.billing.models import CostReceipt, GenerationJob
 from server.app.db.base import Base
 from server.app.db.session import get_db
 from server.app.events import EventBus, _format_sse
+from server.app.generation_units.models import VideoGenerationUnit
 from server.app.main import create_app
 from server.app.projects.models import ProjectRecord
 from server.app.tasks.models import TaskBatch, TaskDependency, TaskItem
@@ -461,6 +462,149 @@ def test_failed_resource_image_retry_rotates_terminal_no_charge_settlement(
         assert db.get(GenerationJob, old_job_id).status == (
             "provider_result_missing_no_charge"
         )
+
+
+def test_failed_generation_unit_retry_rotates_refunded_execution_at_hard_limit(
+    task_store,
+):
+    old_generation_key = "e" * 64
+    old_job_id = old_generation_key[:32]
+    unit_id = "unit-refunded-retry"
+    batch_id, _ = _submit(
+        task_store,
+        _request(
+            key="generation-unit-no-charge-retry",
+            task_type="generation_unit_video.generate",
+            items=[
+                {
+                    "idempotency_key": "generation-unit",
+                    "input": {},
+                    "model": "omni_flash-10s",
+                    "target_entity_type": "generation_unit",
+                    "target_entity_id": unit_id,
+                    "target_entity_version": 1,
+                    "max_attempts": 10,
+                    "settlement_key": old_job_id,
+                    "generation_key": old_generation_key,
+                    "generation_revision": 1,
+                }
+            ],
+        ),
+    )
+    item = _items(task_store, batch_id)[0]
+
+    with task_store() as db:
+        stored = db.get(TaskItem, item.id)
+        assert stored is not None
+        stored.status = "failed"
+        stored.error_code = "provider_call_failed"
+        stored.error_message = "Video provider call failed"
+        stored.attempt_count = 10
+        stored.max_attempts = 10
+        stored.retryable = False
+        stored.billing_job_id = old_job_id
+        db.add_all(
+            [
+                GenerationJob(
+                    id=old_job_id,
+                    parent_job_id=None,
+                    chargeable=True,
+                    user_id=ALICE.id,
+                    project_id=PROJECT_ID,
+                    operation=f"generation_unit:{unit_id}:v1",
+                    capability="video",
+                    token_kind="video",
+                    token_alias="video-v1",
+                    model="omni_flash-10s",
+                    multiplier_bps=10_000,
+                    provider_method="POST",
+                    provider_route="/v1/videos",
+                    status="failed_no_charge",
+                    quote_id="quote-generation-unit-no-charge",
+                    quote_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                    quote_estimated_quota=1,
+                    quote_estimated_provider_cost_micro=1,
+                    quote_quota_per_unit=Decimal("1"),
+                    quote_pricing_version="test-v1",
+                    quote_other_ratios_json="{}",
+                    quote_billing_fingerprint="generation-unit-no-charge-fingerprint",
+                    result_staged=False,
+                    result_visible=False,
+                ),
+                VideoGenerationUnit(
+                    project_id=PROJECT_ID,
+                    id=unit_id,
+                    revision=1,
+                    plan_id="f" * 64,
+                    status="failed",
+                    active=False,
+                    source_shot_ids_json=["shot-1"],
+                    source_shot_versions_json={"shot-1": 1},
+                    source_beat_ids_json=["beat-1"],
+                    source_segment_ids_json=["segment-1"],
+                    prompt_segments_json=[],
+                    provider="newapi",
+                    model_id="omni_flash-10s",
+                    operation="text_to_video",
+                    profile_revision="profile-v1",
+                    profile_json={},
+                    requested_duration_seconds=10,
+                    source_duration_seconds=None,
+                    timeline_duration_seconds=10,
+                    output_asset_id=None,
+                    output_path=None,
+                    task_item_id=stored.id,
+                    billing_job_id=old_job_id,
+                    replaces_unit_id=None,
+                    execution_key=old_generation_key,
+                    diagnostics_json={},
+                ),
+            ]
+        )
+        db.commit()
+
+        service = TaskService(db)
+        response = service.batch_response(
+            service.require_owned_batch(batch_id, ALICE.id, PROJECT_ID),
+            include_items=True,
+        )
+        assert response.items[0].retryable is True
+
+        retried = service.retry_owned_item(
+            batch_id=batch_id,
+            item_id=item.id,
+            owner_user_id=ALICE.id,
+            project_id=PROJECT_ID,
+        )
+
+        unit = db.get(VideoGenerationUnit, (PROJECT_ID, unit_id, 1))
+        old_job = db.get(GenerationJob, old_job_id)
+        assert unit is not None and old_job is not None
+        assert retried.status == "queued"
+        assert retried.attempt_count == 0
+        assert retried.max_attempts == 9
+        assert retried.billing_job_id is None
+        assert retried.generation_key != old_generation_key
+        assert retried.settlement_key == retried.generation_key[:32]
+        assert unit.execution_key == retried.generation_key
+        assert unit.billing_job_id is None
+        assert unit.status == "queued"
+        assert unit.diagnostics_json["execution_retries"] == [
+            {
+                "execution_cycle": 1,
+                "generation_key": old_generation_key,
+                "settlement_key": old_job_id,
+                "billing_job_id": old_job_id,
+                "billing_status": "failed_no_charge",
+                "attempt_count": 10,
+                "error_code": "provider_call_failed",
+                "retired_at": unit.diagnostics_json["execution_retries"][0][
+                    "retired_at"
+                ],
+            }
+        ]
+        assert old_job.status == "failed_no_charge"
+        assert old_job.result_visible is False
 
 
 def test_parent_aggregates_cancelled_and_mixed_terminal_items(task_store):

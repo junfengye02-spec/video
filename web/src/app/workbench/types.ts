@@ -117,6 +117,7 @@ export interface WorkbenchContextValue {
   uploadReference: (
     payload: ReferenceImageUploadRequest,
   ) => Promise<ReferenceImageUploadResponse>;
+  updatePlannedAssetPrompt: (assetId: string, payload: { prompt: string }) => Promise<void>;
   prepareFinalRender: (selectedShotIds?: string[]) => Promise<RenderPreparation>;
   refreshProduction: () => Promise<void>;
   renderFinal: (selectedShotIds?: string[]) => Promise<void>;

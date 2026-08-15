@@ -27,6 +27,7 @@ from server.app.media_files import (
 )
 from server.app.billing.execution import (
     PaymentRequiredQuote,
+    ProviderGenerationFailed,
     ProviderPricingUnstable,
     ProviderResultPending,
     execute_billed_provider_call,
@@ -1333,7 +1334,7 @@ def generate_billed_shot(
         elif existing_status == "payment_required":
             raise ProviderResultPending("video payment is pending", job_id=billing_job_id)
         elif existing_status != "billed" and existing_status.endswith("_no_charge"):
-            raise NewApiCallError("video generation failed")
+            raise ProviderGenerationFailed(billing_job_id, existing_status)
         else:
             job_id = billing_job_id
     try:
@@ -1373,7 +1374,7 @@ def generate_billed_shot(
         db, settings, media_store.inspect_staged_artifact
     ).load_job(job_id)
     if job.status == "failed_no_charge" or job.status.endswith("_no_charge"):
-        raise NewApiCallError("video generation failed")
+        raise ProviderGenerationFailed(job_id, job.status)
     if not job.result_visible or job.result_locator is None:
         raise ProviderResultPending("provider result is pending", job_id=job_id)
     output_path = project_path / "assets" / "video" / f"{shot_id}.mp4"
@@ -1578,7 +1579,7 @@ def generate_billed_generation_unit(
                 "video payment is pending", job_id=billing_job_id
             )
         elif existing_status != "billed" and existing_status.endswith("_no_charge"):
-            raise NewApiCallError("generation unit video generation failed")
+            raise ProviderGenerationFailed(billing_job_id, existing_status)
         else:
             job_id = billing_job_id
 
@@ -1616,6 +1617,11 @@ def generate_billed_generation_unit(
         ) from None
     if outcome == "pending":
         raise ProviderResultPending("provider result is pending", job_id=job_id)
+    job = BillingService(
+        db, settings, media_store.inspect_staged_artifact
+    ).load_job(job_id)
+    if job.status.endswith("_no_charge"):
+        raise ProviderGenerationFailed(job_id, job.status)
     published = db.get(VideoGenerationUnit, (project_id, unit_id, revision))
     if (
         published is None

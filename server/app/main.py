@@ -111,6 +111,7 @@ from server.app.models import (
     PlanSectionApproval,
     PlanSectionId,
     PlanSectionUpdateRequest,
+    PlannedAssetPromptUpdateRequest,
     ProjectType,
     PromptOptimizeRequest,
     PromptOptimizeResponse,
@@ -231,7 +232,7 @@ project_delete_logger = logging.getLogger("server.app.project_delete")
 end_frame_task_logger = logging.getLogger("server.app.inspiration_end_frames")
 generation_unit_logger = logging.getLogger("server.app.generation_units")
 MAX_MULTIPART_FIELD_BYTES = 64 * 1024
-MAX_MULTIPART_FIELDS = 4
+MAX_MULTIPART_FIELDS = 5
 MAX_MULTIPART_FILES = 1
 MAX_MULTIPART_REQUEST_BYTES = MAX_IMAGE_BYTES + MAX_MULTIPART_FIELD_BYTES
 MAX_INSPIRATION_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -459,7 +460,6 @@ def _replace_planned_resource_with_generated(
         "label",
         "description",
         "prompt",
-        "reference_images",
         "media_urls",
         "origin_project_id",
         "source_type",
@@ -470,6 +470,14 @@ def _replace_planned_resource_with_generated(
     ):
         if field in generated_record:
             merged[field] = deepcopy(generated_record[field])
+    references = [
+        value for value in current.get("reference_images", [])
+        if isinstance(value, str) and value
+    ]
+    for value in generated_record.get("reference_images", []):
+        if isinstance(value, str) and value and value not in references:
+            references.append(value)
+    merged["reference_images"] = references
     merged["id"] = resource_id
     merged["media_asset_id"] = str(generated_record["id"])
     merged["shot_ids"] = list(current.get("shot_ids") or [])
@@ -6676,6 +6684,7 @@ def create_app(
             label = _form_text(form, "label", max_length=255)
             description = _form_text(form, "description", default="", max_length=10_000)
             prompt = _form_text(form, "prompt", default="", max_length=10_000)
+            resource_id = _form_text(form, "resource_id", default="", max_length=128)
             upload = form.get("file")
             if not isinstance(upload, UploadFile):
                 raise HTTPException(status_code=422, detail="file is required")
@@ -6701,6 +6710,25 @@ def create_app(
             if series_bible is None:
                 raise HTTPException(status_code=404, detail="Project not found")
             repository = MediaAssetRepository(db, workbench)
+            planned_asset = None
+            if resource_id:
+                workflow = workbench.read_artifact(project_id, "creative_workflow.json") or {}
+                planned_ids = {
+                    str(asset_id)
+                    for asset_id in workflow.get("planned_asset_ids", [])
+                } if isinstance(workflow, dict) else set()
+                planned_asset = next(
+                    (
+                        asset
+                        for asset in workbench.read_asset_library(project_id)
+                        if isinstance(asset, dict) and str(asset.get("id")) == resource_id
+                    ),
+                    None,
+                )
+                if planned_asset is None or resource_id not in planned_ids:
+                    raise HTTPException(status_code=409, detail="Reference images can only be attached to planned resources")
+                if planned_asset.get("kind") != kind:
+                    raise HTTPException(status_code=422, detail="Reference image kind does not match the planned resource")
             with _project_mutation(
                 db=db,
                 workbench=workbench,
@@ -6715,6 +6743,35 @@ def create_app(
                 failure_detail="Project update failed",
             ):
                 await save_upload_file(upload, output_path, MAX_IMAGE_BYTES)
+                if planned_asset is not None:
+                    assets = workbench.read_asset_library(project_id)
+                    updated_asset = None
+                    for asset in assets:
+                        if not isinstance(asset, dict) or str(asset.get("id")) != resource_id:
+                            continue
+                        references = list(asset.get("reference_images") or [])
+                        if relative_path not in references:
+                            references.append(relative_path)
+                        asset["reference_images"] = references
+                        asset["version"] = int(asset.get("version") or 1) + 1
+                        updated_asset = asset
+                        break
+                    if updated_asset is None:
+                        raise HTTPException(status_code=404, detail="Project resource not found")
+                    series_bible["assets"] = assets
+                    workbench.write_asset_library(project_id, assets)
+                    workbench.write_artifact(project_id, "series_bible.json", series_bible)
+                    project.updated_at = datetime.now(timezone.utc)
+                    response_data = {
+                        "media": {
+                            "path": relative_path,
+                            "media_url": media_download_url(project_id, relative_path),
+                            "filename": Path(relative_path).name,
+                            "content_type": media_content_type(output_path),
+                        },
+                        "asset": _decorate_asset_media(project_id, project_dir, updated_asset),
+                    }
+                    return response_data
                 library_asset = repository.create_upload(
                     asset_id=asset_id,
                     owner_user_id=project.owner_user_id,
@@ -6748,6 +6805,64 @@ def create_app(
                     "library_asset": repository.serialize(library_asset),
                 }
         return response_data
+
+    @app.patch(
+        "/api/projects/{project_id}/assets/{asset_id}",
+        openapi_extra=_json_request_openapi(PlannedAssetPromptUpdateRequest),
+    )
+    async def update_planned_asset_prompt(
+        request: Request,
+        project_id: str,
+        asset_id: str,
+        project: Annotated[ProjectRecord, Depends(_require_owned_csrf)],
+        workbench: WorkbenchStore = Depends(get_store),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        payload = await parse_json_request(request, PlannedAssetPromptUpdateRequest)
+        project = _lock_owned_project_after_parse(
+            request=request,
+            db=db,
+            project_id=project_id,
+            authorized_project=project,
+        )
+        _require_approved_creative_workflow(workbench, project_id)
+        workflow = workbench.read_artifact(project_id, "creative_workflow.json") or {}
+        planned_ids = {
+            str(planned_id)
+            for planned_id in workflow.get("planned_asset_ids", [])
+        } if isinstance(workflow, dict) else set()
+        if asset_id not in planned_ids:
+            raise HTTPException(status_code=409, detail="Only planned resource prompts can be updated")
+        project_dir = workbench.project_dir(project_id)
+        with _project_mutation(
+            db=db,
+            workbench=workbench,
+            project_id=project_id,
+            operation="planned_asset_prompt_update",
+            changed_paths=["artifacts/asset_library.json", "artifacts/series_bible.json"],
+            failure_detail="Planned resource update failed",
+        ):
+            assets = workbench.read_asset_library(project_id)
+            updated_asset = next(
+                (
+                    asset
+                    for asset in assets
+                    if isinstance(asset, dict) and str(asset.get("id")) == asset_id
+                ),
+                None,
+            )
+            if updated_asset is None:
+                raise HTTPException(status_code=404, detail="Project resource not found")
+            updated_asset["prompt"] = payload.prompt
+            updated_asset["version"] = int(updated_asset.get("version") or 1) + 1
+            series_bible = workbench.read_artifact(project_id, "series_bible.json")
+            if not isinstance(series_bible, dict):
+                raise HTTPException(status_code=404, detail="Project not found")
+            series_bible["assets"] = assets
+            workbench.write_asset_library(project_id, assets)
+            workbench.write_artifact(project_id, "series_bible.json", series_bible)
+            project.updated_at = datetime.now(timezone.utc)
+            return {"asset": _decorate_asset_media(project_id, project_dir, updated_asset)}
 
     @app.post("/api/projects/{project_id}/assets/{asset_id}/add")
     def add_library_asset_to_project(

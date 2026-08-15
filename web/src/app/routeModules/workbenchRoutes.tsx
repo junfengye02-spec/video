@@ -626,6 +626,7 @@ function ResourceLibraryRoute() {
     selectedShotId,
     snapshot,
     uploadReference,
+    updatePlannedAssetPrompt,
   } = useWorkbench();
   const {
     claimCommandError,
@@ -666,6 +667,13 @@ function ResourceLibraryRoute() {
       claimCommandError();
       throw error;
     });
+  const handleUpdatePlannedAssetPrompt = (
+    assetId: string,
+    payload: Parameters<typeof updatePlannedAssetPrompt>[1],
+  ) => updatePlannedAssetPrompt(assetId, payload).catch((error: unknown) => {
+    claimCommandError();
+    throw error;
+  });
 
   return (
     <ResourceLibraryPage
@@ -688,6 +696,7 @@ function ResourceLibraryRoute() {
       onSessionExpired={onSessionExpired}
       onDirtyChange={onDirtyChange}
       onUploadReferenceImage={handleUpload}
+      onUpdatePlannedAssetPrompt={handleUpdatePlannedAssetPrompt}
       taskEvents={events}
     />
   );

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,6 +20,7 @@ from server.app.generation_units.prompt import (
     generation_unit_prompt_contract,
 )
 from server.app.generation_units.service import execution_key
+from server.app.provider.newapi import UsageReceipt, VideoTaskStatus
 from server.app.tasks.models import TaskDependency, TaskItem
 from server.tests.test_api import _wait_project_task
 from server.tests.test_generation_units import _project, _v2_app
@@ -533,6 +535,7 @@ def test_failed_replacement_keeps_old_active_and_retry_reuses_billed_job(
         assert len(
             [call for call in app.state.fake_newapi.execute_calls if call[0] == "video"]
         ) == calls_before_replacement + 1
+
         billed_job_id = pending.billing_job_id
         assert billed_job_id is not None
         assert app.state.test_db.get(GenerationJob, billed_job_id).status == "billed"
@@ -607,3 +610,163 @@ def test_failed_replacement_keeps_old_active_and_retry_reuses_billed_job(
         assert len(
             [call for call in app.state.fake_newapi.execute_calls if call[0] == "video"]
         ) == calls_before_replacement + 1
+
+
+def test_refunded_generation_unit_retry_starts_a_fresh_provider_execution(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "server.app.provider.video_recovery.probe_output",
+        lambda path: {
+            "file_size_bytes": path.stat().st_size,
+            "video_width": 720,
+            "video_height": 1280,
+        },
+    )
+    monkeypatch.setattr(
+        "server.app.generation_units.publication.extract_tail_frame",
+        _fake_tail_extractor,
+    )
+    app = _v2_app(tmp_path)
+    app.state.task_worker.max_concurrency = 1
+    app.state.task_worker.retry_base_seconds = 0.01
+
+    failed_reference: list[str | None] = [None]
+    original_execute = app.state.fake_newapi.execute_quoted
+    original_receipt = app.state.fake_newapi.get_task_receipt
+
+    def execute_quoted(kind, token_alias, request, quote_id):
+        result = original_execute(kind, token_alias, request, quote_id)
+        if kind == "video" and failed_reference[0] is None:
+            failed_reference[0] = result.reference_id
+        return result
+
+    def get_video_task(token_alias, task_id):
+        del token_alias
+        if task_id == failed_reference[0]:
+            return VideoTaskStatus.model_validate(
+                {
+                    "id": task_id,
+                    "status": "failed",
+                    "error": {
+                        "code": "upstream_error",
+                        "message": "video generation timed out",
+                    },
+                }
+            )
+        return VideoTaskStatus(id=task_id, status="completed")
+
+    def get_task_receipt(kind, token_alias, task_id):
+        if task_id != failed_reference[0]:
+            return original_receipt(kind, token_alias, task_id)
+        return UsageReceipt(
+            reference_type="task",
+            reference_id=task_id,
+            status="refunded",
+            model="omni_flash-10s",
+            quota=500_000,
+            refunded_quota=500_000,
+            quota_per_unit=Decimal("500000"),
+            pricing_version="sha256:test-pricing",
+            cost_currency="USD",
+            cost_amount_micro=0,
+            settled_at=int(datetime.now(timezone.utc).timestamp()),
+        )
+
+    monkeypatch.setattr(app.state.fake_newapi, "execute_quoted", execute_quoted)
+    monkeypatch.setattr(app.state.fake_newapi, "get_video_task", get_video_task)
+    monkeypatch.setattr(app.state.fake_newapi, "get_task_receipt", get_task_receipt)
+
+    with TestClient(app) as client:
+        project_id, storyboard = _project(app, client, mergeable=True)
+        preview = client.post(
+            f"/api/projects/{project_id}/generation-plan/preview",
+            json={
+                "video_model": "omni_flash-10s",
+                "operation": "text_to_video",
+                "shot_ids": [shot["id"] for shot in storyboard["shots"]],
+            },
+        )
+        assert preview.status_code == 200, preview.text
+        plan = preview.json()
+        unit_ids = [unit["id"] for unit in plan["generation_units"]]
+        unit_id = unit_ids[0]
+        submitted = client.post(
+            f"/api/projects/{project_id}/generation-units/generate",
+            json={
+                "generation_plan_id": plan["id"],
+                "generation_unit_ids": unit_ids,
+                "idempotency_key": "refunded-generation-unit",
+            },
+        )
+        assert submitted.status_code == 202, submitted.text
+        batch_id = submitted.json()["task_id"]
+        failed = _wait_project_task(
+            client,
+            project_id,
+            batch_id,
+            {"failed", "partial_failure"},
+        )
+        assert failed_reference[0] is not None
+        assert len(
+            [call for call in app.state.fake_newapi.execute_calls if call[0] == "video"]
+        ) == 1
+
+        app.state.test_db.expire_all()
+        item_id = failed["items"][0]["id"]
+        item = app.state.test_db.get(TaskItem, item_id)
+        unit = app.state.test_db.get(VideoGenerationUnit, (project_id, unit_id, 1))
+        assert item is not None and unit is not None
+        old_job_id = unit.billing_job_id
+        assert old_job_id is not None
+        assert item.billing_job_id == old_job_id
+        old_generation_key = item.generation_key
+        old_job = app.state.test_db.get(GenerationJob, old_job_id)
+        assert old_job is not None
+        assert old_job.status == "failed_no_charge"
+        assert old_job.provider_reference_id == failed_reference[0]
+        assert unit.status == "failed" and unit.billing_job_id == old_job_id
+
+        item.attempt_count = 10
+        item.max_attempts = 10
+        item.retryable = False
+        app.state.test_db.commit()
+
+        retried = client.post(
+            f"/api/projects/{project_id}/tasks/{batch_id}/items/{item_id}/retry"
+        )
+        assert retried.status_code == 202, retried.text
+        completed = _wait_project_task(client, project_id, batch_id, {"complete"})
+
+        app.state.test_db.expire_all()
+        current_item = app.state.test_db.get(TaskItem, item_id)
+        current_unit = app.state.test_db.get(
+            VideoGenerationUnit, (project_id, unit_id, 1)
+        )
+        immutable_old_job = app.state.test_db.get(GenerationJob, old_job_id)
+        assert current_item is not None and current_unit is not None
+        assert immutable_old_job is not None
+        assert len(
+            [call for call in app.state.fake_newapi.execute_calls if call[0] == "video"]
+        ) == len(unit_ids) + 1
+        assert immutable_old_job.status == "failed_no_charge"
+        assert immutable_old_job.provider_reference_id == failed_reference[0]
+        assert current_item.generation_key != old_generation_key
+        assert current_item.billing_job_id != old_job_id
+        assert current_item.attempt_count == 1
+        current_items = list(
+            app.state.test_db.scalars(
+                select(TaskItem)
+                .where(TaskItem.batch_id == batch_id)
+                .order_by(TaskItem.position)
+            )
+        )
+        assert completed["status"] == "complete"
+        assert all(stored.status == "complete" for stored in current_items)
+        assert current_unit.status == "complete" and current_unit.active
+        assert current_unit.billing_job_id == current_item.billing_job_id
+        assert current_unit.diagnostics_json["execution_retries"][0][
+            "billing_job_id"
+        ] == old_job_id
+        new_job = app.state.test_db.get(GenerationJob, current_item.billing_job_id)
+        assert new_job is not None and new_job.status == "billed"

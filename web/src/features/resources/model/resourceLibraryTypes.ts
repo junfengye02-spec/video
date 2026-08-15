@@ -11,6 +11,7 @@ import type {
   ProjectGenerationPreferences,
   ProductionConnectionState,
   PromptOptimizeResponse,
+  PlannedAssetPromptUpdateRequest,
   ReferenceImageUploadRequest,
   Shot,
   TaskBatch,
@@ -56,4 +57,8 @@ export interface ResourceLibraryControllerProps {
   taskEvents?: JobEvent[];
   onDirtyChange?: (dirty: boolean) => void;
   onUploadReferenceImage: (payload: ReferenceImageUploadRequest) => Promise<void>;
+  onUpdatePlannedAssetPrompt?: (
+    assetId: string,
+    payload: PlannedAssetPromptUpdateRequest,
+  ) => Promise<void>;
 }

@@ -58,6 +58,7 @@ export function useResourceLibraryController({
   taskEvents = [],
   onDirtyChange,
   onUploadReferenceImage,
+  onUpdatePlannedAssetPrompt,
 }: ResourceLibraryControllerProps) {
   const strings = getStrings("zh").resources;
   const [view, setView] = useState<ResourceView>("project");
@@ -264,12 +265,15 @@ export function useResourceLibraryController({
     panelOpenerRef.current = opener;
     setPanel({ mode: "detail", assetId });
   };
-  const openUpload = (opener: HTMLButtonElement) => {
+  const openUpload = (opener: HTMLButtonElement, assetId?: string) => {
     if (!canReplacePanel()) return;
     clearPanelErrors();
     setDrawerDirty(false);
     panelOpenerRef.current = opener;
-    setPanel({ mode: "upload" });
+    const plannedAsset = assetId
+      ? projectAssets.find((asset) => asset.id === assetId && asset.planned)
+      : undefined;
+    setPanel({ mode: "upload", assetId: plannedAsset?.id });
   };
   const openGenerate = (opener: HTMLButtonElement, assetId?: string) => {
     if (!canReplacePanel()) return;
@@ -327,6 +331,9 @@ export function useResourceLibraryController({
     setGenerationError(null);
     setOptimizationError(null);
     try {
+      if (selectedGenerationAsset && onUpdatePlannedAssetPrompt) {
+        await onUpdatePlannedAssetPrompt(selectedGenerationAsset.id, { prompt: payload.prompt });
+      }
       const result = await onGenerateImages(requestPayload);
       setPendingGenerationQuote(null);
       setResourceTasks((current) => [result.task, ...current.filter((task) => task.id !== result.task.id)]);

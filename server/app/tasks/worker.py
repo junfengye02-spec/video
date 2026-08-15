@@ -48,10 +48,13 @@ class PermanentTaskError(Exception):
         self,
         code: str = "task_execution_failed",
         message: str = "Task execution failed",
+        *,
+        billing_job_id: str | None = None,
     ):
         super().__init__(message)
         self.code = code
         self.public_message = message
+        self.billing_job_id = billing_job_id
 
 
 class TaskAwaitingPayment(Exception):
@@ -450,6 +453,15 @@ class TaskWorker:
                 retry_delay_seconds=exc.retry_delay_seconds,
             )
         except PermanentTaskError as exc:
+            if exc.billing_job_id is not None:
+                with self.session_factory() as db:
+                    if not TaskService(db, self.events).bind_claim_billing_job(
+                        claim.item_id,
+                        self.worker_id,
+                        claim.attempt_count,
+                        exc.billing_job_id,
+                    ):
+                        return
             self._fail(
                 claim,
                 code=exc.code,

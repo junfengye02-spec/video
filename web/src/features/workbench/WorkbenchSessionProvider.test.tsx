@@ -109,6 +109,16 @@ function mocks() {
     previewGenerationPlan: vi.fn(),
     generateGenerationUnits: vi.fn(),
     addAssetToProject: vi.fn(),
+    updatePlannedAssetPrompt: vi.fn(async (_projectId: string, assetId: string, payload: { prompt: string }) => ({
+      asset: {
+        id: assetId,
+        kind: "character" as const,
+        label: "Updated resource",
+        description: "",
+        prompt: payload.prompt,
+        reference_images: [],
+      },
+    })),
     reviseCreativePlan: vi.fn(async () => projectP1),
     optimize: vi.fn(),
     optimizeImagePrompt: vi.fn(),

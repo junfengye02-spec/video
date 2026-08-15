@@ -1,4 +1,4 @@
-import { AlertTriangle, ImageOff, Link2, Unlink, X } from "lucide-react";
+import { AlertTriangle, ImageOff, Link2, Unlink, Upload, X } from "lucide-react";
 import type { RefObject } from "react";
 import type { ConsistencyReport, Shot } from "../../domain/types";
 import { getStrings, type UIStrings } from "../../i18n";
@@ -19,6 +19,7 @@ export interface AssetDetailDrawerProps {
   shots: Shot[];
   strings?: UIStrings["resources"];
   onBind: (bind: boolean) => void;
+  onUploadReference?: () => void;
   onClose: () => void;
 }
 
@@ -34,6 +35,7 @@ export function AssetDetailDrawer({
   shots,
   strings = getStrings("zh").resources,
   onBind,
+  onUploadReference,
   onClose,
 }: AssetDetailDrawerProps) {
   const currentShot = shots.find((shot) => shot.id === currentShotId) ?? null;
@@ -100,6 +102,13 @@ export function AssetDetailDrawer({
         <p>{asset.prompt || strings.noPrompt}</p>
       </section>
       <p>{strings.linkedShotCount(countLinkedShots(asset.id, shots))}</p>
+
+      {asset.planned && onUploadReference ? (
+        <button type="button" disabled={panelLocked} onClick={onUploadReference}>
+          <Upload aria-hidden="true" size={16} />
+          {strings.uploadPlannedReferenceAction}
+        </button>
+      ) : null}
 
       {unavailable ? (
         <p className="asset-file-status" role="status">

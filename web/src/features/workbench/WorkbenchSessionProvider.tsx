@@ -1449,7 +1449,7 @@ export function WorkbenchSessionProvider({
         ...latest,
         series_bible: {
           ...latest.series_bible,
-          assets: [...(latest.series_bible.assets ?? []), uploadedAsset],
+          assets: mergeAssetRecords(latest.series_bible.assets ?? [], [uploadedAsset]),
         },
       };
       try {
@@ -1482,6 +1482,28 @@ export function WorkbenchSessionProvider({
     scheduleAssetMediaCache,
     strings.errors.uploadReferenceFallback,
   ]);
+
+  const updatePlannedAssetPrompt = useCallback(async (
+    assetId: string,
+    payload: { prompt: string },
+  ): Promise<void> => {
+    const current = stateRef.current.snapshot;
+    if (!current) throw new Error(strings.resources.generateError);
+    ensureWritable();
+    const projectId = current.project.id;
+    const result = await generation.updatePlannedAssetPrompt(projectId, assetId, payload);
+    const latest = stateRef.current.snapshot;
+    if (latest?.project.id !== projectId) return;
+    const snapshot: ShortDramaProjectResponse = {
+      ...latest,
+      series_bible: {
+        ...latest.series_bible,
+        assets: mergeAssetRecords(latest.series_bible.assets ?? [], [result.asset]),
+      },
+    };
+    send({ type: "snapshotUpdated", projectId, snapshot });
+    await persistSnapshot(projectId, snapshot, () => stateRef.current.snapshot?.project.id === projectId);
+  }, [ensureWritable, generation, persistSnapshot, send, strings.resources.generateError]);
 
   const listAssets = useCallback(
     (payload: ListAssetsRequest): Promise<ListAssetsResponse> => generation.listAssets(payload),
@@ -1784,6 +1806,7 @@ export function WorkbenchSessionProvider({
     retryTaskItem,
     addAssetToProject,
     uploadReference,
+    updatePlannedAssetPrompt,
     prepareFinalRender,
     refreshProduction,
     renderFinal,

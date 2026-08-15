@@ -1,6 +1,7 @@
 import { GENERATION_UNITS_CONTRACT_VERSION } from "../../domain/types";
 import type {
   AddAssetToProjectResponse,
+  AssetRecord,
   CompositionAcceptedResponse,
   ContinuityPlan,
   ContinuityPlanResponse,
@@ -18,6 +19,7 @@ import type {
   ListAssetsResponse,
   MediaAssetKind,
   PromptOptimizeResponse,
+  PlannedAssetPromptUpdateRequest,
   ProductionConnectionState,
   ReferenceImageUploadRequest,
   ReferenceImageUploadResponse,
@@ -78,6 +80,11 @@ export interface GenerationService {
     projectId: string,
     payload: ReferenceImageUploadRequest,
   ): Promise<ReferenceImageUploadResponse>;
+  updatePlannedAssetPrompt(
+    projectId: string,
+    assetId: string,
+    payload: PlannedAssetPromptUpdateRequest,
+  ): Promise<{ asset: AssetRecord }>;
   prepareRender(projectId: string, selectedShotIds?: string[]): Promise<RenderPreparation>;
   compose(projectId: string, payload: RenderProjectRequest): Promise<CompositionAcceptedResponse>;
   render(projectId: string, payload?: RenderProjectRequest | boolean): Promise<RenderProjectResponse>;
@@ -380,9 +387,21 @@ export class LocalGenerationService implements GenerationService {
     form.append("label", payload.label);
     form.append("description", payload.description);
     form.append("prompt", payload.prompt);
+    if (payload.resource_id) form.append("resource_id", payload.resource_id);
     form.append("file", payload.file);
     return this.http.form<ReferenceImageUploadResponse>(`${projectPath(projectId)}/assets/upload`, {
       body: form,
+    });
+  }
+
+  updatePlannedAssetPrompt(
+    projectId: string,
+    assetId: string,
+    payload: PlannedAssetPromptUpdateRequest,
+  ): Promise<{ asset: AssetRecord }> {
+    return this.http.json(`${projectPath(projectId)}/assets/${encodeURIComponent(assetId)}`, {
+      method: "PATCH",
+      body: payload,
     });
   }
 

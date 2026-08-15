@@ -22,7 +22,7 @@ export interface ResourceLibraryAsset extends AssetRecord {
 export type ResourcePanelState =
   | { mode: "closed" }
   | { mode: "detail"; assetId: string }
-  | { mode: "upload" }
+  | { mode: "upload"; assetId?: string }
   | { mode: "generate"; assetId?: string };
 
 const SUPPORTED_KINDS: ReadonlySet<string> = new Set(["character", "scene", "prop"]);

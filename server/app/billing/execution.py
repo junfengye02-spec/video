@@ -64,6 +64,15 @@ class ProviderResultUnavailable(RuntimeError):
     pass
 
 
+class ProviderGenerationFailed(NewApiCallError):
+    """The provider reached a terminal no-charge state for a video job."""
+
+    def __init__(self, job_id: str, status: str):
+        super().__init__("video provider generation failed")
+        self.job_id = job_id
+        self.status = status
+
+
 class ProviderPricingUnstable(RuntimeError):
     pass
 

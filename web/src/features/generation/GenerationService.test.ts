@@ -451,6 +451,37 @@ describe("GenerationService", () => {
     expect(body.get("file")).toBe(file);
   });
 
+  it("associates a planned resource upload and saves its prompt through the resource API", async () => {
+    const { form, json, service } = serviceWithJson(vi.fn(async () => ({
+      asset: {
+        id: "planned-scene",
+        kind: "scene",
+        label: "Rainy alley",
+        description: "night rain",
+        prompt: "revised prompt",
+        reference_images: [],
+      },
+    })));
+    const file = new File(["image"], "alley.png", { type: "image/png" });
+
+    await service.uploadReference("p1", {
+      kind: "scene",
+      label: "Rainy alley",
+      description: "night rain",
+      prompt: "revised prompt",
+      resource_id: "planned-scene",
+      file,
+    });
+    await service.updatePlannedAssetPrompt("p1", "planned-scene", { prompt: "revised prompt" });
+
+    const formBody = form.mock.calls[0]?.[1].body as FormData;
+    expect(formBody.get("resource_id")).toBe("planned-scene");
+    expect(json).toHaveBeenCalledWith("/api/projects/p1/assets/planned-scene", {
+      method: "PATCH",
+      body: { prompt: "revised prompt" },
+    });
+  });
+
   it("renders without overriding the runtime locked by the server", async () => {
     const { json, service } = serviceWithJson(vi.fn(async () => ({
       job_id: "render-job",

@@ -445,6 +445,52 @@ def _planned_resources(app, project_id: str) -> list[dict]:
     return resources
 
 
+def test_planned_resource_prompt_and_reference_image_can_be_updated(tmp_path):
+    from fastapi.testclient import TestClient
+
+    app, _db = _new_client(tmp_path)
+    with TestClient(app) as client:
+        project_id = _project(client, "Planned resource editing")
+        resource = _planned_resources(app, project_id)[0]
+
+        updated = client.patch(
+            f"/api/projects/{project_id}/assets/{resource['id']}",
+            json={"prompt": "Mara in a red coat, three-quarter portrait"},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["asset"]["prompt"] == (
+            "Mara in a red coat, three-quarter portrait"
+        )
+
+        uploaded = client.post(
+            f"/api/projects/{project_id}/assets/upload",
+            data={
+                "kind": "character",
+                "label": resource["label"],
+                "description": resource["description"],
+                "prompt": "ignored for an existing planned resource",
+                "resource_id": resource["id"],
+            },
+            files={"file": ("mara-reference.png", b"image-bytes", "image/png")},
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        assert "library_asset" not in uploaded.json()
+        asset = uploaded.json()["asset"]
+        assert asset["id"] == resource["id"]
+        assert asset["prompt"] == "Mara in a red coat, three-quarter portrait"
+        assert asset["reference_images"] == [
+            uploaded.json()["media"]["path"]
+        ]
+
+        snapshot = client.get(f"/api/projects/{project_id}").json()
+        stored = next(
+            asset for asset in snapshot["series_bible"]["assets"]
+            if asset["id"] == resource["id"]
+        )
+        assert stored["prompt"] == "Mara in a red coat, three-quarter portrait"
+        assert stored["reference_images"] == [uploaded.json()["media"]["path"]]
+
+
 def test_resource_batch_snapshots_project_assets_and_restores_items_from_queries(tmp_path):
     from fastapi.testclient import TestClient
 

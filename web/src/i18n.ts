@@ -552,6 +552,9 @@ export interface UIStrings {
     viewAsset: (label: string) => string;
     detailDialogTitle: string;
     uploadDialogTitle: string;
+    uploadPlannedReferenceTitle: (label: string) => string;
+    uploadPlannedReferenceNotice: string;
+    uploadPlannedReferenceAction: string;
     generateDialogTitle: string;
     closeDetailAction: string;
     closeUploadAction: string;
@@ -1398,6 +1401,9 @@ const STRINGS: Record<Locale, UIStrings> = {
       viewAsset: (label) => `View resource ${label}`,
       detailDialogTitle: "Resource details",
       uploadDialogTitle: "Upload resource",
+      uploadPlannedReferenceTitle: (label) => `Upload reference for ${label}`,
+      uploadPlannedReferenceNotice: "This image will be used only as a reference for the planned resource.",
+      uploadPlannedReferenceAction: "Upload reference image",
       generateDialogTitle: "Generate resource with AI",
       closeDetailAction: "Close resource details",
       closeUploadAction: "Close resource upload",
@@ -2301,6 +2307,9 @@ const STRINGS: Record<Locale, UIStrings> = {
       viewAsset: (label) => `\u67e5\u770b\u8d44\u6e90 ${label}`,
       detailDialogTitle: "\u8d44\u6e90\u8be6\u60c5",
       uploadDialogTitle: "\u4e0a\u4f20\u8d44\u6e90",
+      uploadPlannedReferenceTitle: (label) => `\u4e3a ${label} \u4e0a\u4f20\u53c2\u8003\u56fe`,
+      uploadPlannedReferenceNotice: "\u56fe\u7247\u5c06\u4ec5\u7528\u4f5c\u8be5\u89c4\u5212\u8d44\u6e90\u7684\u53c2\u8003\u56fe\u3002",
+      uploadPlannedReferenceAction: "\u4e0a\u4f20\u53c2\u8003\u56fe",
       generateDialogTitle: "AI \u751f\u6210\u8d44\u6e90",
       closeDetailAction: "\u5173\u95ed\u8d44\u6e90\u8be6\u60c5",
       closeUploadAction: "\u5173\u95ed\u4e0a\u4f20\u8d44\u6e90",

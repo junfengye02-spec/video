@@ -102,6 +102,63 @@ describe("ResourceLibraryPage", () => {
     expect(screen.getByText(strings.plannedPrefillNotice)).toBeInTheDocument();
   });
 
+  it("uploads a reference image into the selected planned resource", async () => {
+    const onUploadReferenceImage = vi.fn().mockResolvedValue(undefined);
+    const plannedCharacter: AssetRecord = {
+      id: "character-c1",
+      kind: "character",
+      label: "Lin",
+      description: "lead investigator",
+      prompt: "red coat, short hair",
+      reference_images: [],
+      planned: true,
+    };
+    const file = new File(["portrait"], "lin.png", { type: "image/png" });
+    render(<ResourceLibraryPage {...resourceProps} assets={[plannedCharacter]} onUploadReferenceImage={onUploadReferenceImage} />);
+
+    fireEvent.click(screen.getByRole("button", { name: strings.viewAsset("Lin") }));
+    fireEvent.click(screen.getByRole("button", { name: strings.uploadPlannedReferenceAction }));
+    fireEvent.change(screen.getByLabelText(strings.fileLabel), { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: strings.submitUploadAction }));
+
+    await waitFor(() => expect(onUploadReferenceImage).toHaveBeenCalledWith({
+      kind: "character",
+      label: "Lin",
+      description: "lead investigator",
+      prompt: "red coat, short hair",
+      file,
+      resource_id: "character-c1",
+    }));
+  });
+
+  it("saves an edited planned prompt before submitting its generation task", async () => {
+    const onUpdatePlannedAssetPrompt = vi.fn().mockResolvedValue(undefined);
+    const onGenerateImages = vi.fn().mockResolvedValue(createAcceptedImageTask());
+    const plannedCharacter: AssetRecord = {
+      id: "character-c1",
+      kind: "character",
+      label: "Lin",
+      description: "lead investigator",
+      prompt: "red coat, short hair",
+      reference_images: [],
+      planned: true,
+    };
+    render(<ResourceLibraryPage {...resourceProps} assets={[plannedCharacter]} onGenerateImages={onGenerateImages} onUpdatePlannedAssetPrompt={onUpdatePlannedAssetPrompt} />);
+
+    fireEvent.click(screen.getByRole("button", { name: strings.generatePlannedAction }));
+    fireEvent.change(screen.getByLabelText(strings.promptLabel), { target: { value: "edited cinematic prompt" } });
+    fireEvent.click(screen.getByRole("button", { name: strings.submitGenerateAction }));
+
+    await waitFor(() => expect(onUpdatePlannedAssetPrompt).toHaveBeenCalledWith(
+      "character-c1",
+      { prompt: "edited cinematic prompt" },
+    ));
+    await waitFor(() => expect(onGenerateImages).toHaveBeenCalled());
+    expect(onUpdatePlannedAssetPrompt.mock.invocationCallOrder[0]).toBeLessThan(
+      onGenerateImages.mock.invocationCallOrder[0],
+    );
+  });
+
   it("pairs distinct character, scene and prop icons with text labels", () => {
     render(
       <ResourceLibraryPage

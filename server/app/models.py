@@ -386,6 +386,10 @@ class PromptOptimizeRequest(CredentialFreeRequest):
     billing_job_id: str | None = Field(default=None, min_length=32, max_length=32)
 
 
+class PlannedAssetPromptUpdateRequest(CredentialFreeRequest):
+    prompt: str = Field(min_length=1, max_length=10000)
+
+
 class ImageGenerationRequest(CredentialFreeRequest):
     prompt: str = Field(min_length=1, max_length=10000)
     model: str = Field(default="gpt-image-2", min_length=1, max_length=200)

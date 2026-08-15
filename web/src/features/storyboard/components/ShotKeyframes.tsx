@@ -176,6 +176,9 @@ export function ShotKeyframes({
         prompt: "",
         file,
       });
+      if (!result.library_asset) {
+        throw new Error("Reference upload did not create a reusable resource.");
+      }
       if (
         requestRevision.current !== revision
         || projectId !== capturedProjectId

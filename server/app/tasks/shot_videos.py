@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from server.app.billing.execution import (
     PaymentRequiredQuote,
+    ProviderGenerationFailed,
     ProviderPricingUnstable,
     ProviderResultPending,
     ProviderResultUnavailable,
@@ -243,6 +244,12 @@ def execute_shot_video(
         ) from exc
     except VideoFrameContractUnsupported as exc:
         raise PermanentTaskError(exc.code, exc.message) from None
+    except ProviderGenerationFailed as exc:
+        raise PermanentTaskError(
+            exc.status,
+            "Video provider generation failed without a charge",
+            billing_job_id=exc.job_id,
+        ) from None
     except (ProviderResultUnavailable, NewApiCallError) as exc:
         raise RetryableTaskError(
             "provider_call_failed",

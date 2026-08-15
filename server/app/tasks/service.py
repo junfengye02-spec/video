@@ -4,6 +4,7 @@ import hashlib
 import json
 import uuid
 from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -86,7 +87,7 @@ ACTIVE_BILLING_JOB_STATUSES = {
     "payment_required_quote",
     "payment_required",
 }
-RESOURCE_IMAGE_RETRYABLE_NO_CHARGE_STATUSES = {
+RETRYABLE_NO_CHARGE_STATUSES = {
     "provider_pricing_unstable_no_charge",
     "provider_quote_rate_limited_no_charge",
     "provider_pricing_unavailable_no_charge",
@@ -387,12 +388,18 @@ class TaskService:
         # automatic recovery may have already marked retryable false.
         if not item.retryable and item.status != "failed":
             raise TaskStateError("task_not_retryable", "Task item is not retryable")
-        if item.attempt_count >= 10:
-            raise TaskStateError("task_retry_limit", "Task item retry limit reached")
-        if item.attempt_count >= item.max_attempts:
-            item.max_attempts = item.attempt_count + 1
 
         billing_job = self._generation_job_for_item(item)
+        fresh_generation_execution = self._rotate_failed_generation_unit_execution(
+            item=item,
+            batch=batch,
+            billing_job=billing_job,
+        )
+        if item.attempt_count >= 10 and not fresh_generation_execution:
+            raise TaskStateError("task_retry_limit", "Task item retry limit reached")
+        if not fresh_generation_execution and item.attempt_count >= item.max_attempts:
+            item.max_attempts = item.attempt_count + 1
+
         if (
             item.status == "failed"
             and item.task_type == "resource_image.generate"
@@ -401,7 +408,7 @@ class TaskService:
             and billing_job.project_id == batch.project_id
             and billing_job.chargeable
             and billing_job.capability == "image"
-            and billing_job.status in RESOURCE_IMAGE_RETRYABLE_NO_CHARGE_STATUSES
+            and billing_job.status in RETRYABLE_NO_CHARGE_STATUSES
         ):
             item.settlement_key = uuid.uuid4().hex
             item.billing_job_id = None
@@ -453,6 +460,146 @@ class TaskService:
             self._emit_item(batch, dependent, "Task dependency reopened for retry")
         self._emit_batch(batch, "Task retry accepted")
         return item
+
+    def _rotate_failed_generation_unit_execution(
+        self,
+        *,
+        item: TaskItem,
+        batch: TaskBatch,
+        billing_job: GenerationJob | None,
+    ) -> bool:
+        unit = self._rotatable_failed_generation_unit(
+            item=item,
+            batch=batch,
+            billing_job=billing_job,
+            lock=True,
+            strict=True,
+        )
+        if unit is None:
+            return False
+        assert billing_job is not None
+        assert item.generation_key is not None
+
+        previous_generation_key = item.generation_key
+        previous_settlement_key = item.settlement_key
+        diagnostics = deepcopy(unit.diagnostics_json or {})
+        retry_history = diagnostics.get("execution_retries")
+        if not isinstance(retry_history, list):
+            retry_history = []
+        retry_history.append(
+            {
+                "execution_cycle": len(retry_history) + 1,
+                "generation_key": previous_generation_key,
+                "settlement_key": previous_settlement_key,
+                "billing_job_id": billing_job.id,
+                "billing_status": billing_job.status,
+                "attempt_count": item.attempt_count,
+                "error_code": item.error_code,
+                "retired_at": _now().isoformat(),
+            }
+        )
+        diagnostics["execution_retries"] = retry_history
+
+        new_generation_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "previous_generation_key": previous_generation_key,
+                    "previous_billing_job_id": billing_job.id,
+                    "execution_cycle": len(retry_history),
+                    "nonce": uuid.uuid4().hex,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        unit.execution_key = new_generation_key
+        unit.billing_job_id = None
+        unit.status = "queued"
+        unit.output_asset_id = None
+        unit.output_path = None
+        unit.source_duration_seconds = None
+        unit.diagnostics_json = diagnostics
+
+        item.generation_key = new_generation_key
+        item.settlement_key = new_generation_key[:32]
+        item.billing_job_id = None
+        item.attempt_count = 0
+        item.max_attempts = 9
+        item.provider_wait_started_at = None
+        item.provider_next_poll_at = None
+        item.provider_poll_count = 0
+        return True
+
+    def _rotatable_failed_generation_unit(
+        self,
+        *,
+        item: TaskItem,
+        batch: TaskBatch,
+        billing_job: GenerationJob | None,
+        lock: bool,
+        strict: bool,
+    ) -> Any | None:
+        if (
+            item.status != "failed"
+            or item.task_type != GENERATION_UNIT_VIDEO_TASK_TYPE
+            or billing_job is None
+            or billing_job.status not in RETRYABLE_NO_CHARGE_STATUSES
+        ):
+            return None
+        if (
+            item.target_entity_type != "generation_unit"
+            or item.target_entity_id is None
+            or item.target_entity_version is None
+            or item.generation_key is None
+            or billing_job.id != item.billing_job_id
+            or billing_job.id != item.settlement_key
+            or billing_job.user_id != batch.owner_user_id
+            or billing_job.project_id != batch.project_id
+            or not billing_job.chargeable
+            or billing_job.capability != "video"
+            or billing_job.operation
+            != (
+                f"generation_unit:{item.target_entity_id}:"
+                f"v{item.target_entity_version}"
+            )
+            or billing_job.model != item.model
+            or billing_job.provider_method != "POST"
+            or billing_job.provider_route != "/v1/videos"
+            or billing_job.result_visible
+        ):
+            if strict:
+                raise TaskStateError(
+                    "generation_unit_retry_identity_invalid",
+                    "Failed generation unit billing identity cannot be replaced safely",
+                )
+            return None
+
+        from server.app.generation_units.models import VideoGenerationUnit
+
+        query = (
+            select(VideoGenerationUnit)
+            .where(
+                VideoGenerationUnit.project_id == batch.project_id,
+                VideoGenerationUnit.id == item.target_entity_id,
+                VideoGenerationUnit.revision == item.target_entity_version,
+            )
+        )
+        unit = self.db.scalar(query.with_for_update() if lock else query)
+        if (
+            unit is None
+            or unit.task_item_id != item.id
+            or unit.execution_key != item.generation_key
+            or unit.billing_job_id != billing_job.id
+            or unit.status != "failed"
+            or unit.active
+        ):
+            if strict:
+                raise TaskStateError(
+                    "generation_unit_retry_identity_invalid",
+                    "Failed generation unit execution ledger cannot be replaced safely",
+                )
+            return None
+        return unit
 
     def transition_item(
         self,
@@ -1516,6 +1663,23 @@ class TaskService:
         item: TaskItem,
         dependency_map: dict[str, list[tuple[str, str]]],
     ) -> TaskItemResponse:
+        fresh_generation_retry = False
+        if (
+            item.status == "failed"
+            and item.task_type == GENERATION_UNIT_VIDEO_TASK_TYPE
+        ):
+            batch = self.db.get(TaskBatch, item.batch_id)
+            billing_job = self._generation_job_for_item(item)
+            fresh_generation_retry = bool(
+                batch is not None
+                and self._rotatable_failed_generation_unit(
+                    item=item,
+                    batch=batch,
+                    billing_job=billing_job,
+                    lock=False,
+                    strict=False,
+                )
+            )
         return TaskItemResponse(
             id=item.id,
             batch_id=item.batch_id,
@@ -1534,7 +1698,8 @@ class TaskService:
             attempt_count=item.attempt_count,
             max_attempts=item.max_attempts,
             progress=item.progress,
-            retryable=item.retryable and item.attempt_count < 10,
+            retryable=(item.retryable and item.attempt_count < 10)
+            or fresh_generation_retry,
             error_code=item.error_code,
             error_message=item.error_message,
             result=item.result_snapshot,

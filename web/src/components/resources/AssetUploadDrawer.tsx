@@ -1,6 +1,6 @@
 import { Upload, X } from "lucide-react";
 import { useEffect, useState, type FormEvent, type RefObject } from "react";
-import type { ReferenceImageUploadRequest } from "../../domain/types";
+import type { AssetRecord, ReferenceImageUploadRequest } from "../../domain/types";
 import { getStrings, type UIStrings } from "../../i18n";
 import { SelectMenu } from "../../shared/ui";
 import { useModalFocus } from "../accessibility/useModalFocus";
@@ -9,6 +9,7 @@ export interface AssetUploadDrawerProps {
   busy: boolean;
   error: string | null;
   returnFocusRef: RefObject<HTMLElement | null>;
+  resource?: AssetRecord;
   strings?: UIStrings["resources"];
   onClose: () => void;
   onDirtyChange?: (dirty: boolean) => void;
@@ -19,17 +20,20 @@ export function AssetUploadDrawer({
   busy,
   error,
   returnFocusRef,
+  resource,
   strings = getStrings("zh").resources,
   onClose,
   onDirtyChange,
   onSubmit,
 }: AssetUploadDrawerProps) {
-  const [kind, setKind] = useState<ReferenceImageUploadRequest["kind"]>("character");
-  const [label, setLabel] = useState("");
-  const [description, setDescription] = useState("");
-  const [prompt, setPrompt] = useState("");
+  const [kind, setKind] = useState<ReferenceImageUploadRequest["kind"]>(resource?.kind ?? "character");
+  const [label, setLabel] = useState(resource?.label ?? "");
+  const [description, setDescription] = useState(resource?.description ?? "");
+  const [prompt, setPrompt] = useState(resource?.prompt ?? "");
   const [file, setFile] = useState<File | null>(null);
-  const dirty = kind !== "character" || Boolean(label || description || prompt || file);
+  const dirty = resource
+    ? Boolean(file)
+    : kind !== "character" || Boolean(label || description || prompt || file);
 
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
@@ -52,6 +56,7 @@ export function AssetUploadDrawer({
       description: description.trim(),
       prompt: prompt.trim(),
       file,
+      ...(resource ? { resource_id: resource.id } : {}),
     } satisfies ReferenceImageUploadRequest;
     void onSubmit(payload);
   };
@@ -74,7 +79,7 @@ export function AssetUploadDrawer({
       onKeyDown={onKeyDown}
     >
       <div className="section-heading">
-        <h2 id="resource-upload-title">{strings.uploadDialogTitle}</h2>
+        <h2 id="resource-upload-title">{resource ? strings.uploadPlannedReferenceTitle(resource.label) : strings.uploadDialogTitle}</h2>
         <button
           type="button"
           title={strings.closeUploadAction}
@@ -87,7 +92,7 @@ export function AssetUploadDrawer({
       </div>
 
       <form className="resource-form" onSubmit={handleSubmit}>
-        <SelectMenu
+        {resource ? <p className="resource-plan-prefill" role="status">{strings.uploadPlannedReferenceNotice}</p> : <><SelectMenu
           disabled={busy}
           label={strings.kindLabel}
           value={kind}
@@ -118,7 +123,7 @@ export function AssetUploadDrawer({
             disabled={busy}
             onChange={(event) => setPrompt(event.target.value)}
           />
-        </label>
+        </label></>}
         <label>
           <span>{strings.fileLabel}</span>
           <input

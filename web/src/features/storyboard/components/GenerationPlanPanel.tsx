@@ -267,7 +267,9 @@ export function GenerationPlanPanel({
                       <span>{strings.regenerateUnitAction}</span>
                     </button>
                   ) : null}
-                  {task?.item.status === "failed" && task.item.retryable && onRetryItem ? (
+                  {task?.item.status === "failed"
+                    && (task.item.attempt_count < 10 || task.item.retryable)
+                    && onRetryItem ? (
                     <button
                       type="button"
                       className={styles.retryAction}
