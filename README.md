@@ -1,12 +1,17 @@
 <p align="center">
-  <img src="assets/logo.png" alt="OpenMontage" width="200">
+  <img src="assets/logo.png" alt="Mise Studio" width="180">
 </p>
 
-<h1 align="center">OpenMontage</h1>
+<h1 align="center">Mise Studio</h1>
 
-<p align="center"><strong>The first open-source, agentic video production system.</strong></p>
+<p align="center"><strong>An agentic video production workbench, built on OpenMontage.</strong></p>
 
 <p align="center">
+  从故事、研究和脚本，到分镜、素材、配音、时间线与最终渲染，把一次 Prompt 变成可编辑的视频生产流程。
+</p>
+
+<p align="center">
+  <a href="#mise-studio-workbench">Studio Workbench</a> &nbsp;·&nbsp;
   <a href="#start-from-a-video-you-already-love">Paste A Video</a> &nbsp;·&nbsp;
   <a href="#quick-start">Quick Start</a> &nbsp;·&nbsp;
   <a href="#try-these-prompts">Try These Prompts</a> &nbsp;·&nbsp;
@@ -37,6 +42,24 @@
   <a href="https://x.com/calesthioailabs"><img src="https://img.shields.io/badge/X-%40calesthioailabs-111111?style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
   <a href="https://github.com/calesthio/OpenMontage/discussions"><img src="https://img.shields.io/badge/Community-GitHub%20Discussions-0b1220?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Discussions"></a>
 </p>
+
+---
+
+## Mise Studio Workbench
+
+Mise Studio 是我基于 [OpenMontage](https://github.com/calesthio/OpenMontage) 二次开发的视频生成网站。它保留 OpenMontage 的多智能体生产能力，并把流程重新组织成一个可查看、可修改、可恢复的前端工作台：
+
+- **故事与分镜**：把主题、研究和脚本拆成场景与镜头，保留结构化镜头语言。
+- **素材与一致性**：管理角色、场景和道具引用，让局部重生成仍然知道上下文。
+- **预览与时间线**：在同一界面查看当前镜头、视频片段、配音轨和片段时长。
+- **生产与恢复**：追踪异步生成进度、报价确认、失败状态与最近一次渲染结果。
+- **最终合成**：使用 Remotion 与 FFmpeg 组织画面、字幕、音频和交付文件。
+
+<p align="center">
+  <img src="web/public/product-workbench-preview.png" alt="Mise Studio storyboard, preview, timeline and property workbench" width="100%">
+</p>
+
+> **Project note:** this repository is a personal product fork and remains based on the AGPL-licensed OpenMontage project. Upstream attribution, license terms, provider documentation, and the original production pipeline are retained below.
 
 ---
 
